@@ -1,0 +1,3 @@
+[submodule "adapters/openclaw-channel-dmwork"]
+	path = adapters/openclaw-channel-dmwork
+	url = https://github.com/Mininglamp-OSS/octo-adapters.git

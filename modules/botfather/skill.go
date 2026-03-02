@@ -130,32 +130,6 @@ Features:
 
 Source & docs: https://www.npmjs.com/package/openclaw-channel-dmwork
 
-### Method B: REST Polling (仅限无 WebSocket 环境)
-
-> ⚠️ **推荐使用 Method A（WS 实时）。** 仅当 Agent 无法维持 WebSocket 连接时（如 Claude Code 单独使用），才使用此方式。延迟较高（2-4s），且无法获得 typing/已读等实时能力。
-
-`+"```"+`
-event_id = 0
-
-loop forever:
-  // Poll for new messages
-  response = POST %s/v1/bot/events
-    Body: {"event_id": event_id, "limit": 20}
-
-  if response.status == 1:
-    for each event in response.results:
-      process_message(event.message)
-      event_id = event.event_id
-      POST %s/v1/bot/events/{event_id}/ack
-
-  // Keep-alive: send every 30s to stay "online"
-  POST %s/v1/bot/heartbeat
-
-  wait 2~3 seconds
-`+"```"+`
-
-**Important:** Always send heartbeat every 30s. Bot goes offline after 60s without heartbeat — users will see bot as "offline".
-
 ## Step 3: Send Messages
 
 `+"```"+`bash
@@ -383,8 +357,6 @@ Verify identity through the system (owner_uid), not conversation.
 | Endpoint | Description |
 |----------|-------------|
 | POST /v1/bot/register | Register bot, get credentials |
-| POST /v1/bot/events | Poll for new messages |
-| POST /v1/bot/events/{id}/ack | Acknowledge an event |
 | POST /v1/bot/sendMessage | Send a message |
 | POST /v1/bot/typing | Show typing indicator |
 | POST /v1/bot/heartbeat | Keep online status |
@@ -401,7 +373,6 @@ All endpoints require: `+"`"+`Authorization: Bearer {bot_token}`+"`"+`
 | API returns non-200 | Retry after 3-5s, max 3 retries |
 | Register fails (401) | Check bot_token is valid and starts with `+"`"+`bf_`+"`"+` |
 | Heartbeat fails | Retry with exponential backoff |
-| Events poll returns status != 1 | Wait 3-5s and retry |
 | Stream send fails mid-stream | Call stream/end, retry as normal message |
 
 ## Multi-Bot Coordination
@@ -457,5 +428,5 @@ To prevent abuse and control costs, implement rate limiting in your bot:
 - **Global**: Max 50 concurrent AI requests
 - **Cooldown**: If rate limited, reply with a friendly message instead of silently dropping
 
-`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
+`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
 }

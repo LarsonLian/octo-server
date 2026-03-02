@@ -116,7 +116,8 @@ channels:
     apiUrl: "%s"
 `+"```"+`
 
-Then restart:
+The gateway auto-detects config changes and reloads the plugin.
+If the gateway was started before plugin install, restart it after your current conversation ends.
 
 `+"```"+`bash
 openclaw gateway restart

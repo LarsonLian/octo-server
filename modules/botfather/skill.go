@@ -41,7 +41,7 @@ func deriveWSURL(cfg *config.Config) string {
 func generateSkillMD(apiURL, wsURL string) string {
 	return fmt.Sprintf(`---
 name: dmwork
-version: 0.1.0
+version: 0.2.0
 description: DMWork Bot - AI Agent messaging via WuKongIM
 metadata: {"dmwork":{"category":"messaging","api_base":"%s"}}
 ---
@@ -130,9 +130,9 @@ Features:
 
 Source & docs: https://www.npmjs.com/package/openclaw-channel-dmwork
 
-### Method B: REST Polling (Fallback)
+### Method B: REST Polling (仅限无 WebSocket 环境)
 
-For agents that cannot maintain WebSocket connections (e.g. Claude Code), poll for messages via REST API.
+> ⚠️ **推荐使用 Method A（WS 实时）。** 仅当 Agent 无法维持 WebSocket 连接时（如 Claude Code 单独使用），才使用此方式。延迟较高（2-4s），且无法获得 typing/已读等实时能力。
 
 `+"```"+`
 event_id = 0

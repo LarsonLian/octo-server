@@ -284,8 +284,10 @@ func (bf *BotFather) register(c *wkhttp.Context) {
 	}
 
 	// 获取或创建 IM Token
+	// force_refresh=true 时忽略缓存，强制从 WuKongIM 重新申请（适用于 WuKongIM 重启后 token 失效场景）
+	forceRefresh := c.Query("force_refresh") == "true"
 	imToken := robot.IMTokenCache
-	if strings.TrimSpace(imToken) == "" {
+	if forceRefresh || strings.TrimSpace(imToken) == "" {
 		imToken, err = bf.getOrCreateIMToken(robot.RobotID)
 		if err != nil {
 			bf.Error("获取IM Token失败", zap.Error(err))

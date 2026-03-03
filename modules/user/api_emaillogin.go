@@ -146,10 +146,7 @@ func (u *User) emailRegister(c *wkhttp.Context) {
 		c.ResponseError(errors.New("注册失败！"))
 		return
 	}
-	c.Response(map[string]interface{}{
-		"data":                      result,
-		"need_upload_web3publickey": 1,
-	})
+	c.Response(result)
 	go u.sendBotWelcomeMessages(uid)
 }
 
@@ -228,14 +225,7 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 		c.ResponseError(err)
 		return
 	}
-	needUploadWeb3PublicKey := 0
-	if userInfo.Web3PublicKey == "" {
-		needUploadWeb3PublicKey = 1
-	}
-	c.Response(map[string]interface{}{
-		"data":                      result,
-		"need_upload_web3publickey": needUploadWeb3PublicKey,
-	})
+	c.Response(result)
 	publicIP := util.GetClientPublicIP(c.Request)
 	go u.sentWelcomeMsg(publicIP, userInfo.UID)
 }

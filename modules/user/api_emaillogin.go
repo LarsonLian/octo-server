@@ -1,0 +1,309 @@
+package user
+
+import (
+	"context"
+	"strings"
+
+	commonapi "github.com/TangSengDaoDao/TangSengDaoDaoServer/modules/base/common"
+	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
+	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/util"
+	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/wkhttp"
+	"github.com/opentracing/opentracing-go"
+	"github.com/pkg/errors"
+	"go.uber.org/zap"
+)
+
+// emailSendCode 发送邮箱验证码
+func (u *User) emailSendCode(c *wkhttp.Context) {
+	type reqVO struct {
+		Email    string `json:"email"`
+		CodeType int    `json:"code_type"` // 0:注册 1:登录 2:忘记密码
+	}
+	var req reqVO
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求数据格式有误！"))
+		return
+	}
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	if req.Email == "" {
+		c.ResponseError(errors.New("邮箱不能为空"))
+		return
+	}
+	if !isValidEmail(req.Email) {
+		c.ResponseError(errors.New("邮箱格式不正确"))
+		return
+	}
+
+	emailService := commonapi.NewEmailService(u.ctx)
+	if err := emailService.SendVerifyCode(context.Background(), req.Email, commonapi.CodeType(req.CodeType)); err != nil {
+		u.Error("发送邮箱验证码失败", zap.String("email", req.Email), zap.Error(err))
+		c.ResponseError(err)
+		return
+	}
+	c.ResponseOK()
+}
+
+// emailRegister 邮箱注册
+func (u *User) emailRegister(c *wkhttp.Context) {
+	if !u.ctx.GetConfig().Register.EmailOn {
+		c.ResponseError(errors.New("暂不支持邮箱注册"))
+		return
+	}
+	type reqVO struct {
+		Email    string     `json:"email"`
+		Code     string     `json:"code"`
+		Password string     `json:"password"`
+		Name     string     `json:"name"`
+		Flag     uint8      `json:"flag"`
+		Device   *deviceReq `json:"device"`
+	}
+	var req reqVO
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求数据格式有误！"))
+		return
+	}
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	if req.Email == "" {
+		c.ResponseError(errors.New("邮箱不能为空"))
+		return
+	}
+	if !isValidEmail(req.Email) {
+		c.ResponseError(errors.New("邮箱格式不正确"))
+		return
+	}
+	if strings.TrimSpace(req.Code) == "" {
+		c.ResponseError(errors.New("验证码不能为空"))
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		c.ResponseError(errors.New("密码不能为空"))
+		return
+	}
+
+	// 验证邮箱验证码
+	emailService := commonapi.NewEmailService(u.ctx)
+	if err := emailService.Verify(context.Background(), req.Email, req.Code, commonapi.CodeTypeRegister); err != nil {
+		c.ResponseError(err)
+		return
+	}
+
+	// 检查邮箱是否已注册
+	existUser, err := u.db.QueryByEmail(req.Email)
+	if err != nil {
+		u.Error("查询用户信息失败", zap.String("email", req.Email), zap.Error(err))
+		c.ResponseError(errors.New("查询用户信息失败"))
+		return
+	}
+	if existUser != nil {
+		c.ResponseError(errors.New("该邮箱已被注册"))
+		return
+	}
+
+	uid := util.GenerUUID()
+	model := &createUserModel{
+		UID:      uid,
+		Sex:      1,
+		Name:     req.Name,
+		Email:    req.Email,
+		Username: req.Email,
+		Password: req.Password,
+		Flag:     int(req.Flag),
+		Device:   req.Device,
+	}
+
+	tx, err := u.db.session.Begin()
+	if err != nil {
+		u.Error("创建事务失败", zap.Error(err))
+		c.ResponseError(errors.New("创建事务失败"))
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r)
+		}
+	}()
+
+	publicIP := util.GetClientPublicIP(c.Request)
+	registerSpan := u.ctx.Tracer().StartSpan(
+		"user.emailRegister",
+		opentracing.ChildOf(c.GetSpanContext()),
+	)
+	defer registerSpan.Finish()
+	registerSpanCtx := u.ctx.Tracer().ContextWithSpan(context.Background(), registerSpan)
+
+	result, err := u.createUserWithRespAndTx(registerSpanCtx, model, publicIP, nil, tx, func() error {
+		if err := tx.Commit(); err != nil {
+			tx.Rollback()
+			u.Error("数据库事务提交失败", zap.Error(err))
+			c.ResponseError(errors.New("数据库事务提交失败"))
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		tx.Rollback()
+		c.ResponseError(errors.New("注册失败！"))
+		return
+	}
+	c.Response(map[string]interface{}{
+		"data":                      result,
+		"need_upload_web3publickey": 1,
+	})
+	go u.sendBotWelcomeMessages(uid)
+}
+
+// emailLogin 邮箱登录（验证码方式）
+func (u *User) emailLogin(c *wkhttp.Context) {
+	type reqVO struct {
+		Email    string     `json:"email"`
+		Code     string     `json:"code"`
+		Password string     `json:"password"`
+		Flag     uint8      `json:"flag"`
+		Device   *deviceReq `json:"device"`
+	}
+	var req reqVO
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求数据格式有误！"))
+		return
+	}
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	if req.Email == "" {
+		c.ResponseError(errors.New("邮箱不能为空"))
+		return
+	}
+	if !isValidEmail(req.Email) {
+		c.ResponseError(errors.New("邮箱格式不正确"))
+		return
+	}
+	if req.Code == "" && req.Password == "" {
+		c.ResponseError(errors.New("验证码或密码不能为空"))
+		return
+	}
+
+	loginSpan := u.ctx.Tracer().StartSpan(
+		"user.emailLogin",
+		opentracing.ChildOf(c.GetSpanContext()),
+	)
+	defer loginSpan.Finish()
+	loginSpanCtx := u.ctx.Tracer().ContextWithSpan(context.Background(), loginSpan)
+
+	userInfo, err := u.db.QueryByEmail(req.Email)
+	if err != nil {
+		u.Error("查询用户信息失败", zap.String("email", req.Email), zap.Error(err))
+		c.ResponseError(errors.New("查询用户信息失败"))
+		return
+	}
+	if userInfo == nil {
+		c.ResponseError(errors.New("该邮箱未注册"))
+		return
+	}
+	if userInfo.IsDestroy == 1 || userInfo.Status == 0 {
+		c.ResponseError(errors.New("该账号已注销或被禁用"))
+		return
+	}
+
+	// 优先验证码登录，其次密码登录
+	if req.Code != "" {
+		emailService := commonapi.NewEmailService(u.ctx)
+		if err := emailService.Verify(loginSpanCtx, req.Email, req.Code, commonapi.CodeTypeEmailLogin); err != nil {
+			c.ResponseError(err)
+			return
+		}
+	} else {
+		matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
+		if !matched {
+			c.ResponseError(errors.New("密码不正确！"))
+			return
+		}
+		if needsMigration {
+			if newHash, hashErr := HashPassword(req.Password); hashErr == nil {
+				_ = u.db.updatePassword(newHash, userInfo.UID)
+			}
+		}
+	}
+
+	result, err := u.execLogin(userInfo, config.DeviceFlag(req.Flag), req.Device, loginSpanCtx)
+	if err != nil {
+		c.ResponseError(err)
+		return
+	}
+	needUploadWeb3PublicKey := 0
+	if userInfo.Web3PublicKey == "" {
+		needUploadWeb3PublicKey = 1
+	}
+	c.Response(map[string]interface{}{
+		"data":                      result,
+		"need_upload_web3publickey": needUploadWeb3PublicKey,
+	})
+	publicIP := util.GetClientPublicIP(c.Request)
+	go u.sentWelcomeMsg(publicIP, userInfo.UID)
+}
+
+// emailForgetPwd 邮箱忘记密码（重置密码）
+func (u *User) emailForgetPwd(c *wkhttp.Context) {
+	type reqVO struct {
+		Email    string `json:"email"`
+		Code     string `json:"code"`
+		Password string `json:"password"`
+	}
+	var req reqVO
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求数据格式有误！"))
+		return
+	}
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	if req.Email == "" {
+		c.ResponseError(errors.New("邮箱不能为空"))
+		return
+	}
+	if strings.TrimSpace(req.Code) == "" {
+		c.ResponseError(errors.New("验证码不能为空"))
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		c.ResponseError(errors.New("新密码不能为空"))
+		return
+	}
+
+	// 验证验证码
+	emailService := commonapi.NewEmailService(u.ctx)
+	if err := emailService.Verify(context.Background(), req.Email, req.Code, commonapi.CodeTypeForgetLoginPWD); err != nil {
+		c.ResponseError(err)
+		return
+	}
+
+	userInfo, err := u.db.QueryByEmail(req.Email)
+	if err != nil {
+		u.Error("查询用户信息失败", zap.String("email", req.Email), zap.Error(err))
+		c.ResponseError(errors.New("查询用户信息失败"))
+		return
+	}
+	if userInfo == nil {
+		c.ResponseError(errors.New("该邮箱未注册"))
+		return
+	}
+
+	newHash, err := HashPassword(req.Password)
+	if err != nil {
+		u.Error("密码哈希失败", zap.Error(err))
+		c.ResponseError(errors.New("密码处理失败"))
+		return
+	}
+	if err := u.db.updatePassword(newHash, userInfo.UID); err != nil {
+		u.Error("更新密码失败", zap.Error(err))
+		c.ResponseError(errors.New("重置密码失败"))
+		return
+	}
+	c.ResponseOK()
+}
+
+// isValidEmail 简单的邮箱格式校验
+func isValidEmail(email string) bool {
+	at := strings.Index(email, "@")
+	if at < 1 {
+		return false
+	}
+	dot := strings.LastIndex(email[at:], ".")
+	return dot > 1 && at+dot < len(email)-1
+}

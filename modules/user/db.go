@@ -51,6 +51,13 @@ func (d *DB) QueryByUsernameCxt(ctx context.Context, username string) (*Model, e
 	return d.QueryByUsername(username)
 }
 
+// QueryByEmail 通过邮箱查询用户信息
+func (d *DB) QueryByEmail(email string) (*Model, error) {
+	var model *Model
+	_, err := d.session.Select("*").From("user").Where("email=? and email<>''", email).Load(&model)
+	return model, err
+}
+
 // QueryByPhone 通过手机号和区号查询用户信息
 func (d *DB) QueryByPhone(zone string, phone string) (*Model, error) {
 	var model *Model

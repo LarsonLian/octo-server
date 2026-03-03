@@ -171,6 +171,10 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		v.POST("/user/login", u.login)                       // 用户登录
 		v.POST("/user/usernamelogin", u.usernameLogin)       // 用户名登录
 		v.POST("/user/usernameregister", u.usernameRegister) // 用户名注册
+		v.POST("/user/emaillogin", u.emailLogin)              // 邮箱登录
+		v.POST("/user/emailregister", u.emailRegister)        // 邮箱注册
+		v.POST("/user/email/sendcode", u.emailSendCode)       // 发送邮箱验证码
+		v.POST("/user/email/forgetpwd", u.emailForgetPwd)     // 邮箱忘记密码
 
 		v.POST("/user/pwdforget_web3", u.resetPwdWithWeb3PublicKey) // 通过web3公钥重置密码
 		v.GET("/user/web3verifytext", u.getVerifyText)              // 获取验证字符串
@@ -2626,6 +2630,7 @@ func (u *User) createUserWithRespAndTx(registerSpanCtx context.Context, createUs
 	userModel.QRVercode = fmt.Sprintf("%s@%d", util.GenerUUID(), common.QRCode)
 	userModel.Phone = createUser.Phone
 	userModel.Zone = createUser.Zone
+	userModel.Email = createUser.Email
 	if createUser.Phone != "" {
 		userModel.Username = fmt.Sprintf("%s%s", createUser.Zone, createUser.Phone)
 	}
@@ -2750,6 +2755,7 @@ type createUserModel struct {
 	Name           string
 	Zone           string
 	Phone          string
+	Email          string
 	Sex            int
 	Password       string
 	WXOpenid       string

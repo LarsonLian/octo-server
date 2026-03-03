@@ -14,6 +14,7 @@ const (
 	CodeTypeCheckMobile
 	// DestroyAccount 注销账号
 	CodeTypeDestroyAccount
+	CodeTypeEmailLogin
 )
 
 const (

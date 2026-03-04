@@ -26,7 +26,7 @@ func NewDB(ctx *config.Context) *DB {
 // QueryByKeyword 通过用户名查询用户信息
 func (d *DB) QueryByKeyword(keyword string) (*Model, error) {
 	var model *Model
-	_, err := d.session.Select("*").From("user").Where("(short_no=? and short_no<>'') or (username=? and username<>'') or (phone=? and phone<>'') ", keyword, keyword, keyword).Load(&model)
+	_, err := d.session.Select("*").From("user").Where("(short_no=? and short_no<>'') or (username=? and username<>'') or (phone=? and phone<>'') or (email=? and email<>'')", keyword, keyword, keyword, keyword).Load(&model)
 	return model, err
 }
 

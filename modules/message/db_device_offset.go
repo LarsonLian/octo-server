@@ -1,7 +1,7 @@
 package message
 
 import (
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/db"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/db"
 	"github.com/gocraft/dbr/v2"
 )
 

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	unisms "github.com/apistd/uni-go-sdk/sms"
 	"go.uber.org/zap"
 )

@@ -3,7 +3,7 @@ package user
 import (
 	"strings"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"golang.org/x/crypto/bcrypt"
 )
 

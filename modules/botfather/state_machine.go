@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
+	"github.com/Mininglamp-OSS/octo-lib/config"
 )
 
 // stateMachine Redis Hash状态机，管理BotFather多轮对话状态

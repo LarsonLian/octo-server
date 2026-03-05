@@ -3,14 +3,14 @@ package event
 import (
 	"fmt"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServer/modules/file"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/log"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-server/modules/file"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
 
-	et "github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/wkevent"
+	et "github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 )
 
 const (

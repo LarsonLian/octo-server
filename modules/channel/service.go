@@ -1,8 +1,8 @@
 package channel
 
 import (
-	chservice "github.com/TangSengDaoDao/TangSengDaoDaoServer/modules/channel/service"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
+	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
+	"github.com/Mininglamp-OSS/octo-lib/config"
 )
 
 type service struct {

@@ -3,7 +3,7 @@ package group
 import (
 	"errors"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServer/modules/source"
+	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	"go.uber.org/zap"
 )
 

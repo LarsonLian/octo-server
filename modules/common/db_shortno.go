@@ -1,8 +1,8 @@
 package common
 
 import (
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
-	dbs "github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/db"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	dbs "github.com/Mininglamp-OSS/octo-lib/pkg/db"
 	"github.com/gocraft/dbr/v2"
 )
 

@@ -3,7 +3,7 @@ package robot
 import (
 	"errors"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
+	"github.com/Mininglamp-OSS/octo-lib/config"
 )
 
 type robotEvent struct {

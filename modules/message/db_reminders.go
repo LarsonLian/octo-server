@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/db"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/db"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
 )

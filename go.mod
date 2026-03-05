@@ -1,10 +1,9 @@
-module github.com/TangSengDaoDao/TangSengDaoDaoServer
+module github.com/Mininglamp-OSS/octo-server
 
 go 1.20
 
 require (
 	firebase.google.com/go/v4 v4.13.0
-	github.com/TangSengDaoDao/TangSengDaoDaoServerLib v1.0.9-0.20250417083430-fee7cd58a990
 	github.com/alibabacloud-go/darabonba-openapi v0.2.1
 	github.com/alibabacloud-go/sms-intl-20180501 v1.0.1
 	github.com/alibabacloud-go/tea v1.2.1
@@ -12,6 +11,7 @@ require (
 	github.com/aliyun/aliyun-oss-go-sdk v2.2.7+incompatible
 	github.com/apistd/uni-go-sdk v0.0.2
 	github.com/disintegration/imaging v1.6.2
+	github.com/Mininglamp-OSS/octo-lib v0.0.0-20260305073253-5aecd64889d9
 	github.com/eapache/queue v1.1.0
 	github.com/ethereum/go-ethereum v1.12.2
 	github.com/gin-gonic/gin v1.9.1
@@ -37,6 +37,7 @@ require (
 	github.com/tidwall/gjson v1.15.0
 	go.uber.org/zap v1.24.0
 	golang.org/x/crypto v0.14.0
+	golang.org/x/image v0.5.0
 	google.golang.org/api v0.122.0
 	google.golang.org/grpc v1.57.0
 	google.golang.org/protobuf v1.31.0
@@ -149,7 +150,6 @@ require (
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.8.0 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/image v0.5.0 // indirect
 	golang.org/x/net v0.17.0 // indirect
 	golang.org/x/oauth2 v0.7.0 // indirect
 	golang.org/x/sync v0.3.0 // indirect
@@ -166,5 +166,3 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/TangSengDaoDao/TangSengDaoDaoServerLib => /home/yu/TangSengDaoDaoServerLib

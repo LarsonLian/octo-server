@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/log"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	openapi "github.com/alibabacloud-go/darabonba-openapi/client"
 	sms_intl20180501 "github.com/alibabacloud-go/sms-intl-20180501/client"
 	"github.com/alibabacloud-go/tea/tea"

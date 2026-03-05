@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
+	"github.com/Mininglamp-OSS/octo-lib/config"
 )
 
 // deriveWSURL 从 baseURL 或 WuKongIM API URL 推导出 WebSocket URL

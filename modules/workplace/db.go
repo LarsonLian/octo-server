@@ -1,9 +1,9 @@
 package workplace
 
 import (
-	"github.com/TangSengDaoDao/TangSengDaoDaoServer/pkg/util"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
-	dba "github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/db"
+	"github.com/Mininglamp-OSS/octo-server/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	dba "github.com/Mininglamp-OSS/octo-lib/pkg/db"
 	"github.com/gocraft/dbr/v2"
 )
 

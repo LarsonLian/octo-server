@@ -1,59 +1,59 @@
 name: 💡 Feature Request
-description: 提出新功能建议
+description: Suggest a new feature
 labels: ["feature"]
 body:
   - type: markdown
     attributes:
       value: |
-        感谢你的建议！请描述清楚需求背景和期望方案。
+        Thanks for your suggestion! Please describe the background and your proposed solution clearly.
   - type: textarea
     id: problem
     attributes:
-      label: 问题 / 动机
-      description: 你遇到了什么问题，或者为什么需要这个功能？
-      placeholder: 目前 Bot 无法知道自己在哪些群组里，无法主动推送消息到群
+      label: Problem / Motivation
+      description: What problem are you facing, or why do you need this feature?
+      placeholder: Bots currently cannot know which groups they belong to, making it impossible to proactively push messages to groups
     validations:
       required: true
   - type: textarea
     id: solution
     attributes:
-      label: 期望方案
-      description: 你希望怎么解决？
-      placeholder: 提供 GET /v1/bot/groups API，返回 Bot 所在的群组列表
+      label: Proposed Solution
+      description: How would you like this to be solved?
+      placeholder: Provide a GET /v1/bot/groups API that returns the list of groups the Bot belongs to
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
-      label: 替代方案
-      description: 你考虑过其他方案吗？
+      label: Alternatives Considered
+      description: Have you considered other approaches?
     validations:
       required: false
   - type: dropdown
     id: component
     attributes:
-      label: 涉及组件
+      label: Related Component
       options:
-        - 后端 (Server)
-        - Web 前端
-        - Android 客户端
+        - Backend (Server)
+        - Web Frontend
+        - Android Client
         - Bot API / BotFather
         - OpenClaw Adapter
         - WuKongIM
-        - 其他
+        - Other
     validations:
       required: true
   - type: textarea
     id: technical
     attributes:
-      label: 技术方案（可选）
-      description: 如有初步想法：涉及哪些模块、数据模型变更、API 变化等
+      label: Technical Approach (optional)
+      description: If you have initial ideas — affected modules, data model changes, API changes, etc.
     validations:
       required: false
   - type: textarea
     id: context
     attributes:
-      label: 补充信息
-      description: 原型图、参考链接、相关 Issue 等
+      label: Additional Context
+      description: Mockups, reference links, related issues, etc.
     validations:
       required: false

@@ -1,105 +1,105 @@
-name: 🐛 Bug 报告
-description: 报告一个 Bug
+name: 🐛 Bug Report
+description: Report a bug
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        感谢你报告 Bug！请尽量填写完整信息，帮助我们快速定位问题。
+        Thanks for reporting a bug! Please fill in as much detail as possible to help us locate the issue quickly.
   - type: textarea
     id: summary
     attributes:
-      label: 问题描述
-      description: 简要描述遇到的问题
-      placeholder: 发送消息后，对方收到两条重复消息
+      label: Description
+      description: Briefly describe the issue
+      placeholder: After sending a message, the recipient receives two duplicate messages
     validations:
       required: true
   - type: textarea
     id: steps
     attributes:
-      label: 复现步骤
-      description: 按顺序列出复现步骤
+      label: Steps to Reproduce
+      description: List the steps to reproduce in order
       placeholder: |
-        1. 创建群聊
-        2. 添加 Bot 到群聊
-        3. 发送消息 "test"
-        4. 观察：Bot 回复了两次
+        1. Create a group chat
+        2. Add a Bot to the group
+        3. Send message "test"
+        4. Observe: Bot replies twice
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: 期望行为
-      placeholder: Bot 只回复一次
+      label: Expected Behavior
+      placeholder: Bot replies only once
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
-      label: 实际行为
-      placeholder: Bot 回复了两次，内容完全相同
+      label: Actual Behavior
+      placeholder: Bot replies twice with identical content
     validations:
       required: true
   - type: input
     id: version
     attributes:
-      label: DMWork 版本
+      label: DMWork Version
       placeholder: "v1.1.1"
     validations:
       required: true
   - type: dropdown
     id: component
     attributes:
-      label: 影响组件
+      label: Affected Component
       options:
-        - 后端 (Server)
-        - Web 前端
-        - Android 客户端
+        - Backend (Server)
+        - Web Frontend
+        - Android Client
         - Bot API / BotFather
         - OpenClaw Adapter
         - WuKongIM
-        - 其他
+        - Other
     validations:
       required: true
   - type: dropdown
     id: severity
     attributes:
-      label: 严重程度
+      label: Severity
       options:
-        - P0 - 服务不可用 / 数据丢失
-        - P1 - 核心功能异常
-        - P2 - 非核心功能异常
-        - P3 - 体验问题
+        - P0 - Service Unavailable / Data Loss
+        - P1 - Core Feature Broken
+        - P2 - Non-core Feature Issue
+        - P3 - UX Issue
     validations:
       required: true
   - type: checkboxes
     id: reproducible
     attributes:
-      label: 可复现性
+      label: Reproducibility
       options:
-        - label: 可稳定复现
+        - label: Consistently reproducible
   - type: textarea
     id: environment
     attributes:
-      label: 环境信息
-      description: OS、浏览器、部署方式等
+      label: Environment
+      description: OS, browser, deployment method, etc.
       placeholder: |
         - OS: Ubuntu 24.04
-        - 部署方式: Docker Compose
-        - 浏览器: Chrome 133
+        - Deployment: Docker Compose
+        - Browser: Chrome 133
     validations:
       required: false
   - type: textarea
     id: logs
     attributes:
-      label: 日志 / 截图
-      description: 相关日志、错误信息或截图（敏感信息请脱敏）
+      label: Logs / Screenshots
+      description: Relevant logs, error messages, or screenshots (please redact sensitive info)
     validations:
       required: false
   - type: textarea
     id: workaround
     attributes:
-      label: 临时解决方案
-      description: 是否找到了绕过方法？
+      label: Workaround
+      description: Have you found a workaround?
     validations:
       required: false

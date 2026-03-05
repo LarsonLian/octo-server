@@ -20,8 +20,25 @@
 - [x] 团队协作流程规范文档
 - [x] 组织成员邀请（lml2468/研发、yeejiaa/产品）
 
+## v1.1.2 — Bot API + 工程化（2026-03-05）
+- [x] Bot 历史消息拉取接口 /v1/bot/messages/sync (#50)
+- [x] Bot skill.md 补全 5 个 API 文档 (#49)
+- [x] Go 模块重命名 TangSengDaoDao → dmwork-org (#42)
+- [x] dmwork-lib 公共核心库
+- [x] dmwork-adapters CI 流水线
+- [x] 部署脚本支持 server/web/adapter/all
+- [x] CD 改为手动触发
+- [x] npm 包名 V1/V2 分离
+- [x] adapter 升级到 0.2.19
+- [x] 开发流程增加 Issue 认领步骤
+- [x] Jerry-Xin 加入 dev 团队
+
 ## v1.2 — 功能完善（2026 年 Q2）
 - [ ] adapter prompt 国际化 + timestamp 标准化 (dmwork-adapters#9)
+- [ ] 纯人类成员创建群聊 (dmwork-adapters#13)
+- [ ] Bot 历史消息持久化（插件侧 SQLite/文件缓存）
+- [ ] Android CI workflow
+- [ ] 运营 Dashboard 认证（当前公开访问）
 - [ ] 待根据 Issue 需求排期
 
 ## 长期方向

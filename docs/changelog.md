@@ -1,5 +1,31 @@
 # Changelog
 
+## [v1.1.2] - 2026-03-05
+
+### 新功能
+- Bot 历史消息拉取接口 `POST /v1/bot/messages/sync` — Bot 可获取群聊/私聊历史消息，支持分页和方向控制 (#50)
+- Bot skill.md 补全 — 新增 Groups、Event Ack、Messages Sync 等 5 个 API 文档 (#49)
+
+### 基础设施
+- Go 模块重命名 `TangSengDaoDao` → `dmwork-org`（167 个文件），解锁 GitHub Actions CI (#42)
+- 创建 `Mininglamp-OSS/octo-lib` 公共核心库
+- dmwork-adapters CI 流水线（tsc + vitest + build）
+- 部署脚本 `deploy.sh` 支持 `server|web|adapter|all` 四种组件
+- CD 改为手动触发（有在线用户，需控制部署窗口）
+
+### 改进
+- npm 包名冲突修复 — V2 版本 (1.0.0/1.0.1) 从 `openclaw-channel-dmwork` 下架，V2 独立为 `openclaw-channel-deepim`
+- OpenClaw adapter 升级到 0.2.19（媒体消息、@mention 修复）
+- 开发流程新增 Issue 认领步骤，避免重复开发
+
+### 文档
+- `docs/CI-CD.md` — CI/CD 流程说明
+- `docs/WORKFLOW.md` — 完整运作流程（含认领步骤）
+
+### 团队
+- 邀请 `Jerry-Xin` 加入 dev 团队
+- dmwork-adapters 分支保护启用（需 1 人 review）
+
 ## [v1.1.1] - 2026-03-04
 
 ### 新功能

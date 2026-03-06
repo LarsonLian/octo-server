@@ -63,7 +63,7 @@ func (m *messageExtraDB) queryWithMessageIDsAndUID(messageIDs []string, loginUID
 		return nil, nil
 	}
 	var models []*messageExtraDetailModel
-	_, err := m.session.Select("message_extra.*,(select count(*) from member_readed where member_readed.message_id=message_extra.message_id and member_readed.uid='"+loginUID+"') readed,(select created_at from member_readed where member_readed.message_id=message_extra.message_id and member_readed.uid='"+loginUID+"') readed_at").From("message_extra").Where("message_id in ?", messageIDs).Load(&models)
+	_, err := m.session.SelectBySql("select message_extra.*,(select count(*) from member_readed where member_readed.message_id=message_extra.message_id and member_readed.uid=?) readed,(select created_at from member_readed where member_readed.message_id=message_extra.message_id and member_readed.uid=?) readed_at from message_extra where message_id in ?", loginUID, loginUID, messageIDs).Load(&models)
 	return models, err
 }
 
@@ -99,18 +99,15 @@ func (m *messageExtraDB) queryWithMessageID(messageID string) (*messageExtraMode
 
 func (m *messageExtraDB) sync(version int64, channelID string, channelType uint8, limit uint64, loginUID string) ([]*messageExtraDetailModel, error) {
 	var models []*messageExtraDetailModel
-	selectSql := "message_extra.*,(select count(*) from member_readed where member_readed.message_id=message_extra.message_id and member_readed.uid='" + loginUID + "') readed,(select created_at from member_readed where member_readed.message_id=message_extra.message_id and member_readed.uid='" + loginUID + "') readed_at"
-	builder := m.session.Select(selectSql).From("message_extra")
+	selectClause := "select message_extra.*,(select count(*) from member_readed where member_readed.message_id=message_extra.message_id and member_readed.uid=?) readed,(select created_at from member_readed where member_readed.message_id=message_extra.message_id and member_readed.uid=?) readed_at from message_extra"
 	var err error
 	if version == 0 {
-		builder = builder.Where("channel_id=? and channel_type=?", channelID, channelType).OrderDesc("version").Limit(limit)
-		_, err = builder.Load(&models)
+		_, err = m.session.SelectBySql(selectClause+" where channel_id=? and channel_type=? order by version desc limit ?", loginUID, loginUID, channelID, channelType, limit).Load(&models)
 		newModels := messageExtraDetailModelSlice(models)
 		sort.Sort(newModels)
 		models = newModels
 	} else {
-		builder = builder.Where("channel_id=? and channel_type=? and version>?", channelID, channelType, version).OrderAsc("version").Limit(limit)
-		_, err = builder.Load(&models)
+		_, err = m.session.SelectBySql(selectClause+" where channel_id=? and channel_type=? and version>? order by version asc limit ?", loginUID, loginUID, channelID, channelType, version, limit).Load(&models)
 	}
 
 	return models, err

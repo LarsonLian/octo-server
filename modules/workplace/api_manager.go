@@ -82,6 +82,7 @@ func (m *manager) reorderBanner(c *wkhttp.Context) {
 	defer func() {
 		if err := recover(); err != nil {
 			tx.Rollback()
+			c.ResponseError(errors.New("服务器内部错误"))
 			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 		}
 	}()
@@ -325,6 +326,7 @@ func (m *manager) addCategoryApp(c *wkhttp.Context) {
 	defer func() {
 		if err := recover(); err != nil {
 			tx.Rollback()
+			c.ResponseError(errors.New("服务器内部错误"))
 			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 		}
 	}()
@@ -385,6 +387,7 @@ func (m *manager) reorderCategoryApp(c *wkhttp.Context) {
 	defer func() {
 		if err := recover(); err != nil {
 			tx.Rollback()
+			c.ResponseError(errors.New("服务器内部错误"))
 			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 		}
 	}()
@@ -678,6 +681,7 @@ func (m *manager) deleteApp(c *wkhttp.Context) {
 	defer func() {
 		if err := recover(); err != nil {
 			tx.Rollback()
+			c.ResponseError(errors.New("服务器内部错误"))
 			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 		}
 	}()
@@ -742,6 +746,7 @@ func (m *manager) reorderCategory(c *wkhttp.Context) {
 	defer func() {
 		if err := recover(); err != nil {
 			tx.Rollback()
+			c.ResponseError(errors.New("服务器内部错误"))
 			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 		}
 	}()

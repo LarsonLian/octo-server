@@ -213,6 +213,7 @@ func (w *Workplace) reorderApp(c *wkhttp.Context) {
 	defer func() {
 		if err := recover(); err != nil {
 			tx.Rollback()
+			c.ResponseError(errors.New("服务器内部错误"))
 			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 		}
 	}()
@@ -270,6 +271,7 @@ func (w *Workplace) addApp(c *wkhttp.Context) {
 		return
 	}
 	if app == nil || len(app.AppID) == 0 || app.Status == 0 {
+		c.ResponseError(errors.New("该应用不存在或被禁用"))
 		w.Error("该应用不存在或被禁用", zap.Error(err))
 		return
 	}

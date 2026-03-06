@@ -7,10 +7,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/sendgrid/rest"
 )
+
+// httpClient is a shared HTTP client with a reasonable timeout to prevent
+// requests from hanging indefinitely when remote servers are unresponsive.
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
 
 func Post(url string, body []byte, headers map[string]string) (resp *rest.Response, err error) {
 
@@ -113,7 +120,7 @@ func PostForWWWFormForBytres(urlStr string, params map[string]string, headers ma
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	var resp *http.Response
-	resp, err = http.DefaultClient.Do(request)
+	resp, err = httpClient.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +160,7 @@ func PostForWWWFormForAll(urlStr string, bodyData io.Reader, headers map[string]
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	var resp *http.Response
-	resp, err = http.DefaultClient.Do(request)
+	resp, err = httpClient.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +199,7 @@ func PostForWWWFormReXML(urlStr string, params map[string]string, headers map[st
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	var resp *http.Response
-	resp, err = http.DefaultClient.Do(request)
+	resp, err = httpClient.Do(request)
 	if err != nil {
 		return nil, err
 	}

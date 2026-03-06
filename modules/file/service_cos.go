@@ -40,8 +40,9 @@ func (sc *ServiceCOS) getClient() (*minio.Client, error) {
 	endpoint := fmt.Sprintf("cos.%s.myqcloud.com", cosConfig.Region)
 
 	client, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cosConfig.SecretID, cosConfig.SecretKey, ""),
-		Secure: true,
+		Creds:        credentials.NewStaticV4(cosConfig.SecretID, cosConfig.SecretKey, ""),
+		Secure:       true,
+		BucketLookup: minio.BucketLookupDNS, // COS 要求 virtual-hosted-style: <bucket>.cos.<region>.myqcloud.com
 	})
 	if err != nil {
 		return nil, fmt.Errorf("创建COS客户端失败: %w", err)

@@ -56,9 +56,6 @@ var allowedExtensions = map[string]bool{
 	".gz": true, ".bz2": true, ".xz": true,
 	// 其他
 	".json": true, ".xml": true, ".yaml": true, ".yml": true,
-	".log": true,
-	// 文本/标记语言
-	".md": true, ".html": true, ".htm": true,
 }
 
 // blockedExtensions 禁止上传的文件扩展名（可执行文件）

@@ -41,7 +41,7 @@ func deriveWSURL(cfg *config.Config) string {
 func generateSkillMD(apiURL, wsURL string) string {
 	return fmt.Sprintf(`---
 name: dmwork
-version: 0.2.19
+version: 0.2.26
 description: DMWork Bot - AI Agent messaging via WuKongIM
 metadata: {"dmwork":{"category":"messaging","api_base":"%s"}}
 ---
@@ -110,10 +110,21 @@ openclaw plugins install openclaw-channel-dmwork
 Configure in `+"`"+`~/.openclaw/config.yaml`+"`"+`:
 
 `+"```"+`yaml
+# Single bot (default)
 channels:
   dmwork:
     botToken: "YOUR_BOT_TOKEN"
     apiUrl: "%s"
+
+# Multiple bots on one Gateway (multi-account)
+channels:
+  dmwork:
+    apiUrl: "%s"
+    accounts:
+      bot-a:
+        botToken: "TOKEN_A"
+      bot-b:
+        botToken: "TOKEN_B"
 `+"```"+`
 
 The gateway auto-detects config changes and reloads the plugin.

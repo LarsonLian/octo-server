@@ -2,8 +2,8 @@ package report
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -45,17 +45,17 @@ func (r *Report) reportHTML(c *wkhttp.Context) {
 		mode = "light"
 	}
 
-	c.Redirect(http.StatusMovedPermanently,
-		fmt.Sprintf("%s/report.html?lang=%s&uid=%s&token=%s&channel_id=%s&channel_type=%s&mode=%s",
-			r.ctx.GetConfig().External.H5BaseURL,
-			c.Query("lang"),
-			c.Query("uid"),
-			c.Query("token"),
-			c.Query("channel_id"),
-			c.Query("channel_type"),
-			mode,
-		),
-	)
+	redirectURL, _ := url.Parse(r.ctx.GetConfig().External.H5BaseURL)
+	redirectURL.Path = "/report.html"
+	q := redirectURL.Query()
+	q.Set("lang", c.Query("lang"))
+	q.Set("uid", c.Query("uid"))
+	q.Set("token", c.Query("token"))
+	q.Set("channel_id", c.Query("channel_id"))
+	q.Set("channel_type", c.Query("channel_type"))
+	q.Set("mode", mode)
+	redirectURL.RawQuery = q.Encode()
+	c.Redirect(http.StatusMovedPermanently, redirectURL.String())
 }
 
 // 举报

@@ -61,6 +61,37 @@ func (s *shortnoDB) updateLock(shortno string, lock int) error {
 	return err
 }
 
+// allocateShortnoAtomic atomically allocates a shortno using database-level locking.
+// This is safe for multi-instance deployments unlike the in-memory mutex approach.
+func (s *shortnoDB) allocateShortnoAtomic() (*shortnoModel, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	// Atomically lock one available shortno using SELECT ... FOR UPDATE
+	var m *shortnoModel
+	_, err = tx.SelectBySql("SELECT * FROM shortno WHERE used=0 AND hold=0 AND locked=0 LIMIT 1 FOR UPDATE").Load(&m)
+	if err != nil {
+		return nil, err
+	}
+	if m == nil {
+		return nil, nil
+	}
+
+	// Mark it as locked within the same transaction
+	_, err = tx.UpdateBySql("UPDATE shortno SET locked=1 WHERE shortno=?", m.Shortno).Exec()
+	if err != nil {
+		return nil, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func (s *shortnoDB) updateUsed(shortno string, used int, business string) error {
 	_, err := s.db.Update("shortno").Set("used", used).Set("business", business).Where("shortno=?", shortno).Exec()
 	return err

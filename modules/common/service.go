@@ -72,20 +72,12 @@ func (s *service) GetAppConfig() (*AppConfigResp, error) {
 }
 
 func (s *service) GetShortno() (string, error) {
-
-	s.shortnoLock.Lock() // 这里需要加锁 要不然多线程下会出现shortNo重复的问题
-	defer s.shortnoLock.Unlock()
-
-	shortnoM, err := s.shortnoDB.queryVail()
+	shortnoM, err := s.shortnoDB.allocateShortnoAtomic()
 	if err != nil {
 		return "", err
 	}
 	if shortnoM == nil {
 		return "", errors.New("没有短编号可分配")
-	}
-	err = s.shortnoDB.updateLock(shortnoM.Shortno, 1)
-	if err != nil {
-		return "", err
 	}
 	return shortnoM.Shortno, nil
 }

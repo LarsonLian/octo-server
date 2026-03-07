@@ -9,6 +9,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/model"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/register"
 	"github.com/Mininglamp-OSS/octo-server/modules/space"
+	spaceChannel "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -107,7 +108,12 @@ func init() {
 					return register.IMDatasourceTypeNone
 				},
 				Whitelist: func(channelID string, channelType uint8) ([]string, error) {
-					friends, err := api.userService.GetFriends(channelID)
+					// Space channel_id 格式: s{spaceId}_{uid}，需要提取真实 uid
+					realUID := channelID
+					if _, peerID := spaceChannel.ParseChannelID(channelID); peerID != "" {
+						realUID = peerID
+					}
+					friends, err := api.userService.GetFriends(realUID)
 					if err != nil {
 						return nil, err
 					}
@@ -120,7 +126,7 @@ func init() {
 						}
 					}
 					// 合并空间共同成员到白名单
-					coMembers, err := space.GetCoMemberUIDs(friendCtx, channelID)
+					coMembers, err := space.GetCoMemberUIDs(friendCtx, realUID)
 					if err == nil && len(coMembers) > 0 {
 						for _, uid := range coMembers {
 							uidSet[uid] = struct{}{}

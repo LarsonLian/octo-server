@@ -1,0 +1,14 @@
+swagger: "2.0"
+info:
+  description: "DMWork Space API"
+  version: "1.0.0"
+  title: "DMWork Space API"
+host: "api.botgate.cn"
+tags:
+  - name: "space"
+    description: "团队空间"
+schemes:
+  - "https"
+basePath: "/v1"
+
+paths: {}

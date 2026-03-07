@@ -14,6 +14,7 @@ import (
 	_ "github.com/Mininglamp-OSS/octo-server/modules/report"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/robot"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/search"
+	_ "github.com/Mininglamp-OSS/octo-server/modules/space"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/statistics"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/user"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/webhook"

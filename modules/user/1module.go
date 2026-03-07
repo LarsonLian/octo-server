@@ -8,6 +8,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/model"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/register"
+	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -90,7 +91,8 @@ func init() {
 
 	// ====================== 注册好友模块 ======================
 	register.AddModule(func(ctx interface{}) register.Module {
-		api := NewFriend(ctx.(*config.Context))
+		friendCtx := ctx.(*config.Context)
+		api := NewFriend(friendCtx)
 		return register.Module{
 			Name: "friend",
 			SetupAPI: func() register.APIRouter {
@@ -109,15 +111,26 @@ func init() {
 					if err != nil {
 						return nil, err
 					}
-					firendUIDs := make([]string, 0, len(friends))
+					uidSet := make(map[string]struct{})
 					if len(friends) > 0 {
 						for _, friend := range friends {
 							if friend.IsAlone == 0 {
-								firendUIDs = append(firendUIDs, friend.UID)
+								uidSet[friend.UID] = struct{}{}
 							}
 						}
 					}
-					return firendUIDs, nil
+					// 合并空间共同成员到白名单
+					coMembers, err := space.GetCoMemberUIDs(friendCtx, channelID)
+					if err == nil && len(coMembers) > 0 {
+						for _, uid := range coMembers {
+							uidSet[uid] = struct{}{}
+						}
+					}
+					result := make([]string, 0, len(uidSet))
+					for uid := range uidSet {
+						result = append(result, uid)
+					}
+					return result, nil
 				},
 			},
 			BussDataSource: register.BussDataSource{

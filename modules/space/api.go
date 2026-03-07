@@ -596,8 +596,13 @@ func (s *Space) joinSpace(c *wkhttp.Context) {
 		}
 	}
 
-	// 检查使用次数限制
-	if invitation.MaxUses > 0 && invitation.UsedCount >= invitation.MaxUses {
+	// 原子检查并递增使用次数（防止 TOCTOU 竞态条件）
+	allowed, err := s.db.incrementInviteUsedCountAtomic(req.InviteCode)
+	if err != nil {
+		c.ResponseError(errors.New("检查邀请码使用次数失败"))
+		return
+	}
+	if !allowed {
 		c.ResponseError(errors.New("邀请码已达到使用次数上限"))
 		return
 	}
@@ -633,10 +638,6 @@ func (s *Space) joinSpace(c *wkhttp.Context) {
 	if err != nil {
 		c.ResponseError(errors.New("加入空间失败"))
 		return
-	}
-
-	if err = s.db.incrementInviteUsedCount(req.InviteCode); err != nil {
-		s.Warn("更新邀请码使用次数失败")
 	}
 
 	c.Response(map[string]string{

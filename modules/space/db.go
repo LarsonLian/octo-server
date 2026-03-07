@@ -214,3 +214,17 @@ func (d *DB) incrementInviteUsedCount(code string) error {
 	_, err := d.session.UpdateBySql("UPDATE space_invitation SET used_count=used_count+1 WHERE invite_code=?", code).Exec()
 	return err
 }
+
+// incrementInviteUsedCountAtomic atomically increments the used_count only if the limit has not been reached.
+// Returns true if the increment was successful (i.e., usage was allowed), false if the limit was already reached.
+func (d *DB) incrementInviteUsedCountAtomic(code string) (bool, error) {
+	result, err := d.session.UpdateBySql("UPDATE space_invitation SET used_count=used_count+1 WHERE invite_code=? AND (max_uses=0 OR used_count<max_uses)", code).Exec()
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}

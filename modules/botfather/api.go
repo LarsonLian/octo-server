@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -57,6 +58,9 @@ func New(ctx *config.Context) *BotFather {
 
 	// 注册好友申请通知回调
 	RegisterFriendApplyHook(ctx)
+
+	// 注册用户注册事件监听器，发送欢迎消息
+	ctx.AddEventListener(event.EventUserRegister, bf.handleUserRegisterEvent)
 
 	return bf
 }

@@ -711,7 +711,43 @@ func (h *commandHandler) createBot(creatorUID, name, username, botToken string) 
 		return fmt.Errorf("创建app失败: %w", err)
 	}
 
-	// 2. 创建用户
+	// 2. 创建机器人记录（优先于用户/好友，确保 BotFather 能查到）
+	tx, err := h.db.session.Begin()
+	if err != nil {
+		return fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	version, err := h.ctx.GenSeq(common.RobotSeqKey)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("GenSeq failed: %w", err)
+	}
+	err = h.db.insertRobotTx(&robotModel{
+		AppID:      appResp.AppID,
+		RobotID:    robotID,
+		Username:   username,
+		Token:      appResp.AppKey,
+		Version:    version,
+		Status:     1,
+		CreatorUID: creatorUID,
+		BotToken:   botToken,
+	}, tx)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("插入机器人记录失败: %w", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("提交事务失败: %w", err)
+	}
+
+	// 3. 创建用户
 	err = h.userService.AddUser(&user.AddUserReq{
 		UID:      robotID,
 		Username: username,
@@ -720,10 +756,15 @@ func (h *commandHandler) createBot(creatorUID, name, username, botToken string) 
 		Robot:    1,
 	})
 	if err != nil {
+		// 回滚 robot 记录，避免孤儿数据
+		if delErr := h.db.deleteRobot(robotID); delErr != nil {
+			h.Error("回滚 robot 记录失败", zap.Error(delErr), zap.String("robot_id", robotID))
+		}
+		h.Error("创建用户失败，已回滚 robot 记录", zap.Error(err), zap.String("robot_id", robotID))
 		return fmt.Errorf("创建用户失败: %w", err)
 	}
 
-	// 3. 将 Bot 加入创建者所在的所有 Space
+	// 4. 将 Bot 加入创建者所在的所有 Space
 	spaceIDs, err := h.getCreatorSpaceIDs(creatorUID)
 	if err != nil {
 		h.Warn("查询创建者Space失败", zap.Error(err))
@@ -754,41 +795,6 @@ func (h *commandHandler) createBot(creatorUID, name, username, botToken string) 
 	}
 	h.fixFriendVersion(creatorUID, robotID)
 	h.fixFriendVersion(robotID, creatorUID)
-
-	// 4. 创建机器人记录
-	tx, err := h.db.session.Begin()
-	if err != nil {
-		return fmt.Errorf("开启事务失败: %w", err)
-	}
-	defer func() {
-		if err := recover(); err != nil {
-			tx.Rollback()
-		}
-	}()
-
-	version, err := h.ctx.GenSeq(common.RobotSeqKey)
-	if err != nil {
-		return fmt.Errorf("GenSeq failed: %w", err)
-	}
-	err = h.db.insertRobotTx(&robotModel{
-		AppID:      appResp.AppID,
-		RobotID:    robotID,
-		Username:   username,
-		Token:      appResp.AppKey,
-		Version:    version,
-		Status:     1,
-		CreatorUID: creatorUID,
-		BotToken:   botToken,
-	}, tx)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("插入机器人记录失败: %w", err)
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("提交事务失败: %w", err)
-	}
 
 	return nil
 }

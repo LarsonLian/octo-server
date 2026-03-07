@@ -138,9 +138,11 @@ func (d *botfatherDB) updateBotCommands(robotID string, botCommands string) erro
 	return err
 }
 
-// existRobotByUsername 检查用户名是否已被活跃机器人占用
+// existRobotByUsername 检查用户名是否已被占用（包括已软删除的记录）。
+// 设计意图：移除 status=1 过滤条件，防止新 Bot 复用已删除 Bot 的 username，
+// 避免因 username 唯一约束导致的数据冲突和潜在的消息路由混乱。
 func (d *botfatherDB) existRobotByUsername(username string) (bool, error) {
 	var count int
-	err := d.session.Select("count(*)").From("robot").Where("username=? AND status=1", username).LoadOne(&count)
+	err := d.session.Select("count(*)").From("robot").Where("username=?", username).LoadOne(&count)
 	return count > 0, err
 }

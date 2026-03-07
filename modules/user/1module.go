@@ -184,6 +184,9 @@ func newChannelRespWithUserDetailResp(user *UserDetailResp) *model.ChannelResp {
 	extraMap["vercode"] = user.Vercode
 	extraMap["screenshot"] = user.Screenshot
 	extraMap["revoke_remind"] = user.RevokeRemind
+	if user.BotCommands != "" {
+		extraMap["bot_commands"] = user.BotCommands
+	}
 	resp.Extra = extraMap
 
 	return resp

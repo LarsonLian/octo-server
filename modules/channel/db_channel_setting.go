@@ -31,13 +31,39 @@ func (c *channelSettingDB) queryWithChannelIDs(channelIDs []string) ([]*channelS
 }
 
 func (c *channelSettingDB) insertOrAddMsgAutoDelete(channelID string, channelType uint8, msgAutoDelete int64) error {
-	_, err := c.session.InsertBySql("insert into channel_setting (channel_id, channel_type, msg_auto_delete) values (?, ?, ?) ON DUPLICATE KEY UPDATE msg_auto_delete=VALUES(msg_auto_delete)", channelID, channelType, msgAutoDelete).Exec()
-	return err
+	tx, err := c.session.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	_, err = tx.InsertBySql("INSERT INTO channel_setting (channel_id, channel_type) VALUES (?, ?) ON DUPLICATE KEY UPDATE channel_id=channel_id", channelID, channelType).Exec()
+	if err != nil {
+		return err
+	}
+	_, err = tx.UpdateBySql("UPDATE channel_setting SET msg_auto_delete=? WHERE channel_id=? AND channel_type=?", msgAutoDelete, channelID, channelType).Exec()
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (c *channelSettingDB) insertOrAddOffsetMessageSeq(channelID string, channelType uint8, offsetMessageSeq uint32) error {
-	_, err := c.session.InsertBySql("insert into channel_setting (channel_id, channel_type, offset_message_seq) values (?, ?, ?) ON DUPLICATE KEY UPDATE offset_message_seq=VALUES(offset_message_seq)", channelID, channelType, offsetMessageSeq).Exec()
-	return err
+	tx, err := c.session.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	_, err = tx.InsertBySql("INSERT INTO channel_setting (channel_id, channel_type) VALUES (?, ?) ON DUPLICATE KEY UPDATE channel_id=channel_id", channelID, channelType).Exec()
+	if err != nil {
+		return err
+	}
+	_, err = tx.UpdateBySql("UPDATE channel_setting SET offset_message_seq=? WHERE channel_id=? AND channel_type=?", offsetMessageSeq, channelID, channelType).Exec()
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type channelSettingModel struct {

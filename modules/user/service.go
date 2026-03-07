@@ -222,7 +222,22 @@ func (s *Service) GetUserDetail(uid string, loginUID string) (*UserDetailResp, e
 	if toUserSetting != nil {
 		beBlacklist = toUserSetting.Blacklist
 	}
-	return NewUserDetailResp(model, remark, loginUID, sourceFrom, online, lastOffline, deviceFlag, follow, blacklist, beDeleted, beBlacklist, userSetting, vercode), nil
+	resp := NewUserDetailResp(model, remark, loginUID, sourceFrom, online, lastOffline, deviceFlag, follow, blacklist, beDeleted, beBlacklist, userSetting, vercode)
+
+	// 为机器人用户填充bot_commands
+	if model.Robot == 1 {
+		var botCmdResults []struct {
+			BotCommands string `db:"bot_commands"`
+		}
+		_, err = s.ctx.DB().Select("IFNULL(bot_commands,'') as bot_commands").From("robot").Where("robot_id = ? and status=1", uid).Load(&botCmdResults)
+		if err != nil {
+			s.Error("查询机器人命令失败", zap.Error(err))
+		} else if len(botCmdResults) > 0 && botCmdResults[0].BotCommands != "" {
+			resp.BotCommands = botCmdResults[0].BotCommands
+		}
+	}
+
+	return resp, nil
 }
 
 func (s *Service) GetUserDetails(uids []string, loginUID string) ([]*UserDetailResp, error) {
@@ -358,6 +373,36 @@ func (s *Service) GetUserDetails(uids []string, loginUID string) ([]*UserDetailR
 			beDeleted = 1
 		}
 		userDetailResps = append(userDetailResps, NewUserDetailResp(userDetail, nameRemark, loginUID, sourceFrom, online, lastOffline, deviceFlag, follow, status, beDeleted, beBlacklist, setting, vercode))
+	}
+
+	// 为机器人用户填充bot_commands
+	robotUIDs := make([]string, 0)
+	for _, resp := range userDetailResps {
+		if resp.Robot == 1 {
+			robotUIDs = append(robotUIDs, resp.UID)
+		}
+	}
+	if len(robotUIDs) > 0 {
+		var botCmdResults []struct {
+			RobotID     string `db:"robot_id"`
+			BotCommands string `db:"bot_commands"`
+		}
+		_, err = s.ctx.DB().Select("robot_id", "IFNULL(bot_commands,'') as bot_commands").From("robot").Where("robot_id in ? and status=1", robotUIDs).Load(&botCmdResults)
+		if err != nil {
+			s.Error("查询机器人命令失败", zap.Error(err))
+		} else {
+			botCmdMap := make(map[string]string, len(botCmdResults))
+			for _, r := range botCmdResults {
+				botCmdMap[r.RobotID] = r.BotCommands
+			}
+			for _, resp := range userDetailResps {
+				if resp.Robot == 1 {
+					if cmds, ok := botCmdMap[resp.UID]; ok && cmds != "" {
+						resp.BotCommands = cmds
+					}
+				}
+			}
+		}
 	}
 
 	return userDetailResps, nil
@@ -900,6 +945,7 @@ type UserDetailResp struct {
 	IsUploadAvatar      int               `json:"is_upload_avatar"`       // 是否上传头像
 	Status              int               `json:"status"`                 //用户状态 1 正常 2:黑名单
 	Robot               int               `json:"robot"`                  // 机器人0.否1.是
+	BotCommands         string            `json:"bot_commands,omitempty"` // 机器人命令列表JSON
 	IsDestroy           int               `json:"is_destroy"`             // 是否注销0.否1.是
 	Flame               int               `json:"flame"`                  // 是否开启阅后即焚
 	FlameSecond         int               `json:"flame_second"`           // 阅后即焚秒数

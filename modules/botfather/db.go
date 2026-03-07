@@ -129,6 +129,14 @@ func (d *botfatherDB) queryRobotCountByCreator(creatorUID string) (int64, error)
 	return count, err
 }
 
+// updateBotCommands 更新机器人命令列表
+func (d *botfatherDB) updateBotCommands(robotID string, botCommands string) error {
+	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
+		"bot_commands": botCommands,
+	}).Where("robot_id=?", robotID).Exec()
+	return err
+}
+
 // existRobotByUsername 检查用户名是否已存在
 func (d *botfatherDB) existRobotByUsername(username string) (bool, error) {
 	var count int

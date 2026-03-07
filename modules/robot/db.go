@@ -185,6 +185,38 @@ type robot struct {
 	db.BaseModel
 }
 
+// queryBotCommandsByRobotID 查询机器人的命令列表
+func (d *robotDB) queryBotCommandsByRobotID(robotID string) (string, error) {
+	var botCommands string
+	err := d.session.Select("IFNULL(bot_commands,'')").From("robot").Where("robot_id=? and status=1", robotID).LoadOne(&botCommands)
+	return botCommands, err
+}
+
+// queryBotCommandsByRobotIDs 批量查询机器人的命令列表
+func (d *robotDB) queryBotCommandsByRobotIDs(robotIDs []string) (map[string]string, error) {
+	var results []struct {
+		RobotID     string `db:"robot_id"`
+		BotCommands string `db:"bot_commands"`
+	}
+	_, err := d.session.Select("robot_id", "IFNULL(bot_commands,'') as bot_commands").From("robot").Where("robot_id in ? and status=1", robotIDs).Load(&results)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]string, len(results))
+	for _, r := range results {
+		m[r.RobotID] = r.BotCommands
+	}
+	return m, nil
+}
+
+// updateBotCommands 更新机器人命令列表
+func (d *robotDB) updateBotCommands(robotID string, botCommands string) error {
+	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
+		"bot_commands": botCommands,
+	}).Where("robot_id=?", robotID).Exec()
+	return err
+}
+
 // queryRobotUIDsInGroup 查询群内的机器人成员UID列表
 func (d *robotDB) queryRobotUIDsInGroup(groupNo string) ([]string, error) {
 	var uids []string

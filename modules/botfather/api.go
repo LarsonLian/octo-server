@@ -84,6 +84,7 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.GET("/groups", bf.getGroups)
 		botAPI.GET("/groups/:group_no", bf.getGroupInfo)
 		botAPI.GET("/groups/:group_no/members", bf.getGroupMembers)
+		botAPI.POST("/setCommands", bf.setCommands)
 	}
 
 	// 初始化BotFather系统用户（使用sync.Once确保只执行一次）
@@ -222,6 +223,40 @@ func (bf *BotFather) initBotFatherUser() {
 
 	// 确保BotFather与所有用户建立好友关系
 	bf.ensureBotFatherFriends()
+
+	// 注册BotFather自身的命令列表
+	bf.registerBotFatherCommands()
+}
+
+// registerBotFatherCommands 注册BotFather自身的命令列表
+func (bf *BotFather) registerBotFatherCommands() {
+	commands := []map[string]string{
+		{"command": CmdNewBot, "description": "创建新机器人"},
+		{"command": CmdMyBots, "description": "查看我的机器人"},
+		{"command": CmdConnect, "description": "获取连接 prompt"},
+		{"command": CmdDisconnect, "description": "断开 Agent 连接"},
+		{"command": CmdSetName, "description": "修改机器人名称"},
+		{"command": CmdSetDescription, "description": "修改机器人描述"},
+		{"command": CmdDeleteBot, "description": "删除机器人"},
+		{"command": CmdToken, "description": "查看 Token"},
+		{"command": CmdRevoke, "description": "重置 Token"},
+		{"command": CmdApprove, "description": "通过好友申请"},
+		{"command": CmdReject, "description": "拒绝好友申请"},
+		{"command": CmdPending, "description": "查看待审批好友申请"},
+		{"command": CmdHelp, "description": "显示帮助"},
+		{"command": CmdCancel, "description": "取消当前操作"},
+	}
+	commandsJSON, err := json.Marshal(commands)
+	if err != nil {
+		bf.Error("序列化BotFather命令列表失败", zap.Error(err))
+		return
+	}
+	err = bf.db.updateBotCommands(BotFatherUID, string(commandsJSON))
+	if err != nil {
+		bf.Error("注册BotFather命令列表失败", zap.Error(err))
+		return
+	}
+	bf.Info("BotFather命令列表注册成功")
 }
 
 // ensureBotFatherFriends 批量为缺少BotFather好友关系的用户添加
@@ -566,6 +601,46 @@ func (bf *BotFather) readReceipt(c *wkhttp.Context) {
 				}
 			}()
 		}
+	}
+
+	c.ResponseOK()
+}
+
+// ========== Bot Set Commands API ==========
+
+func (bf *BotFather) setCommands(c *wkhttp.Context) {
+	var req struct {
+		Commands []struct {
+			Command     string `json:"command"`
+			Description string `json:"description"`
+		} `json:"commands"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		bf.Error("数据格式有误", zap.Error(err))
+		c.ResponseError(errors.New("数据格式有误"))
+		return
+	}
+
+	robotID := getRobotIDFromContext(c)
+
+	if req.Commands == nil {
+		req.Commands = make([]struct {
+			Command     string `json:"command"`
+			Description string `json:"description"`
+		}, 0)
+	}
+	commandsJSON, err := json.Marshal(req.Commands)
+	if err != nil {
+		bf.Error("序列化命令列表失败", zap.Error(err))
+		c.ResponseError(errors.New("序列化命令列表失败"))
+		return
+	}
+
+	err = bf.db.updateBotCommands(robotID, string(commandsJSON))
+	if err != nil {
+		bf.Error("保存命令列表失败", zap.Error(err))
+		c.ResponseError(errors.New("保存命令列表失败"))
+		return
 	}
 
 	c.ResponseOK()

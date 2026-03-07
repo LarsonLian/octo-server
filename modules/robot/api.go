@@ -1,6 +1,7 @@
 package robot
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"runtime/debug"
@@ -69,6 +70,7 @@ func (rb *Robot) Route(r *wkhttp.WKHttp) {
 	{
 		auth.POST("/robot/sync", rb.sync)                // 同步机器人菜单
 		auth.POST("/robot/inline_query", rb.inlineQuery) // 机器人行内搜索
+		auth.GET("/robot/commands", rb.getCommands)       // 查询机器人命令列表
 	}
 
 	robotAuth := r.Group("/v1/robots/:robot_id/:app_key", rb.authRobot()) // :robot_id即user的username
@@ -663,6 +665,35 @@ func (rb *Robot) insertSystemRobot() {
 			panic(err)
 		}
 	}
+}
+
+// 查询机器人命令列表
+func (rb *Robot) getCommands(c *wkhttp.Context) {
+	robotID := c.Query("robot_id")
+	if strings.TrimSpace(robotID) == "" {
+		c.ResponseError(errors.New("robot_id不能为空"))
+		return
+	}
+
+	botCommands, err := rb.db.queryBotCommandsByRobotID(robotID)
+	if err != nil {
+		rb.Error("查询机器人命令失败", zap.Error(err))
+		c.ResponseError(errors.New("查询机器人命令失败"))
+		return
+	}
+
+	if strings.TrimSpace(botCommands) == "" {
+		c.Response([]interface{}{})
+		return
+	}
+
+	var commands []interface{}
+	if err := json.Unmarshal([]byte(botCommands), &commands); err != nil {
+		rb.Error("解析机器人命令失败", zap.Error(err), zap.String("botCommands", botCommands))
+		c.ResponseError(errors.New("机器人命令数据损坏"))
+		return
+	}
+	c.Response(commands)
 }
 
 // 同步机器人菜单

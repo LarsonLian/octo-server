@@ -1,6 +1,9 @@
 -- 数据迁移：创建"Demo Space"Space，将所有用户和 Bot 加入
 -- 执行前确认：space_id 唯一，执行一次即可
--- 用法：mysql -u root dmwork < scripts/migrate-to-space.sql
+-- 用法：mysql --default-character-set=utf8mb4 -u root dmwork < scripts/migrate-to-space.sql
+
+SET NAMES utf8mb4;
+SET CHARACTER SET utf8mb4;
 
 -- 生成 space_id（固定值，便于引用）
 SET @space_id = 'minglue_default';

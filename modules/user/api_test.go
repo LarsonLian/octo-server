@@ -877,3 +877,49 @@ func TestUserSetting_DeviceLock(t *testing.T) {
 	s.GetRoute().ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
+
+// TestAddBotFatherFriend_Bidirectional 测试注册用户和BotFather双向好友关系
+func TestAddBotFatherFriend_Bidirectional(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	u := New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	const botFatherUID = "botfather"
+	testUID := "test_user_" + fmt.Sprintf("%d", time.Now().UnixNano())
+
+	// 创建 BotFather 用户（模拟系统初始化）
+	err = u.db.Insert(&Model{
+		UID:      botFatherUID,
+		Name:     "BotFather",
+		Username: "botfather",
+		ShortNo:  "bf001",
+		Status:   1,
+	})
+	assert.NoError(t, err)
+
+	// 创建测试用户
+	err = u.db.Insert(&Model{
+		UID:      testUID,
+		Name:     "TestUser",
+		Username: "testuser",
+		ShortNo:  "tu001",
+		Status:   1,
+	})
+	assert.NoError(t, err)
+
+	// 调用 addBotFatherFriend
+	err = u.addBotFatherFriend(testUID)
+	assert.NoError(t, err)
+
+	// 验证双向好友关系
+	// 1. 用户 → BotFather
+	isFriend1, err := u.friendDB.IsFriend(testUID, botFatherUID)
+	assert.NoError(t, err)
+	assert.True(t, isFriend1, "用户应该是BotFather的好友")
+
+	// 2. BotFather → 用户
+	isFriend2, err := u.friendDB.IsFriend(botFatherUID, testUID)
+	assert.NoError(t, err)
+	assert.True(t, isFriend2, "BotFather应该是用户的好友")
+}

@@ -2372,14 +2372,14 @@ func (u *User) addFileHelperFriend(uid string) error {
 	return nil
 }
 
-// addBotFatherFriend 处理注册用户和BotFather互为好友（双向记录 + 白名单 + CMD同步）
+// addBotFatherFriend 处理注册用户和BotFather互为好友（双向记录 + 白名单 + CMD同步，使用事务）
 func (u *User) addBotFatherFriend(uid string) error {
 	const botFatherUID = "botfather"
 	if uid == "" {
 		return errors.New("用户ID不能为空")
 	}
 
-	// 检查正向好友关系
+	// 检查正向好友关系，若已存在则跳过
 	isFriend, err := u.friendDB.IsFriend(uid, botFatherUID)
 	if err != nil {
 		u.Error("查询用户与BotFather关系失败", zap.Error(err))
@@ -2389,19 +2389,34 @@ func (u *User) addBotFatherFriend(uid string) error {
 		return nil
 	}
 
+	// 使用事务保证双向好友关系的原子性
+	tx, err := u.friendDB.session.Begin()
+	if err != nil {
+		u.Error("创建数据库事务失败", zap.Error(err))
+		return errors.New("创建数据库事务失败")
+	}
+	defer func() {
+		if err := recover(); err != nil {
+			tx.Rollback()
+			fmt.Fprintf(os.Stderr, "recovered panic in addBotFatherFriend: %v\n%s\n", err, debug.Stack())
+		}
+	}()
+
 	// 正向：uid → botfather
 	version, err := u.ctx.GenSeq(common.FriendSeqKey)
 	if err != nil {
 		u.Error("GenSeq failed", zap.Error(err))
+		tx.Rollback()
 		return err
 	}
-	err = u.friendDB.Insert(&FriendModel{
+	err = u.friendDB.InsertTx(&FriendModel{
 		UID:     uid,
 		ToUID:   botFatherUID,
 		Version: version,
-	})
+	}, tx)
 	if err != nil {
 		u.Error("注册用户和BotFather成为好友失败", zap.Error(err))
+		tx.Rollback()
 		return err
 	}
 
@@ -2409,15 +2424,23 @@ func (u *User) addBotFatherFriend(uid string) error {
 	version2, err := u.ctx.GenSeq(common.FriendSeqKey)
 	if err != nil {
 		u.Error("GenSeq failed", zap.Error(err))
+		tx.Rollback()
 		return err
 	}
-	err = u.friendDB.Insert(&FriendModel{
+	err = u.friendDB.InsertTx(&FriendModel{
 		UID:     botFatherUID,
 		ToUID:   uid,
 		Version: version2,
-	})
+	}, tx)
 	if err != nil {
 		u.Error("BotFather和注册用户成为好友失败", zap.Error(err))
+		tx.Rollback()
+		return err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		u.Error("提交事务失败", zap.Error(err))
 		return err
 	}
 
@@ -2455,7 +2478,6 @@ func (u *User) addBotFatherFriend(uid string) error {
 	if err != nil {
 		u.Error("发送BotFather好友同步CMD失败", zap.Error(err))
 	}
-
 	return nil
 }
 

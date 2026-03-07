@@ -119,6 +119,9 @@ func (w *Webhook) getBlacklist(data map[string]interface{}) ([]string, error) {
 	}
 	if channelReq.ChannelType == uint8(common.ChannelTypePerson) && common.IsFakeChannel(channelReq.ChannelID) {
 		uids := strings.Split(channelReq.ChannelID, "@")
+		if len(uids) < 2 {
+			return nil, errors.New("invalid channel_id format: expected uid1@uid2")
+		}
 		exist, err := w.userService.ExistBlacklist(uids[0], uids[1])
 		if err != nil {
 			return nil, err

@@ -186,6 +186,55 @@ func TestSyncPindMessage(t *testing.T) {
 	// assert.Equal(t, http.StatusOK, w.Code)
 }
 
+// TestMessageEditPermissionCheck 测试消息编辑权限检查
+// 验证 Issue #275: 只允许编辑自己发送的消息
+func TestMessageEditPermissionCheck(t *testing.T) {
+	s, ctx := newTestServer()
+	msg := New(ctx)
+	msg.Route(s.GetRoute())
+
+	channelID := "test_channel"
+	channelType := common.ChannelTypePerson.Uint8()
+
+	// 测试1: 请求缺少必要参数应返回错误
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/message/edit", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"channel_id":   channelID,
+		"channel_type": channelType,
+		"message_seq":  1,
+		// 缺少 message_id
+	}))))
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "缺少message_id应返回400错误")
+
+	// 测试2: 消息ID为空应返回错误
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("POST", "/v1/message/edit", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"message_id":   "",
+		"channel_id":   channelID,
+		"channel_type": channelType,
+		"message_seq":  1,
+		"content_edit": "edited content",
+	}))))
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "空message_id应返回400错误")
+
+	// 测试3: 频道ID为空应返回错误
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("POST", "/v1/message/edit", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"message_id":   "msg123",
+		"channel_id":   "",
+		"channel_type": channelType,
+		"message_seq":  1,
+		"content_edit": "edited content",
+	}))))
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "空channel_id应返回400错误")
+}
+
 // UID 测试用户ID
 var UID = "beb714efd08a4530a5881ebd7f2fde38"
 

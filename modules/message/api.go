@@ -281,6 +281,25 @@ func (m *Message) messageEdit(c *wkhttp.Context) {
 		c.ResponseError(errors.New("频道ID不能为空！"))
 		return
 	}
+
+	// 权限检查：只允许编辑自己发送的消息
+	loginUID := c.GetLoginUID()
+	messageSeqs := []uint32{req.MessageSeq}
+	resp, err := m.ctx.IMGetWithChannelAndSeqs(req.ChannelID, req.ChannelType, loginUID, messageSeqs)
+	if err != nil {
+		m.Error("查询消息错误", zap.Error(err))
+		c.ResponseError(errors.New("查询消息错误"))
+		return
+	}
+	if resp == nil || len(resp.Messages) == 0 {
+		c.ResponseError(errors.New("消息不存在"))
+		return
+	}
+	if resp.Messages[0].FromUID != loginUID {
+		c.ResponseError(errors.New("只能编辑自己发送的消息"))
+		return
+	}
+
 	contentEdit := dbr.NewNullString(req.ContentEdit).String
 	contentMD5 := util.MD5(contentEdit)
 

@@ -1,8 +1,15 @@
 package channel
 
 import (
+	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-lib/common"
+	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -66,4 +73,71 @@ func TestFormatSecondToDisplayTime_Boundaries(t *testing.T) {
 	assert.Equal(t, "23小时", formatSecondToDisplayTime(86399))
 	// 86400秒 → 天
 	assert.Equal(t, "1天", formatSecondToDisplayTime(86400))
+}
+
+// TestClearChannelMessages_PersonChannel_NoPermission tests that non-friend users cannot clear personal channel messages
+func TestClearChannelMessages_PersonChannel_NoPermission(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	// Note: testutil.NewTestServer() already registers all module routes via module.Setup()
+
+	// Create test user (the target of the personal channel)
+	targetUID := "20001"
+	userService := user.NewService(ctx)
+	err := userService.AddUser(&user.AddUserReq{
+		UID:  targetUID,
+		Name: "Target User",
+	})
+	assert.NoError(t, err)
+
+	// Create login user
+	err = userService.AddUser(&user.AddUserReq{
+		UID:  testutil.UID,
+		Name: "Login User",
+	})
+	assert.NoError(t, err)
+
+	// Note: We do NOT add friend relationship here
+	// Try to clear personal channel messages without being friends
+	w := httptest.NewRecorder()
+	channelType := common.ChannelTypePerson.Uint8()
+	req, err := http.NewRequest("POST",
+		"/v1/channels/"+targetUID+"/"+fmt.Sprintf("%d", channelType)+"/message/clear",
+		bytes.NewReader([]byte("{}")))
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+
+	s.GetRoute().ServeHTTP(w, req)
+
+	// Should return error because not friends
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "没有权限操作此频道")
+}
+
+// TestClearChannelMessages_PersonChannel_SelfChannel tests that users cannot clear their own channel
+func TestClearChannelMessages_PersonChannel_SelfChannel(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	// Note: testutil.NewTestServer() already registers all module routes via module.Setup()
+
+	// Create login user
+	userService := user.NewService(ctx)
+	err := userService.AddUser(&user.AddUserReq{
+		UID:  testutil.UID,
+		Name: "Login User",
+	})
+	assert.NoError(t, err)
+
+	// Try to clear personal channel with self as target (loginUID == channelID)
+	w := httptest.NewRecorder()
+	channelType := common.ChannelTypePerson.Uint8()
+	req, err := http.NewRequest("POST",
+		"/v1/channels/"+testutil.UID+"/"+fmt.Sprintf("%d", channelType)+"/message/clear",
+		bytes.NewReader([]byte("{}")))
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+
+	s.GetRoute().ServeHTTP(w, req)
+
+	// Should return error because channelID == loginUID
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "频道ID不合法")
 }

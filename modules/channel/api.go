@@ -79,6 +79,21 @@ func (ch *Channel) clearChannelMessages(c *wkhttp.Context) {
 	}
 	fakeChannelID := channelID
 	if channelType == common.ChannelTypePerson.Uint8() {
+		// 验证当前用户是私聊的参与者
+		if loginUID == channelID {
+			c.ResponseError(errors.New("频道ID不合法"))
+			return
+		}
+		isFriend, err := ch.userService.IsFriend(loginUID, channelID)
+		if err != nil {
+			ch.Error("查询好友关系错误", zap.Error(err))
+			c.ResponseError(errors.New("查询好友关系错误"))
+			return
+		}
+		if !isFriend {
+			c.ResponseError(errors.New("没有权限操作此频道"))
+			return
+		}
 		fakeChannelID = common.GetFakeChannelIDWith(loginUID, channelID)
 	} else {
 		isCreatorOrManager, err := ch.groupService.IsCreatorOrManager(channelID, loginUID)

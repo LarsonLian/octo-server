@@ -232,12 +232,20 @@ func (m *Message) pinnedMessage(c *wkhttp.Context) {
 		var contentType int = 0
 		var content string = ""
 		if payloadMap["type"] != nil {
-			contentTypeI, _ := payloadMap["type"].(json.Number).Int64()
-			contentType = int(contentTypeI)
+			switch v := payloadMap["type"].(type) {
+			case json.Number:
+				contentTypeI, _ := v.Int64()
+				contentType = int(contentTypeI)
+			case float64:
+				contentType = int(v)
+			}
 		}
 		if contentType == common.Text.Int() {
-			content = payloadMap["content"].(string)
-			content = fmt.Sprintf("`%s`", content)
+			if contentStr, ok := payloadMap["content"].(string); ok {
+				content = fmt.Sprintf("`%s`", contentStr)
+			} else {
+				content = common.GetDisplayText(contentType)
+			}
 		} else {
 			content = common.GetDisplayText(contentType)
 		}

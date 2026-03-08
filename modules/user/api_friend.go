@@ -333,26 +333,34 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		c.ResponseError(errors.New("接收好友请求的用户不存在！"))
 		return
 	}
+	// Bot 用户（robot=1）跳过 vercode 验证，Space 模式下直接添加
+	isBotTarget := toUser.Robot == 1
 	verifyVercode := true
 	if req.Vercode == "" {
-		friend, err := f.db.queryWithUID(fromUID, req.ToUID)
-		if err != nil {
-			f.Error("查询好友信息错误", zap.String("to_uid", req.ToUID))
-			c.ResponseError(errors.New("查询好友信息错误"))
-			return
+		if isBotTarget {
+			// Bot 不需要 vercode
+			verifyVercode = false
+			req.Vercode = toUser.Vercode // 用 Bot 自身的 vercode
+		} else {
+			friend, err := f.db.queryWithUID(fromUID, req.ToUID)
+			if err != nil {
+				f.Error("查询好友信息错误", zap.String("to_uid", req.ToUID))
+				c.ResponseError(errors.New("查询好友信息错误"))
+				return
+			}
+			if friend == nil {
+				f.Error("好友信息不存在", zap.String("to_uid", req.ToUID))
+				c.ResponseError(errors.New("好友信息不存在"))
+				return
+			}
+			if friend.SourceVercode == "" {
+				f.Error("验证码不能为空", zap.String("to_uid", req.ToUID))
+				c.ResponseError(errors.New("验证码不能为空"))
+				return
+			}
+			req.Vercode = friend.SourceVercode
+			verifyVercode = false
 		}
-		if friend == nil {
-			f.Error("好友信息不存在", zap.String("to_uid", req.ToUID))
-			c.ResponseError(errors.New("好友信息不存在"))
-			return
-		}
-		if friend.SourceVercode == "" {
-			f.Error("验证码不能为空", zap.String("to_uid", req.ToUID))
-			c.ResponseError(errors.New("验证码不能为空"))
-			return
-		}
-		req.Vercode = friend.SourceVercode
-		verifyVercode = false
 	}
 
 	if verifyVercode {

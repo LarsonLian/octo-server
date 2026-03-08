@@ -77,6 +77,9 @@ func GetSoruce(code string) string {
 		return ""
 	}
 	if codeType == common.Friend {
+		if getUserProvider == nil {
+			return ""
+		}
 		friend, err := getUserProvider.GetFriendByVercode(code)
 		if err != nil || friend == nil || friend.Vercode != code {
 			return "通过名片添加"
@@ -93,6 +96,9 @@ func GetSoruce(code string) string {
 	} else if codeType == common.InvitationCode {
 		return "通过邀请码注册添加"
 	} else if codeType == common.GroupMember {
+		if getGroupMemberProvide == nil {
+			return "通过群聊添加"
+		}
 		groupMember, err := getGroupMemberProvide.GetGroupMemberByVercode(code)
 		if err != nil || groupMember == nil {
 			return "通过群聊添加"
@@ -135,6 +141,9 @@ func GetSources(codes []string) (map[string]string, error) {
 
 	for codeType, codes := range codeTypeMap {
 		if codeType == common.Friend {
+			if getUserProvider == nil {
+				return nil, errors.New("user provider not initialized")
+			}
 			friends, err := getUserProvider.GetFriendByVercodes(codes)
 			if err != nil {
 				return nil, err
@@ -165,6 +174,9 @@ func GetSources(codes []string) (map[string]string, error) {
 				codeSourceMap[code] = "通过邀请码注册添加"
 			}
 		} else if codeType == common.GroupMember {
+			if getGroupMemberProvide == nil {
+				return nil, errors.New("group member provider not initialized")
+			}
 			groupMembers, err := getGroupMemberProvide.GetGroupMemberByVercodes(codes)
 			if err != nil {
 				return nil, err
@@ -206,6 +218,9 @@ func CheckRequestAddFriendCode(code string, requestUID string) error {
 	codeType := common.VercodeType(codeTypeStr)
 	//验证群是否开启禁止加好友
 	if codeType == common.GroupMember {
+		if getGroupMemberProvide == nil {
+			return errors.New("group member provider not initialized")
+		}
 		groupMember, err := getGroupMemberProvide.GetGroupMemberByVercode(code)
 		if err != nil {
 			return err
@@ -246,6 +261,9 @@ func CheckSource(code string) error {
 	}
 	if codeType == common.Friend {
 		// 来源好友推荐
+		if getUserProvider == nil {
+			return errors.New("user provider not initialized")
+		}
 		friend, err := getUserProvider.GetFriendByVercode(code)
 		if err != nil {
 			return err
@@ -255,6 +273,9 @@ func CheckSource(code string) error {
 		}
 	} else if codeType == common.User {
 		// 搜索
+		if getUserProvider == nil {
+			return errors.New("user provider not initialized")
+		}
 		user, err := getUserProvider.GetUserByVercode(code)
 		if err != nil {
 			return errors.New("通过验证码查询用户信息错误")
@@ -264,6 +285,9 @@ func CheckSource(code string) error {
 		}
 	} else if codeType == common.QRCode {
 		// 二维码
+		if getUserProvider == nil {
+			return errors.New("user provider not initialized")
+		}
 		user, err := getUserProvider.GetUserByQRVercode(code)
 		if err != nil {
 			return errors.New("通过验证码查询用户信息错误")
@@ -273,6 +297,9 @@ func CheckSource(code string) error {
 		}
 	} else if codeType == common.GroupMember {
 		// 群
+		if getGroupMemberProvide == nil {
+			return errors.New("group member provider not initialized")
+		}
 		groupMember, err := getGroupMemberProvide.GetGroupMemberByVercode(code)
 		if err != nil {
 			return err
@@ -282,6 +309,9 @@ func CheckSource(code string) error {
 		}
 	} else if codeType == common.MailList {
 		// 手机通讯录
+		if getUserProvider == nil {
+			return errors.New("user provider not initialized")
+		}
 		user, err := getUserProvider.GetUserByMailListVercode(code)
 		if err != nil {
 			return err
@@ -291,6 +321,9 @@ func CheckSource(code string) error {
 		}
 	} else if codeType == common.InvitationCode {
 		// 邀请码注册
+		if getInviteCodeProvide == nil {
+			return errors.New("invite code provider not initialized")
+		}
 		isExist, err := getInviteCodeProvide.InviteCoceIsExist(code)
 		if err != nil {
 			return err

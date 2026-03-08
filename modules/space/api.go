@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -44,6 +45,9 @@ func (s *Space) checkSpaceActive(c *wkhttp.Context, spaceId string) bool {
 
 // Route 路由配置
 func (s *Space) Route(r *wkhttp.WKHttp) {
+	// 启动时加载已知 spaceId 到 ParseChannelID 缓存
+	s.loadKnownSpaceIDs()
+
 	auth := r.Group("/v1/space", s.ctx.AuthMiddleware(r))
 	{
 		auth.POST("/create", s.createSpace)
@@ -140,6 +144,9 @@ func (s *Space) createSpace(c *wkhttp.Context) {
 		resp["invite_code"] = inviteCode
 	}
 	c.Response(resp)
+
+	// 刷新 ParseChannelID 缓存
+	go s.loadKnownSpaceIDs()
 }
 
 // getSpace 获取空间详情
@@ -832,4 +839,16 @@ func (s *Space) updateInvite(c *wkhttp.Context) {
 	}
 
 	c.ResponseOK()
+}
+
+// loadKnownSpaceIDs 从 DB 加载所有 spaceId 到 ParseChannelID 缓存
+func (s *Space) loadKnownSpaceIDs() {
+	var ids []string
+	_, err := s.db.session.SelectBySql("SELECT space_id FROM space WHERE status=1").Load(&ids)
+	if err != nil {
+		s.Error("加载已知 spaceId 失败", zap.Error(err))
+		return
+	}
+	spacepkg.RegisterSpaceIDs(ids)
+	s.Info("已注册 spaceId 到 ParseChannelID 缓存", zap.Int("count", len(ids)), zap.Strings("ids", ids))
 }

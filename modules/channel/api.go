@@ -44,6 +44,7 @@ func (ch *Channel) Route(r *wkhttp.WKHttp) {
 		auth.GET("/channels/:channel_id/:channel_type", ch.channelGet)                                  // 获取频道信息
 		auth.POST("/channels/:channel_id/:channel_type/message/autodelete", ch.setAutoDeleteForMessage) // 设置消息定时删除时间
 		auth.POST("/channels/:channel_id/:channel_type/message/clear", ch.clearChannelMessages)         // 清空频道消息
+		auth.GET("/channels/:channel_id/:channel_type/storyline", ch.getStoryline)                      // 获取群聊个人故事线
 	}
 }
 

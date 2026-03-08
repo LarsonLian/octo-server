@@ -16,6 +16,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	spaceChannel "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -122,7 +123,12 @@ func (bf *BotFather) messagesListen(messages []*config.MessageResp) {
 		}
 
 		// 检查是否是发给BotFather的DM
-		toUID := common.GetToChannelIDWithFakeChannelID(message.ChannelID, message.FromUID)
+		rawToUID := common.GetToChannelIDWithFakeChannelID(message.ChannelID, message.FromUID)
+		// Space channel_id 格式: s{spaceId}_{uid}，需要提取真实 uid
+		toUID := rawToUID
+		if _, peerID := spaceChannel.ParseChannelID(rawToUID); peerID != "" {
+			toUID = peerID
+		}
 		if toUID != BotFatherUID {
 			continue
 		}

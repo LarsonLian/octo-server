@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	spaceChannel "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
@@ -40,6 +41,7 @@ func newCommandHandler(ctx *config.Context) *commandHandler {
 }
 
 // HandleMessage 处理发送给BotFather的消息
+// fromUID 可能是 Space 格式 (sminglue_default_uid)，内部用于回复；DB 查询需要 realUID
 func (h *commandHandler) HandleMessage(fromUID string, content string) {
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -54,6 +56,14 @@ func (h *commandHandler) HandleMessage(fromUID string, content string) {
 
 	// 非命令消息，检查是否在多轮对话中
 	h.handleStatefulInput(fromUID, content)
+}
+
+// extractRealUID 从可能带 Space 前缀的 uid 中提取真实 uid
+func extractRealUID(uid string) string {
+	if _, peerID := spaceChannel.ParseChannelID(uid); peerID != "" {
+		return peerID
+	}
+	return uid
 }
 
 func (h *commandHandler) handleCommand(fromUID string, cmd string) {
@@ -137,7 +147,7 @@ func (h *commandHandler) handleNewBot(fromUID string) {
 
 func (h *commandHandler) handleMyBots(fromUID string) {
 	h.sm.Clear(fromUID)
-	bots, err := h.db.queryRobotsByCreatorUID(fromUID)
+	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
 	if err != nil {
 		h.Error("查询机器人列表失败", zap.Error(err))
 		h.reply(fromUID, "查询失败，请稍后重试。")
@@ -165,7 +175,7 @@ func (h *commandHandler) handleMyBots(fromUID string) {
 }
 
 func (h *commandHandler) handleConnect(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(fromUID)
+	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
 	if err != nil {
 		h.Error("查询机器人列表失败", zap.Error(err))
 		h.reply(fromUID, "查询失败，请稍后重试。")
@@ -184,7 +194,7 @@ func (h *commandHandler) handleConnect(fromUID string) {
 }
 
 func (h *commandHandler) handleDisconnect(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(fromUID)
+	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
 	if err != nil {
 		h.Error("查询机器人列表失败", zap.Error(err))
 		h.reply(fromUID, "查询失败，请稍后重试。")
@@ -203,7 +213,7 @@ func (h *commandHandler) handleDisconnect(fromUID string) {
 }
 
 func (h *commandHandler) handleSetName(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(fromUID)
+	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -219,7 +229,7 @@ func (h *commandHandler) handleSetName(fromUID string) {
 }
 
 func (h *commandHandler) handleSetDescription(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(fromUID)
+	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -235,7 +245,7 @@ func (h *commandHandler) handleSetDescription(fromUID string) {
 }
 
 func (h *commandHandler) handleDeleteBot(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(fromUID)
+	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -251,7 +261,7 @@ func (h *commandHandler) handleDeleteBot(fromUID string) {
 }
 
 func (h *commandHandler) handleToken(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(fromUID)
+	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -265,7 +275,7 @@ func (h *commandHandler) handleToken(fromUID string) {
 }
 
 func (h *commandHandler) handleRevoke(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(fromUID)
+	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -365,7 +375,7 @@ func (h *commandHandler) onBotUsernameInput(fromUID string, input string) {
 		h.sm.Clear(fromUID)
 		return
 	}
-	err = h.createBot(fromUID, name, username, botToken)
+	err = h.createBot(extractRealUID(fromUID), name, username, botToken)
 	if err != nil {
 		h.Error("创建机器人失败", zap.Error(err))
 		h.reply(fromUID, "创建失败，请稍后重试。")
@@ -388,7 +398,7 @@ func (h *commandHandler) onBotSelection(fromUID string, input string) {
 	input = strings.TrimSpace(input)
 
 	// 查找机器人
-	bots, err := h.db.queryRobotsByCreatorUID(fromUID)
+	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "查询失败，操作已取消。")
 		h.sm.Clear(fromUID)
@@ -801,11 +811,18 @@ func (h *commandHandler) createBot(creatorUID, name, username, botToken string) 
 
 func (h *commandHandler) reply(toUID string, content string) {
 	channelID := toUID
+	fromUID := BotFatherUID
+	// Space 模式：如果 toUID 含 Space 前缀，BotFather 也需要加前缀
+	if _, peerID := spaceChannel.ParseChannelID(toUID); peerID != "" {
+		// toUID = "sminglue_default_someuser", 提取 spaceId
+		spacePrefix := toUID[:len(toUID)-len(peerID)]
+		fromUID = spacePrefix + BotFatherUID
+	}
 	h.ctx.SendMessage(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			RedDot: 1,
 		},
-		FromUID:     BotFatherUID,
+		FromUID:     fromUID,
 		ChannelID:   channelID,
 		ChannelType: common.ChannelTypePerson.Uint8(),
 		Payload: []byte(util.ToJson(map[string]interface{}{

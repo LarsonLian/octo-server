@@ -584,23 +584,10 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	// Space 过滤
 	if hasSpaceFilter {
 		filtered := make([]*SyncUserConversationResp, 0, len(syncUserConversationResps))
-		// 第一遍：收集 Space 格式会话的 peerID，用于去重
-		spacePeers := make(map[string]bool)
 		for _, conv := range syncUserConversationResps {
-			if conv.SpaceID == filterSpaceID {
-				_, peerID := spacepkg.ParseChannelID(conv.ChannelID)
-				spacePeers[peerID] = true
-			}
-		}
-		// 第二遍：过滤 + 去重（裸 UID 会话如果有对应 Space 格式则跳过）
-		for _, conv := range syncUserConversationResps {
-			if conv.SpaceID == filterSpaceID {
+			// 匹配 Space 或旧会话（无 Space 前缀的裸 UID，视为属于当前 Space）
+			if conv.SpaceID == filterSpaceID || conv.SpaceID == "" {
 				filtered = append(filtered, conv)
-			} else if conv.SpaceID == "" {
-				// 旧会话：如果已有 Space 格式的同一 peerID，跳过
-				if !spacePeers[conv.ChannelID] {
-					filtered = append(filtered, conv)
-				}
 			}
 		}
 		syncUserConversationResps = filtered

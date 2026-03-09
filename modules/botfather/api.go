@@ -2,6 +2,7 @@ package botfather
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"runtime/debug"
 	"errors"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -34,6 +36,7 @@ type BotFather struct {
 	cmdHandler       *commandHandler
 	userService      user.IService
 	appService       app.IService
+	fileService      file.IService
 	robotEventPrefix string
 	initOnce         sync.Once
 	msgSem           chan struct{} // 限制并发消息处理的信号量
@@ -48,6 +51,7 @@ func New(ctx *config.Context) *BotFather {
 		cmdHandler:       newCommandHandler(ctx),
 		userService:      user.NewService(ctx),
 		appService:       app.NewService(ctx),
+		fileService:      file.NewService(ctx),
 		robotEventPrefix: "robotEvent:",
 		msgSem:           make(chan struct{}, 100), // 限制最多100个并发消息处理
 		Log:              log.NewTLog("BotFather"),
@@ -89,6 +93,8 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.GET("/groups/:group_no", bf.getGroupInfo)
 		botAPI.GET("/groups/:group_no/members", bf.getGroupMembers)
 		botAPI.POST("/setCommands", bf.setCommands)
+		botAPI.GET("/file/*path", bf.botProxyFile)
+		botAPI.POST("/upload", bf.botUploadFile)
 	}
 
 	// Robot Apply API 端点（使用用户认证）
@@ -867,4 +873,78 @@ type messageResp struct {
 	ChannelType uint8       `json:"channel_type,omitempty"`
 	Timestamp   int32       `json:"timestamp"`
 	Payload     interface{} `json:"payload"`
+}
+
+// botProxyFile Bot文件下载代理 — 302重定向到presigned URL
+func (bf *BotFather) botProxyFile(c *wkhttp.Context) {
+	ph := c.Param("path")
+	if ph == "" {
+		c.ResponseError(errors.New("文件路径不能为空"))
+		return
+	}
+	ph = strings.TrimPrefix(ph, "/")
+
+	filename := c.Query("filename")
+	if filename == "" {
+		parts := strings.Split(ph, "/")
+		if len(parts) > 0 {
+			filename = parts[len(parts)-1]
+		}
+	}
+
+	downloadURL, err := bf.fileService.DownloadURL(ph, filename)
+	if err != nil {
+		bf.Error("获取文件下载URL失败", zap.Error(err), zap.String("path", ph))
+		c.ResponseError(errors.New("获取文件失败"))
+		return
+	}
+	c.Redirect(http.StatusFound, downloadURL)
+}
+
+// botUploadFile Bot文件上传
+func (bf *BotFather) botUploadFile(c *wkhttp.Context) {
+	fileType := c.DefaultQuery("type", "chat")
+	uploadPath := c.Query("path")
+
+	multipartFile, fileHeader, err := c.Request.FormFile("file")
+	if err != nil {
+		bf.Error("读取上传文件失败", zap.Error(err))
+		c.ResponseError(errors.New("读取文件失败"))
+		return
+	}
+	defer multipartFile.Close()
+
+	const maxSize int64 = 100 * 1024 * 1024
+	if fileHeader.Size > maxSize {
+		c.ResponseError(fmt.Errorf("文件大小不能超过%dMB", maxSize/1024/1024))
+		return
+	}
+
+	fileName := fileHeader.Filename
+	path := uploadPath
+	if path == "" {
+		path = fmt.Sprintf("/%d/%s", time.Now().Unix(), fileName)
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	storagePath := fmt.Sprintf("%s%s", fileType, path)
+	contentType := "application/octet-stream"
+	_, err = bf.fileService.UploadFile(storagePath, contentType, func(w io.Writer) error {
+		_, err := io.Copy(w, multipartFile)
+		return err
+	})
+	if err != nil {
+		bf.Error("上传文件失败", zap.Error(err))
+		c.ResponseError(errors.New("上传文件失败"))
+		return
+	}
+
+	previewPath := fmt.Sprintf("file/preview/%s%s", fileType, path)
+	c.Response(gin.H{
+		"url":  previewPath,
+		"name": fileName,
+		"size": fileHeader.Size,
+	})
 }

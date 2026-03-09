@@ -3,6 +3,7 @@ package util
 import (
 	"fmt"
 	"sort"
+	"strconv"
 )
 
 func GetSignStr(params map[string]interface{}) string {
@@ -52,13 +53,13 @@ func ObjToStr(v interface{}) string {
 	case int32:
 		strV = fmt.Sprintf("%d", v)
 	case uint32:
-		strV = fmt.Sprintf("%s", v)
+		strV = fmt.Sprintf("%d", v)
 	case string:
-		strV = fmt.Sprintf("%s", v)
+		strV = v
 	case float32:
-		strV = fmt.Sprintf("%s", v)
+		strV = strconv.FormatFloat(float64(v), 'f', -1, 32)
 	case float64:
-		strV = fmt.Sprintf("%s", v)
+		strV = strconv.FormatFloat(v, 'f', -1, 64)
 	default:
 		strV = fmt.Sprintf("%s", v)
 	}

@@ -53,14 +53,6 @@ func (m *Message) handleReadedMessageCount() {
 			}
 			messages = append(messages, &messageExtra)
 			messageIds = append(messageIds, messageExtra.MessageIDStr)
-			m.mutex.Lock()
-			err = m.ctx.GetRedisConn().Del(key)
-			if err != nil {
-				m.mutex.Unlock()
-				m.Error("删除缓存错误", zap.Error(err), zap.String("key", key))
-				return
-			}
-			m.mutex.Unlock()
 		}
 	}
 
@@ -199,6 +191,13 @@ func (m *Message) handleReadedMessageCount() {
 		tx.Rollback()
 		m.Error("提交事物错误", zap.Error(err))
 		return
+	}
+
+	// 事务提交成功后再删除缓存，避免事务失败导致数据丢失
+	for _, key := range keysStr {
+		if err := m.ctx.GetRedisConn().Del(key); err != nil {
+			m.Error("删除缓存错误", zap.Error(err), zap.String("key", key))
+		}
 	}
 
 	if len(sendCmds) > 0 {

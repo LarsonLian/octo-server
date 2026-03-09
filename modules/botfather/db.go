@@ -32,6 +32,7 @@ type robotModel struct {
 	BotToken     string
 	IMTokenCache string
 	BotCommands  string
+	AutoApprove  int // 0=需要审批 1=自动通过
 	AccessMode   int // 0=需要审批 1=自动通过 2=禁止申请
 	db.BaseModel
 }
@@ -65,9 +66,11 @@ func (d *botfatherDB) insertRobotTx(m *robotModel, tx *dbr.Tx) error {
 	_, err := tx.InsertInto("robot").Columns(
 		"app_id", "robot_id", "username", "token", "version", "status",
 		"creator_uid", "description", "bot_token", "im_token_cache", "bot_commands",
+		"auto_approve",
 	).Values(
 		m.AppID, m.RobotID, m.Username, m.Token, m.Version, m.Status,
 		m.CreatorUID, m.Description, m.BotToken, m.IMTokenCache, m.BotCommands,
+		m.AutoApprove,
 	).Exec()
 	return err
 }

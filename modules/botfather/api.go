@@ -2,15 +2,14 @@ package botfather
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"errors"
-	"fmt"
-	"net/http"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"

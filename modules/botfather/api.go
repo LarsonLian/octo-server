@@ -890,27 +890,17 @@ func (bf *BotFather) botProxyFile(c *wkhttp.Context) {
 		return
 	}
 
-	// 解析下载URL，去掉查询参数（MinIO 要求 presigned URL 才能使用 response-content-disposition 等参数）
-	parsedURL, err := url.Parse(downloadURL)
+	// 直接使用带签名的完整 URL 读取文件（保留 MinIO presigned 签名）
+	resp, err := http.Get(downloadURL)
 	if err != nil {
-		bf.Error("解析下载URL失败", zap.Error(err))
-		c.ResponseError(errors.New("获取文件失败"))
-		return
-	}
-	parsedURL.RawQuery = ""
-	plainURL := parsedURL.String()
-
-	// 从存储后端读取文件
-	resp, err := http.Get(plainURL)
-	if err != nil {
-		bf.Error("读取文件失败", zap.Error(err), zap.String("url", plainURL))
+		bf.Error("读取文件失败", zap.Error(err), zap.String("url", downloadURL))
 		c.ResponseError(errors.New("获取文件失败"))
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bf.Error("存储后端返回错误", zap.Int("status", resp.StatusCode), zap.String("url", plainURL))
+		bf.Error("存储后端返回错误", zap.Int("status", resp.StatusCode), zap.String("url", downloadURL))
 		c.ResponseError(errors.New("获取文件失败"))
 		return
 	}

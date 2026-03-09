@@ -22,7 +22,9 @@ func NewMySQL(addr string, sqlDir string, migration bool) *dbr.Session {
 	conn.SetMaxOpenConns(2000)
 	conn.SetMaxIdleConns(1000)
 	conn.SetConnMaxLifetime(time.Second * 60 * 60 * 4) //mysql 默认超时时间为 60*60*8=28800 SetConnMaxLifetime设置为小于数据库超时时间即可
-	conn.Ping()
+	if err = conn.Ping(); err != nil {
+		panic(fmt.Errorf("failed to ping MySQL at %s: %w", addr, err))
+	}
 
 	session := conn.NewSession(nil)
 

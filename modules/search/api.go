@@ -328,6 +328,64 @@ func (s *Search) global(c *wkhttp.Context) {
 		}
 	}
 
+	// Space 过滤：排除不在当前 Space 的 Bot DM 消息
+	if searchSpaceID != "" && len(realMessages) > 0 {
+		systemBots := map[string]bool{"botfather": true, "u_10000": true, "fileHelper": true}
+		var dmUIDs []string
+		for _, m := range realMessages {
+			if m.ChannelType == common.ChannelTypePerson.Uint8() && !systemBots[m.ChannelID] {
+				dmUIDs = append(dmUIDs, m.ChannelID)
+			}
+		}
+		if len(dmUIDs) > 0 {
+			dmUIDs = util.RemoveRepeatedElement(dmUIDs)
+			skipBotFilter := false
+			// 批量查询哪些是 Bot
+			var botUIDs []string
+			_, err := s.ctx.DB().Select("uid").From("`user`").
+				Where("uid IN ? AND robot=1", dmUIDs).
+				Load(&botUIDs)
+			if err != nil {
+				s.Warn("搜索查询Bot UID错误，跳过Bot过滤", zap.Error(err))
+				skipBotFilter = true
+			}
+			if !skipBotFilter && len(botUIDs) > 0 {
+				// 批量查询哪些 Bot 在 searchSpaceID 中
+				var memberUIDs []string
+				_, err := s.ctx.DB().Select("uid").From("space_member").
+					Where("space_id=? AND uid IN ? AND status=1", searchSpaceID, botUIDs).
+					Load(&memberUIDs)
+				if err != nil {
+					s.Warn("搜索查询Bot Space成员错误，跳过Bot过滤", zap.Error(err))
+					skipBotFilter = true
+				}
+				if !skipBotFilter {
+					memberSet := make(map[string]bool, len(memberUIDs))
+					for _, uid := range memberUIDs {
+						memberSet[uid] = true
+					}
+					// 排除不在 Space 中的 Bot DM 消息
+					botExcluded := make(map[string]bool)
+					for _, uid := range botUIDs {
+						if !memberSet[uid] {
+							botExcluded[uid] = true
+						}
+					}
+					if len(botExcluded) > 0 {
+						spaceFiltered := make([]*config.MessageResp, 0, len(realMessages))
+						for _, m := range realMessages {
+							if m.ChannelType == common.ChannelTypePerson.Uint8() && botExcluded[m.ChannelID] {
+								continue
+							}
+							spaceFiltered = append(spaceFiltered, m)
+						}
+						realMessages = spaceFiltered
+					}
+				}
+			}
+		}
+	}
+
 	messagesResp := make([]*messageResp, 0)
 	if len(realMessages) > 0 {
 		for _, msg := range realMessages {

@@ -6,8 +6,10 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/db"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/gocraft/dbr/v2"
+	"go.uber.org/zap"
 )
 
 // DB DB
@@ -44,7 +46,12 @@ func (d *DB) insertMessage(m *messageModel) error {
 
 // 通过频道ID获取表
 func (d *DB) getTable(channelID string) string {
-	tableIndex := crc32.ChecksumIEEE([]byte(channelID)) % uint32(d.ctx.GetConfig().TablePartitionConfig.MessageTableCount)
+	count := d.ctx.GetConfig().TablePartitionConfig.MessageTableCount
+	if count <= 0 {
+		log.Warn("MessageTableCount is not configured or invalid, using default table", zap.Int("count", count))
+		return "message"
+	}
+	tableIndex := crc32.ChecksumIEEE([]byte(channelID)) % uint32(count)
 	if tableIndex == 0 {
 		return "message"
 	}

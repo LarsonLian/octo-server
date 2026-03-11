@@ -106,7 +106,7 @@ func (h *commandHandler) GetPendingApplies(robotID string) ([]*BotFriendApply, e
 
 // GetAllPendingAppliesForOwner 获取某个 owner 所有 bot 的待审批好友申请
 func (h *commandHandler) GetAllPendingAppliesForOwner(ownerUID string) ([]*BotFriendApply, error) {
-	bots, err := h.db.queryRobotsByCreatorUID(ownerUID)
+	bots, err := h.queryBotsForUser(ownerUID)
 	if err != nil {
 		return nil, err
 	}

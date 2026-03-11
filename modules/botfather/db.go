@@ -61,6 +61,16 @@ func (d *botfatherDB) queryRobotsByCreatorUID(creatorUID string) ([]*robotModel,
 	return list, err
 }
 
+// queryRobotsByCreatorUIDAndSpaceID 查询某用户在指定 Space 下创建的机器人
+func (d *botfatherDB) queryRobotsByCreatorUIDAndSpaceID(creatorUID, spaceID string) ([]*robotModel, error) {
+	var list []*robotModel
+	_, err := d.session.SelectBySql(
+		"SELECT r.* FROM robot r INNER JOIN space_member sm ON sm.uid=r.robot_id AND sm.space_id=? AND sm.status=1 WHERE r.creator_uid=? AND r.status=1",
+		spaceID, creatorUID,
+	).Load(&list)
+	return list, err
+}
+
 // insertRobotTx 插入机器人（事务）
 func (d *botfatherDB) insertRobotTx(m *robotModel, tx *dbr.Tx) error {
 	_, err := tx.InsertInto("robot").Columns(

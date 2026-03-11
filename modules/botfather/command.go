@@ -170,6 +170,19 @@ func (h *commandHandler) handleStatefulInput(fromUID string, input string) {
 	}
 }
 
+// queryBotsForUser returns the creator's bots, filtered by current Space if available.
+func (h *commandHandler) queryBotsForUser(fromUID string) ([]*robotModel, error) {
+	realUID := extractRealUID(fromUID)
+	spacePrefix := getSpacePrefix(fromUID)
+	if spacePrefix != "" {
+		spaceID := spacePrefix[1 : len(spacePrefix)-1]
+		if len(spaceID) >= 2 {
+			return h.db.queryRobotsByCreatorUIDAndSpaceID(realUID, spaceID)
+		}
+	}
+	return h.db.queryRobotsByCreatorUID(realUID)
+}
+
 // ========== 命令处理 ==========
 
 func (h *commandHandler) handleCancel(fromUID string) {
@@ -192,8 +205,25 @@ func (h *commandHandler) handleMyBots(fromUID string) {
 	if statusErr != nil {
 		userStatus = -2 // query failed
 	}
-	h.Info("/mybots query", zap.String("fromUID", fromUID), zap.String("realUID", realUID), zap.Int("creator_user_status", userStatus))
-	bots, err := h.db.queryRobotsByCreatorUID(realUID)
+	// 提取当前 Space ID，用于过滤
+	spacePrefix := getSpacePrefix(fromUID)
+	var currentSpaceID string
+	if spacePrefix != "" {
+		currentSpaceID = spacePrefix[1 : len(spacePrefix)-1]
+		if len(currentSpaceID) < 2 {
+			h.Warn("/mybots Space前缀格式异常", zap.String("spacePrefix", spacePrefix), zap.String("fromUID", fromUID))
+			h.reply(fromUID, "Space 信息异常，请重新进入会话后重试。")
+			return
+		}
+	}
+	h.Info("/mybots query", zap.String("fromUID", fromUID), zap.String("realUID", realUID), zap.Int("creator_user_status", userStatus), zap.String("spaceID", currentSpaceID))
+	var bots []*robotModel
+	var err error
+	if currentSpaceID != "" {
+		bots, err = h.db.queryRobotsByCreatorUIDAndSpaceID(realUID, currentSpaceID)
+	} else {
+		bots, err = h.db.queryRobotsByCreatorUID(realUID)
+	}
 	if err != nil {
 		h.Error("查询机器人列表失败", zap.Error(err), zap.String("realUID", realUID))
 		h.reply(fromUID, "查询失败，请稍后重试。")
@@ -222,7 +252,7 @@ func (h *commandHandler) handleMyBots(fromUID string) {
 }
 
 func (h *commandHandler) handleConnect(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
+	bots, err := h.queryBotsForUser(fromUID)
 	if err != nil {
 		h.Error("查询机器人列表失败", zap.Error(err))
 		h.reply(fromUID, "查询失败，请稍后重试。")
@@ -241,7 +271,7 @@ func (h *commandHandler) handleConnect(fromUID string) {
 }
 
 func (h *commandHandler) handleDisconnect(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
+	bots, err := h.queryBotsForUser(fromUID)
 	if err != nil {
 		h.Error("查询机器人列表失败", zap.Error(err))
 		h.reply(fromUID, "查询失败，请稍后重试。")
@@ -260,7 +290,7 @@ func (h *commandHandler) handleDisconnect(fromUID string) {
 }
 
 func (h *commandHandler) handleSetName(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
+	bots, err := h.queryBotsForUser(fromUID)
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -276,7 +306,7 @@ func (h *commandHandler) handleSetName(fromUID string) {
 }
 
 func (h *commandHandler) handleSetDescription(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
+	bots, err := h.queryBotsForUser(fromUID)
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -292,7 +322,7 @@ func (h *commandHandler) handleSetDescription(fromUID string) {
 }
 
 func (h *commandHandler) handleDeleteBot(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
+	bots, err := h.queryBotsForUser(fromUID)
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -308,7 +338,7 @@ func (h *commandHandler) handleDeleteBot(fromUID string) {
 }
 
 func (h *commandHandler) handleToken(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
+	bots, err := h.queryBotsForUser(fromUID)
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -322,7 +352,7 @@ func (h *commandHandler) handleToken(fromUID string) {
 }
 
 func (h *commandHandler) handleRevoke(fromUID string) {
-	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
+	bots, err := h.queryBotsForUser(fromUID)
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "你还没有创建机器人。")
 		return
@@ -422,7 +452,7 @@ func (h *commandHandler) onBotUsernameInput(fromUID string, input string) {
 		h.sm.Clear(fromUID)
 		return
 	}
-	err = h.createBot(extractRealUID(fromUID), name, username, botToken)
+	err = h.createBot(extractRealUID(fromUID), fromUID, name, username, botToken)
 	if err != nil {
 		h.Error("创建机器人失败", zap.Error(err))
 		h.reply(fromUID, "创建失败，请稍后重试。")
@@ -445,7 +475,7 @@ func (h *commandHandler) onBotSelection(fromUID string, input string) {
 	input = strings.TrimSpace(input)
 
 	// 查找机器人
-	bots, err := h.db.queryRobotsByCreatorUID(extractRealUID(fromUID))
+	bots, err := h.queryBotsForUser(fromUID)
 	if err != nil || len(bots) == 0 {
 		h.reply(fromUID, "查询失败，操作已取消。")
 		h.sm.Clear(fromUID)
@@ -759,7 +789,7 @@ func (h *commandHandler) disconnectBot(fromUID string, bot *robotModel) {
 
 // ========== 辅助方法 ==========
 
-func (h *commandHandler) createBot(creatorUID, name, username, botToken string) error {
+func (h *commandHandler) createBot(creatorUID, fromUID, name, username, botToken string) error {
 	robotID := username // 机器人的UID就是用户名
 
 	// 1. 创建 App
@@ -821,18 +851,34 @@ func (h *commandHandler) createBot(creatorUID, name, username, botToken string) 
 		return fmt.Errorf("创建用户失败: %w", err)
 	}
 
-	// 4. 将 Bot 加入创建者所在的所有 Space
-	spaceIDs, err := h.getCreatorSpaceIDs(creatorUID)
-	if err != nil {
-		h.Warn("查询创建者Space失败", zap.Error(err))
+	// 4. 将 Bot 加入当前 Space（而非创建者所在的所有 Space）
+	spacePrefix := getSpacePrefix(fromUID)
+	var targetSpaceID string
+	if spacePrefix != "" {
+		// Space 前缀格式为 "s{spaceId}_"，去掉首字符 "s" 和末尾 "_"
+		targetSpaceID = spacePrefix[1 : len(spacePrefix)-1]
+		if len(targetSpaceID) < 2 {
+			h.Warn("createBot Space前缀格式异常", zap.String("spacePrefix", spacePrefix), zap.String("fromUID", fromUID))
+			return fmt.Errorf("Space 信息异常，无法创建机器人")
+		}
 	}
-	for _, sid := range spaceIDs {
+	if spacePrefix == "" {
+		// 无 Space 前缀（legacy），回退到创建者的第一个 Space
+		spaceIDs, err := h.getCreatorSpaceIDs(creatorUID)
+		if err != nil {
+			h.Warn("查询创建者Space失败", zap.Error(err))
+		}
+		if len(spaceIDs) > 0 {
+			targetSpaceID = spaceIDs[0]
+		}
+	}
+	if targetSpaceID != "" {
 		_, err = h.ctx.DB().InsertBySql(
 			"INSERT IGNORE INTO space_member (space_id, uid, role, status, created_at, updated_at) VALUES (?, ?, 0, 1, NOW(), NOW())",
-			sid, robotID,
+			targetSpaceID, robotID,
 		).Exec()
 		if err != nil {
-			h.Warn("Bot加入Space失败", zap.Error(err), zap.String("space_id", sid))
+			h.Warn("Bot加入Space失败", zap.Error(err), zap.String("space_id", targetSpaceID))
 		}
 	}
 	// 兼容：仍添加好友关系（过渡期）

@@ -334,8 +334,16 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		c.ResponseError(errors.New("接收好友请求的用户不存在！"))
 		return
 	}
-	// Bot 用户（robot=1）跳过 vercode 验证，Space 模式下直接添加
+	// Bot 用户（robot=1）：检查 Space 隔离，跳过 vercode 验证
 	isBotTarget := toUser.Robot == 1
+	systemBots := map[string]bool{"botfather": true, "u_10000": true}
+	if isBotTarget && !systemBots[req.ToUID] {
+		commonSpace := space.GetCommonSpaceID(f.ctx, fromUID, req.ToUID)
+		if commonSpace == "" {
+			c.ResponseError(errors.New("该 Bot 不在当前 Space 中，无法添加"))
+			return
+		}
+	}
 	verifyVercode := true
 	if req.Vercode == "" {
 		if isBotTarget {

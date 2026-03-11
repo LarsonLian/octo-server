@@ -1005,6 +1005,31 @@ func (g *Group) memberAdd(c *wkhttp.Context) {
 		}
 	}
 
+	// Bot Space 隔离检查：如果群属于某个 Space，Bot 成员必须也在该 Space 中
+	if group.SpaceID != "" {
+		for _, memberUID := range req.Members {
+			var isBot int
+			err = g.ctx.DB().SelectBySql("SELECT COALESCE((SELECT robot FROM `user` WHERE uid=? LIMIT 1), 0)", memberUID).LoadOne(&isBot)
+			if err != nil {
+				g.Error("查询用户robot状态失败", zap.Error(err), zap.String("memberUID", memberUID))
+				c.ResponseError(errors.New("查询用户信息失败"))
+				return
+			}
+			if isBot == 1 {
+				inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), group.SpaceID, memberUID)
+				if checkErr != nil {
+					g.Error("检查Bot Space成员失败", zap.Error(checkErr))
+					c.ResponseError(errors.New("检查Bot Space成员失败"))
+					return
+				}
+				if !inSpace {
+					c.ResponseError(errors.New("该 Bot 不属于当前 Space"))
+					return
+				}
+			}
+		}
+	}
+
 	err = g.addMembers(req.Members, groupNo, operator, operatorName)
 	if err != nil {
 		c.ResponseError(err)

@@ -76,6 +76,10 @@ func (u *User) emailRegister(c *wkhttp.Context) {
 		c.ResponseError(errors.New("密码不能为空"))
 		return
 	}
+	if len(strings.TrimSpace(req.Password)) < 6 {
+		c.ResponseError(errors.New("密码长度不能少于6位"))
+		return
+	}
 
 	// 验证邮箱验证码
 	if strings.TrimSpace(req.Code) == "" {
@@ -265,6 +269,10 @@ func (u *User) emailForgetPwd(c *wkhttp.Context) {
 	}
 	if strings.TrimSpace(req.Password) == "" {
 		c.ResponseError(errors.New("新密码不能为空"))
+		return
+	}
+	if len(strings.TrimSpace(req.Password)) < 6 {
+		c.ResponseError(errors.New("密码长度不能少于6位"))
 		return
 	}
 

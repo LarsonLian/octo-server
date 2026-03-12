@@ -3,6 +3,7 @@ package common
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -100,9 +101,11 @@ func (u *SmsbaoProvider) SendSMS(ctx context.Context, zone, phone string, code s
 	if msg, ok := statusStr[result]; ok {
 		if result != "0" {
 			u.Error("短信发送失败", zap.String("code", result), zap.String("message", msg))
+			return fmt.Errorf("短信发送失败，错误码: %s, 信息: %s", result, msg)
 		}
 	} else {
 		u.Error("短信发送未知状态", zap.String("code", result))
+		return fmt.Errorf("短信发送返回未知状态码: %s", result)
 	}
 	return nil
 }

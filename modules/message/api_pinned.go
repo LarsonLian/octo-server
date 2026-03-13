@@ -479,6 +479,17 @@ func (m *Message) syncPinnedMessage(c *wkhttp.Context) {
 			return
 		}
 		fakeChannelID = common.GetFakeChannelIDWith(loginUID, req.ChannelID)
+	} else if req.ChannelType == common.ChannelTypeGroup.Uint8() {
+		isMember, err := m.groupService.ExistMember(req.ChannelID, loginUID)
+		if err != nil {
+			m.Error("查询群成员失败", zap.Error(err))
+			c.ResponseError(errors.New("查询权限失败"))
+			return
+		}
+		if !isMember {
+			c.ResponseError(errors.New("非群成员，无权访问置顶消息"))
+			return
+		}
 	}
 	pinnedMsgs, err := m.pinnedDB.queryWithChannelIDAndVersion(fakeChannelID, req.ChannelType, req.Version)
 	if err != nil {

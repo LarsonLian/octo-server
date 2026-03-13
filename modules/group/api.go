@@ -2223,7 +2223,12 @@ func (g *Group) memberUpdate(c *wkhttp.Context) {
 	for key, value := range memberUpdateMap {
 		switch key {
 		case "remark":
-			memberModel.Remark = value.(string)
+			remark, ok := value.(string)
+			if !ok {
+				c.ResponseError(errors.New("remark 字段类型错误"))
+				return
+			}
+			memberModel.Remark = remark
 		}
 	}
 	genSeqVal, err := g.ctx.GenSeq(common.GroupMemberSeqKey)

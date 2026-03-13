@@ -115,7 +115,9 @@ func (g *Group) handleRegisterUserEvent(data []byte, commit config.EventCommit) 
 		//创建群
 		version, err := g.ctx.GenSeq(common.GroupSeqKey)
 		if err != nil {
-			g.Warn("GenSeq failed", zap.Error(err))
+			g.Error("GenSeq failed", zap.Error(err))
+			tx.Rollback()
+			commit(err)
 			return
 		}
 		err = g.db.InsertTx(&Model{
@@ -134,7 +136,9 @@ func (g *Group) handleRegisterUserEvent(data []byte, commit config.EventCommit) 
 		//添加创建者
 		memberVersion, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
 		if err != nil {
-			g.Warn("GenSeq failed", zap.Error(err))
+			g.Error("GenSeq failed", zap.Error(err))
+			tx.Rollback()
+			commit(err)
 			return
 		}
 		err = g.db.InsertMemberTx(&MemberModel{
@@ -251,7 +255,9 @@ func (g *Group) handleOrgOrDeptCreateEvent(data []byte, commit config.EventCommi
 		// 创建群
 		version, err := g.ctx.GenSeq(common.GroupSeqKey)
 		if err != nil {
-			g.Warn("GenSeq failed", zap.Error(err))
+			g.Error("GenSeq failed", zap.Error(err))
+			tx.Rollback()
+			commit(err)
 			return
 		}
 		err = g.db.InsertTx(&Model{
@@ -274,7 +280,9 @@ func (g *Group) handleOrgOrDeptCreateEvent(data []byte, commit config.EventCommi
 		//添加创建者
 		memberVersion, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
 		if err != nil {
-			g.Warn("GenSeq failed", zap.Error(err))
+			g.Error("GenSeq failed", zap.Error(err))
+			tx.Rollback()
+			commit(err)
 			return
 		}
 		err = g.db.InsertMemberTx(&MemberModel{
@@ -297,7 +305,9 @@ func (g *Group) handleOrgOrDeptCreateEvent(data []byte, commit config.EventCommi
 				realMemberUids = append(realMemberUids, member.EmployeeUid)
 				memberVersion, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
 				if err != nil {
-					g.Warn("GenSeq failed", zap.Error(err))
+					g.Error("GenSeq failed", zap.Error(err))
+					tx.Rollback()
+					commit(err)
 					return
 				}
 				err = g.db.InsertMemberTx(&MemberModel{
@@ -458,7 +468,9 @@ func (g *Group) handleOrgOrDeptEmployeeUpdate(data []byte, commit config.EventCo
 		for _, member := range members {
 			version, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
 			if err != nil {
-				g.Warn("GenSeq failed", zap.Error(err))
+				g.Error("GenSeq failed", zap.Error(err))
+				tx.Rollback()
+				commit(err)
 				return
 			}
 			existDelete, err := g.db.ExistMemberDelete(member.EmployeeUid, groupNo)
@@ -745,7 +757,9 @@ func (g *Group) handleOrgEmployeeExit(data []byte, commit config.EventCommit) {
 	for _, groupNo := range realGroups {
 		version, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
 		if err != nil {
-			g.Warn("GenSeq failed", zap.Error(err))
+			g.Error("GenSeq failed", zap.Error(err))
+			tx.Rollback()
+			commit(err)
 			return
 		}
 		err = g.db.DeleteMemberTx(groupNo, req.Operator, version, tx)

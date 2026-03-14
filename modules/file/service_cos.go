@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -33,6 +34,15 @@ func NewServiceCOS(ctx *config.Context) *ServiceCOS {
 			Timeout: time.Second * 30,
 		},
 	}
+}
+
+// withPrefix 拼接环境前缀到对象路径（多环境共用 bucket 时隔离路径）
+func (sc *ServiceCOS) withPrefix(objectPath string) string {
+	prefix := strings.TrimSpace(sc.ctx.GetConfig().COS.Prefix)
+	if prefix == "" {
+		return objectPath
+	}
+	return path.Join(prefix, objectPath)
 }
 
 func (sc *ServiceCOS) getClient() (*minio.Client, error) {
@@ -73,6 +83,8 @@ func (sc *ServiceCOS) UploadFile(filePath string, contentType string, copyFileWr
 		fileName = strings.TrimPrefix(filePath, fmt.Sprintf("%s/", strs[0]))
 	}
 
+	fileName = sc.withPrefix(fileName)
+
 	ctx := context.Background()
 	n, err := client.PutObject(ctx, bucketName, fileName, buff, int64(buff.Len()), minio.PutObjectOptions{
 		ContentType: contentType,
@@ -112,6 +124,8 @@ func (sc *ServiceCOS) GetFile(ph string) (io.ReadCloser, string, error) {
 		}
 	}
 
+	objectPath = sc.withPrefix(objectPath)
+
 	obj, err := client.GetObject(context.Background(), bucketName, objectPath, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, "", err
@@ -135,6 +149,7 @@ func (sc *ServiceCOS) DownloadURL(ph string, filename string) (string, error) {
 	vals := url.Values{}
 	encodedFilename := "UTF-8''" + url.QueryEscape(filename)
 	vals.Set("response-content-disposition", fmt.Sprintf("attachment; filename*=%s", encodedFilename))
+	ph = sc.withPrefix(ph)
 	result, _ := url.JoinPath(downloadBase, ph)
 	return fmt.Sprintf("%s?%s", result, vals.Encode()), nil
 }

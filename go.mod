@@ -11,7 +11,7 @@ require (
 	github.com/aliyun/aliyun-oss-go-sdk v2.2.7+incompatible
 	github.com/apistd/uni-go-sdk v0.0.2
 	github.com/disintegration/imaging v1.6.2
-	github.com/Mininglamp-OSS/octo-lib v0.0.0-20260314074849-c7969ff222be
+	github.com/Mininglamp-OSS/octo-lib v0.0.0-20260314081811-6c36810da493
 	github.com/eapache/queue v1.1.0
 	github.com/ethereum/go-ethereum v1.12.2
 	github.com/gin-gonic/gin v1.9.1

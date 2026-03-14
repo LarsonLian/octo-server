@@ -163,6 +163,8 @@ github.com/Mininglamp-OSS/octo-lib v0.0.0-20260314074630-35c380c0b624 h1:Ar0vyWh
 github.com/Mininglamp-OSS/octo-lib v0.0.0-20260314074630-35c380c0b624/go.mod h1:Y6vTjWHX30AzqURaJsdV44nGsXqd6uvG0aeAH6uMUeg=
 github.com/Mininglamp-OSS/octo-lib v0.0.0-20260314074849-c7969ff222be h1:lU5WC5QIkOpqOKfi3OR5RT7fZjDVkQdo3sQkhp9FDl4=
 github.com/Mininglamp-OSS/octo-lib v0.0.0-20260314074849-c7969ff222be/go.mod h1:Y6vTjWHX30AzqURaJsdV44nGsXqd6uvG0aeAH6uMUeg=
+github.com/Mininglamp-OSS/octo-lib v0.0.0-20260314081811-6c36810da493 h1:tKhCg3NcKXE7y4Hlf7Fakd9A0U0rwKJNbwtWwUw0QUU=
+github.com/Mininglamp-OSS/octo-lib v0.0.0-20260314081811-6c36810da493/go.mod h1:Y6vTjWHX30AzqURaJsdV44nGsXqd6uvG0aeAH6uMUeg=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/eapache/queue v1.1.0 h1:YOEu7KNc61ntiQlcEeUIoDTJ2o8mQznoNvUhiigpIqc=

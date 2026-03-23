@@ -147,7 +147,7 @@ func TestSendWelcomeMessage(t *testing.T) {
 	// Note: SendMessageWithResult requires WuKongIM to be running
 	// In unit test environment without WuKongIM, this will fail
 	// This test mainly verifies the function structure is correct
-	err := bf.sendWelcomeMessage(toUID)
+	err := bf.sendWelcomeMessage(toUID, "")
 	// We expect this to fail in test env since WuKongIM is not running
 	// Just verify the function doesn't panic
 	_ = err

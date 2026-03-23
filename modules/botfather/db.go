@@ -109,10 +109,11 @@ func (d *botfatherDB) updateRobotDescription(robotID string, description string)
 	return err
 }
 
-// deleteRobot 删除机器人（软删除 - 设置status=0）
+// deleteRobot 软删除机器人（status=0）并清除 username 以释放标识符供复用。
 func (d *botfatherDB) deleteRobot(robotID string) error {
 	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
-		"status": 0,
+		"status":   0,
+		"username": "",
 	}).Where("robot_id=?", robotID).Exec()
 	return err
 }

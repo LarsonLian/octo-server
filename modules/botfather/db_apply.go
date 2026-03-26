@@ -24,7 +24,8 @@ type robotApplyModel struct {
 	RobotUID string
 	OwnerUID string
 	Remark   string
-	Status   int // 0=待处理 1=通过 2=拒绝
+	SpaceID  string // 申请来源 Space
+	Status   int    // 0=待处理 1=通过 2=拒绝
 	db.BaseModel
 }
 
@@ -37,9 +38,9 @@ const (
 // insert 创建申请记录
 func (d *robotApplyDB) insert(m *robotApplyModel) error {
 	_, err := d.session.InsertInto("robot_apply").Columns(
-		"uid", "robot_uid", "owner_uid", "remark", "status",
+		"uid", "robot_uid", "owner_uid", "remark", "status", "space_id",
 	).Values(
-		m.UID, m.RobotUID, m.OwnerUID, m.Remark, m.Status,
+		m.UID, m.RobotUID, m.OwnerUID, m.Remark, m.Status, m.SpaceID,
 	).Exec()
 	return err
 }

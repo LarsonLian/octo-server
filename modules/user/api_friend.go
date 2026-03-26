@@ -381,6 +381,12 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		}
 	}
 
+	// 提取 space_id（提前到 cache 写入前，确保持久化）
+	spaceID := c.Query("space_id")
+	if spaceID == "" {
+		spaceID = c.GetHeader("X-Space-ID")
+	}
+
 	// 设置token
 	token := util.GenerUUID()
 
@@ -388,6 +394,7 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		"from_uid": fromUID,
 		"vercode":  req.Vercode,
 		"remark":   req.Remark,
+		"space_id": spaceID,
 	}), f.ctx.GetConfig().Cache.FriendApplyExpire)
 	if err != nil {
 		f.Error("设置申请token失败！", zap.Error(err))
@@ -483,12 +490,6 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		c.ResponseError(errors.New("提交事物错误"))
 		return
 	}
-	// 提取 space_id
-	spaceID := c.Query("space_id")
-	if spaceID == "" {
-		spaceID = c.GetHeader("X-Space-ID")
-	}
-
 	// 发送消息
 	cmdParam := map[string]interface{}{
 		"apply_uid":  fromUID,
@@ -646,6 +647,12 @@ func (f *Friend) friendSure(c *wkhttp.Context) {
 	if valueMap["remark"] != nil {
 		if remarkVal, ok := valueMap["remark"].(string); ok {
 			remark = remarkVal
+		}
+	}
+	// 从 cache 读取申请时的 space_id 作为 fallback
+	if spaceID == "" {
+		if cachedSpaceID, ok := valueMap["space_id"].(string); ok {
+			spaceID = cachedSpaceID
 		}
 	}
 

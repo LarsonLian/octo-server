@@ -162,10 +162,22 @@ func (h *commandHandler) approveFriend(ownerUID string, applyUID string, robotID
 		return
 	}
 
+	// 获取 Space ID：优先从申请记录读取，其次从当前消息处理链获取
+	applySpaceID := apply.SpaceID
+	if applySpaceID == "" {
+		applySpaceID = h.resolveSpaceID(ownerUID)
+	}
+
 	// 4. 添加 IM 白名单（双向），允许双方发消息
+	userChannelID := applyUID
+	botChannelID := robotID
+	if applySpaceID != "" {
+		userChannelID = fmt.Sprintf("s%s_%s", applySpaceID, applyUID)
+		botChannelID = fmt.Sprintf("s%s_%s", applySpaceID, robotID)
+	}
 	err = h.ctx.IMWhitelistAdd(config.ChannelWhitelistReq{
 		ChannelReq: config.ChannelReq{
-			ChannelID:   applyUID,
+			ChannelID:   userChannelID,
 			ChannelType: common.ChannelTypePerson.Uint8(),
 		},
 		UIDs: []string{robotID},
@@ -175,7 +187,7 @@ func (h *commandHandler) approveFriend(ownerUID string, applyUID string, robotID
 	}
 	err = h.ctx.IMWhitelistAdd(config.ChannelWhitelistReq{
 		ChannelReq: config.ChannelReq{
-			ChannelID:   robotID,
+			ChannelID:   botChannelID,
 			ChannelType: common.ChannelTypePerson.Uint8(),
 		},
 		UIDs: []string{applyUID},
@@ -198,12 +210,6 @@ func (h *commandHandler) approveFriend(ownerUID string, applyUID string, robotID
 	content := "我们已经是好友了，可以愉快的聊天了！"
 	if h.ctx.GetConfig().Friend.AddedTipsText != "" {
 		content = h.ctx.GetConfig().Friend.AddedTipsText
-	}
-
-	// 获取 Space ID：优先从申请记录读取，其次从当前消息处理链获取
-	applySpaceID := apply.SpaceID
-	if applySpaceID == "" {
-		applySpaceID = h.resolveSpaceID(ownerUID)
 	}
 
 	// Send CMD to sync friend list on both clients

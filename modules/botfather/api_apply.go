@@ -103,6 +103,12 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 		return
 	}
 
+	// 提取 space_id
+	applySpaceID := c.Query("space_id")
+	if applySpaceID == "" {
+		applySpaceID = c.GetHeader("X-Space-ID")
+	}
+
 	// 创建申请记录
 	apply := &robotApplyModel{
 		UID:      loginUID,
@@ -110,18 +116,13 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 		OwnerUID: robot.CreatorUID,
 		Remark:   req.Remark,
 		Status:   ApplyStatusPending,
+		SpaceID:  applySpaceID,
 	}
 	err = applyDB.insert(apply)
 	if err != nil {
 		bf.Error("创建申请记录失败", zap.Error(err))
 		c.ResponseError(errors.New("创建申请记录失败"))
 		return
-	}
-
-	// 通知Owner
-	applySpaceID := c.Query("space_id")
-	if applySpaceID == "" {
-		applySpaceID = c.GetHeader("X-Space-ID")
 	}
 	bf.notifyOwnerNewApply(loginUID, req.RobotUID, robot.CreatorUID, req.Remark, applySpaceID)
 
@@ -191,8 +192,11 @@ func (bf *BotFather) robotApplySure(c *wkhttp.Context) {
 		return
 	}
 
-	// 通知申请人
-	sureSpaceID := space.GetCommonSpaceID(bf.ctx, apply.UID, apply.RobotUID)
+	// 通知申请人：优先从 DB 读取申请时的 Space ID
+	sureSpaceID := apply.SpaceID
+	if sureSpaceID == "" {
+		sureSpaceID = space.GetCommonSpaceID(bf.ctx, apply.UID, apply.RobotUID)
+	}
 	bf.notifyApplicantResult(apply.UID, apply.RobotUID, true, sureSpaceID)
 
 	c.ResponseOK()
@@ -245,8 +249,11 @@ func (bf *BotFather) robotApplyRefuse(c *wkhttp.Context) {
 		return
 	}
 
-	// 通知申请人
-	refuseSpaceID := space.GetCommonSpaceID(bf.ctx, apply.UID, apply.RobotUID)
+	// 通知申请人：优先从 DB 读取申请时的 Space ID
+	refuseSpaceID := apply.SpaceID
+	if refuseSpaceID == "" {
+		refuseSpaceID = space.GetCommonSpaceID(bf.ctx, apply.UID, apply.RobotUID)
+	}
 	bf.notifyApplicantResult(apply.UID, apply.RobotUID, false, refuseSpaceID)
 
 	c.ResponseOK()

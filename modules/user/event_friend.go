@@ -56,21 +56,26 @@ func (f *Friend) handleFriendSure(data []byte, commit config.EventCommit) {
 		return
 	}
 
-	// 如果对方是 Bot，移除黑名单（可能之前删除好友时加入了黑名单）
-	isRobot, err := f.db.isRobot(toUID)
-	if err != nil {
-		f.Warn("查询是否是Bot失败", zap.Error(err), zap.String("toUID", toUID))
-	}
-	if isRobot {
-		err = f.ctx.IMBlacklistRemove(config.ChannelBlacklistReq{
-			ChannelReq: config.ChannelReq{
-				ChannelID:   toUID,
-				ChannelType: common.ChannelTypePerson.Uint8(),
-			},
-			UIDs: []string{uid},
-		})
+	// 如果任一方是 Bot，移除黑名单（删除好友时黑名单加在 Bot 频道上）
+	// 需要双向检查：删除时 toUID 是 Bot，但 autoApproveFriend 事件中 uid 是 Bot
+	for _, pair := range [][2]string{{toUID, uid}, {uid, toUID}} {
+		botID, userID := pair[0], pair[1]
+		isRobot, err := f.db.isRobot(botID)
 		if err != nil {
-			f.Warn("移除Bot黑名单失败", zap.Error(err), zap.String("toUID", toUID))
+			f.Warn("查询是否是Bot失败", zap.Error(err), zap.String("botID", botID))
+			continue
+		}
+		if isRobot {
+			err = f.ctx.IMBlacklistRemove(config.ChannelBlacklistReq{
+				ChannelReq: config.ChannelReq{
+					ChannelID:   botID,
+					ChannelType: common.ChannelTypePerson.Uint8(),
+				},
+				UIDs: []string{userID},
+			})
+			if err != nil {
+				f.Warn("移除Bot黑名单失败", zap.Error(err), zap.String("botID", botID))
+			}
 		}
 	}
 

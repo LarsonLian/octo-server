@@ -275,7 +275,7 @@ func (h *commandHandler) handleMyBots(fromUID string) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("你的机器人列表：\n\n")
+	sb.WriteString("**你的机器人列表：**\n\n")
 	for i, bot := range bots {
 		name := bot.Username
 		if name == "" {
@@ -285,7 +285,7 @@ func (h *commandHandler) handleMyBots(fromUID string) {
 		if desc == "" {
 			desc = "无描述"
 		}
-		sb.WriteString(fmt.Sprintf("%d. %s (@%s)\n   %s\n\n", i+1, bot.RobotID, name, desc))
+		sb.WriteString(fmt.Sprintf("%d. **%s** (@%s)\n   %s\n\n", i+1, bot.RobotID, name, desc))
 	}
 	h.reply(fromUID, sb.String())
 }
@@ -383,7 +383,7 @@ func (h *commandHandler) handleToken(fromUID string) {
 		return
 	}
 	if len(bots) == 1 {
-		h.reply(fromUID, fmt.Sprintf("机器人 %s 的 Token：\n\n%s\n\n请妥善保管，不要泄露。", bots[0].RobotID, bots[0].BotToken))
+		h.reply(fromUID, fmt.Sprintf("机器人 **%s** 的 Token：\n\n`%s`\n\n请妥善保管，不要泄露。", bots[0].RobotID, bots[0].BotToken))
 		return
 	}
 	h.sm.SetState(fromUID, h.spaceID(fromUID), StateWaitingSelectBot, CmdToken)
@@ -487,7 +487,8 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 		spaceInfo = fmt.Sprintf("\n📌 当前 Space ID：%s", spaceID)
 	}
 
-	h.reply(fromUID, fmt.Sprintf(`🚀 Quickstart
+	apiKeyFormatted := "`" + apiKey + "`"
+	h.reply(fromUID, fmt.Sprintf(`🚀 **Quickstart**
 
 将下面的提示词复制发给你的 AI Agent：
 
@@ -503,29 +504,30 @@ All User API endpoints require: Authorization: Bearer %s
 
 💡 User API Key 可反复使用，用于管理你的所有 Bot（Bot 会自动加入你当前的 Space）%s
 🔑 你的 API Key: %s`,
-		apiURL, apiKey, apiURL, apiKey, spaceInfo, apiKey))
+		apiURL, apiKey, apiURL, apiKey, spaceInfo, apiKeyFormatted))
 }
 
 func (h *commandHandler) handleHelp(fromUID string) {
 	h.sm.Clear(fromUID, h.spaceID(fromUID))
 	h.reply(fromUID, `BotFather 可以帮你创建和管理机器人。
 
-可用命令：
-/quickstart - AI Agent 快速入门（推荐）
-/newbot - 创建新机器人
-/mybots - 查看我的机器人
-/connect - 获取连接 prompt
-/disconnect - 断开 Agent 连接
-/setname - 修改机器人名称
-/setdescription - 修改机器人描述
-/deletebot - 删除机器人
-/token - 查看 Token
-/revoke - 重置 Token
-/pending - 查看待处理的好友申请
-/approve - 通过好友申请
-/reject - 拒绝好友申请
-/cancel - 取消当前操作
-/help - 显示帮助`)
+**可用命令：**
+
+- /quickstart — AI Agent 快速入门（推荐）
+- /newbot — 创建新机器人
+- /mybots — 查看我的机器人
+- /connect — 获取连接 prompt
+- /disconnect — 断开 Agent 连接
+- /setname — 修改机器人名称
+- /setdescription — 修改机器人描述
+- /deletebot — 删除机器人
+- /token — 查看 Token
+- /revoke — 重置 Token
+- /pending — 查看待处理的好友申请
+- /approve — 通过好友申请
+- /reject — 拒绝好友申请
+- /cancel — 取消当前操作
+- /help — 显示帮助`)
 }
 
 // ========== 状态输入处理 ==========
@@ -656,7 +658,7 @@ func (h *commandHandler) onBotSelection(fromUID string, input string) {
 		h.reply(fromUID, fmt.Sprintf("确定要删除 %s 吗？输入 \"Yes, delete it\" 确认：", selectedBot.RobotID))
 	case CmdToken:
 		h.sm.Clear(fromUID, h.spaceID(fromUID))
-		h.reply(fromUID, fmt.Sprintf("机器人 %s 的 Token：\n\n%s\n\n请妥善保管，不要泄露。", selectedBot.RobotID, selectedBot.BotToken))
+		h.reply(fromUID, fmt.Sprintf("机器人 **%s** 的 Token：\n\n`%s`\n\n请妥善保管，不要泄露。", selectedBot.RobotID, selectedBot.BotToken))
 	case CmdRevoke:
 		h.sm.SetState(fromUID, h.spaceID(fromUID), StateWaitingRevokeConfirm, CmdRevoke)
 		h.reply(fromUID, fmt.Sprintf("确定要重置 %s 的 Token 吗？输入 \"Yes, revoke it\" 确认：", selectedBot.RobotID))
@@ -894,7 +896,7 @@ func (h *commandHandler) onRevokeConfirm(fromUID string, input string) {
 	h.ctx.GetRedisConn().Del(eventKey)
 
 	h.sm.Clear(fromUID, h.spaceID(fromUID))
-	h.reply(fromUID, fmt.Sprintf("Token 已重置。新 Token：\n\n%s\n\n旧 Token 已失效，已连接的 Agent 已被踢下线。", newToken))
+	h.reply(fromUID, fmt.Sprintf("Token 已重置。新 Token：\n\n`%s`\n\n旧 Token 已失效，已连接的 Agent 已被踢下线。", newToken))
 }
 
 // disconnectBot 断开机器人的 Agent 连接
@@ -1080,7 +1082,7 @@ func (h *commandHandler) sendConnectPrompt(toUID string, bot *robotModel) {
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	prompt := fmt.Sprintf(`📋 机器人「%s」的连接信息：
+	prompt := fmt.Sprintf(`📋 机器人「**%s**」的连接信息：
 
 将下面的提示词复制发给你的 AI Agent：
 
@@ -1112,9 +1114,9 @@ func (h *commandHandler) sendCreatedPrompt(toUID string, name string, bot *robot
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	msg := fmt.Sprintf(`✅ 机器人「%s」创建成功！
+	msg := fmt.Sprintf(`✅ 机器人「**%s**」创建成功！
 
-📋 连接 Agent
+📋 **连接 Agent**
 将下面的提示词复制发送给你的 AI Agent：
 
 ---

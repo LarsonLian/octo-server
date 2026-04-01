@@ -133,7 +133,14 @@ func (s *VoiceService) callLiteLLM(totalCtx context.Context, model string, audio
 		return "", fmt.Errorf("empty response from model")
 	}
 
-	return strings.TrimSpace(chatResp.Choices[0].Message.Content), nil
+	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+
+	// Handle no-speech sentinel and null content
+	if isNoSpeech(result) {
+		return "", nil
+	}
+
+	return result, nil
 }
 
 // mimeTypeToFormat converts MIME type to a short format string for the API

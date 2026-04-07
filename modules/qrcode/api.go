@@ -154,7 +154,7 @@ func (q *QRCode) handleQRCodeInfo(c *wkhttp.Context) {
 	}
 	if err != nil {
 		q.Error("处理请求失败！", zap.Error(err))
-		c.ResponseError(errors.New("处理请求失败！"))
+		c.ResponseError(err)
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -165,12 +165,13 @@ func (q *QRCode) handleQRCodeInfo(c *wkhttp.Context) {
 func (q *QRCode) handleScanLogin(loginUID string, uuid string, qrCodeModel common.QRCodeModel) (interface{}, error) {
 	authCode := util.GenerUUID()
 	err := q.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode), util.ToJson(map[string]interface{}{
-		"scaner": loginUID, // 二维码扫码者即是登录者
+		"scaner": loginUID,
 		"type":   common.AuthCodeTypeScanLogin,
 		"uuid":   uuid,
 	}), time.Minute*10)
 	if err != nil {
-		return nil, err
+		q.Error("生成扫码登录授权码失败", zap.Error(err))
+		return nil, errors.New("生成登录授权码失败，请稍后重试")
 	}
 	var pubkey string
 	if qrCodeModel.Data != nil && qrCodeModel.Data["pub_key"] != nil {
@@ -183,8 +184,8 @@ func (q *QRCode) handleScanLogin(loginUID string, uuid string, qrCodeModel commo
 	})
 	err = q.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.QRCodeCachePrefix, uuid), util.ToJson(qrcodeInfo), time.Minute*5)
 	if err != nil {
-		q.Error("设置扫描登录二维码信息失败！", zap.Error(err))
-		return nil, err
+		q.Error("设置扫描登录二维码信息失败", zap.Error(err))
+		return nil, errors.New("扫码登录失败，请稍后重试")
 	}
 	user.SendQRCodeInfo(uuid, qrcodeInfo)
 	return NewHandleResult(ForwardNative, HandlerTypeLoginConfirm, map[string]interface{}{
@@ -207,7 +208,8 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 	// 查询群信息用于预览
 	groupModel, err := q.groupDB.QueryWithGroupNo(groupNo)
 	if err != nil {
-		return nil, err
+		q.Error("查询群信息失败", zap.Error(err))
+		return nil, errors.New("获取群信息失败，请稍后重试")
 	}
 	if groupModel == nil {
 		return nil, errors.New("群不存在")
@@ -217,7 +219,8 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 	if groupModel.SpaceID != "" {
 		isMember, err := q.spaceDB.IsMember(groupModel.SpaceID, loginUID)
 		if err != nil {
-			return nil, err
+			q.Error("查询空间成员失败", zap.Error(err))
+			return nil, errors.New("校验空间成员失败，请稍后重试")
 		}
 		if !isMember {
 			return nil, errors.New("请先加入该空间后再扫码入群")
@@ -226,12 +229,14 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 
 	memberCount, err := q.groupDB.QueryMemberCount(groupNo)
 	if err != nil {
-		return nil, err
+		q.Error("查询群成员数失败", zap.Error(err))
+		return nil, errors.New("获取群信息失败，请稍后重试")
 	}
 
-	exist, err := q.groupDB.ExistMember(loginUID, groupNo) // 已在群内
+	exist, err := q.groupDB.ExistMember(loginUID, groupNo)
 	if err != nil {
-		return nil, err
+		q.Error("查询群成员失败", zap.Error(err))
+		return nil, errors.New("获取群信息失败，请稍后重试")
 	}
 	if exist {
 		return NewHandleResult(ForwardNative, HandlerTypeGroup, map[string]interface{}{
@@ -239,19 +244,20 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 			"name":         groupModel.Name,
 			"avatar":       fmt.Sprintf("groups/%s/avatar", groupNo),
 			"member_count": memberCount,
-			"is_member":    true, // 标识已在群内
+			"is_member":    true,
 		}), nil
 	}
 
 	authCode := util.GenerUUID()
 	err = q.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode), util.ToJson(map[string]interface{}{
-		"group_no":  groupNo,   // 群编号
-		"generator": generator, // 二维码生成者
-		"scaner":    loginUID,  // 二维码扫码者
+		"group_no":  groupNo,
+		"generator": generator,
+		"scaner":    loginUID,
 		"type":      common.AuthCodeTypeJoinGroup,
 	}), time.Minute*30)
 	if err != nil {
-		return nil, err
+		q.Error("生成入群授权码失败", zap.Error(err))
+		return nil, errors.New("生成入群授权码失败，请稍后重试")
 	}
 	return NewHandleResult(ForwardNative, HandlerTypeGroup, map[string]interface{}{
 		"group_no":     groupNo,

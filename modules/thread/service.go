@@ -44,6 +44,8 @@ type IService interface {
 	GetMemberUIDs(groupNo, shortID string) ([]string, error)
 	// IsMember 检查是否是子区成员
 	IsMember(groupNo, shortID, uid string) (bool, error)
+	// RemoveUserFromGroupThreads 退群时移除用户在该群所有子区的成员身份和 IM 订阅
+	RemoveUserFromGroupThreads(groupNo, uid string) error
 }
 
 // Service 子区服务实现
@@ -679,4 +681,51 @@ func (s *Service) IsMember(groupNo, shortID, uid string) (bool, error) {
 		return false, fmt.Errorf("query thread id: %w", err)
 	}
 	return s.db.ExistMember(threadID, uid)
+}
+
+// RemoveUserFromGroupThreads 退群时移除用户在该群所有子区的成员身份和 IM 订阅
+func (s *Service) RemoveUserFromGroupThreads(groupNo, uid string) error {
+	// 查询用户在该群加入的所有子区
+	threads, err := s.db.QueryThreadsByGroupNoAndUID(groupNo, uid)
+	if err != nil {
+		return fmt.Errorf("query user threads in group: %w", err)
+	}
+	if len(threads) == 0 {
+		return nil
+	}
+
+	// 批量删除子区成员记录
+	tx, err := s.db.session.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	err = s.db.DeleteMembersByGroupNoAndUIDTx(groupNo, uid, tx)
+	if err != nil {
+		return fmt.Errorf("delete thread members: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	// 移除 IM 订阅（事务外，失败仅记日志）
+	for _, t := range threads {
+		channelID := BuildChannelID(groupNo, t.ShortID)
+		rmErr := s.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
+			ChannelID:   channelID,
+			ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
+			Subscribers: []string{uid},
+		})
+		if rmErr != nil {
+			s.Error("移除子区IM订阅者失败", zap.Error(rmErr), zap.String("groupNo", groupNo), zap.String("shortID", t.ShortID), zap.String("uid", uid))
+		}
+	}
+
+	return nil
 }

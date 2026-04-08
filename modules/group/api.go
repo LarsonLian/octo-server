@@ -2815,7 +2815,8 @@ func (g *Group) removeUserFromGroupThreads(groupNo, uid string) {
 
 	// 移除 IM 订阅
 	for _, t := range threads {
-		channelID := fmt.Sprintf("%s____%s", groupNo, t.ShortID)
+		// 子区 channelID 格式: {groupNo}____{shortID} (与 thread.BuildChannelID 一致)
+		channelID := groupNo + "____" + t.ShortID
 		if rmErr := g.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
 			ChannelID:   channelID,
 			ChannelType: common.ChannelTypeCommunityTopic.Uint8(),

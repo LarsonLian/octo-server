@@ -42,6 +42,8 @@ type BotFather struct {
 	appService       app.IService
 	fileService      file.IService
 	groupService     group.IService
+	groupDB          *group.DB
+	userDB           *user.DB
 	robotEventPrefix string
 	initOnce         sync.Once
 	msgSem           chan struct{} // 限制并发消息处理的信号量
@@ -58,6 +60,8 @@ func New(ctx *config.Context) *BotFather {
 		appService:       app.NewService(ctx),
 		fileService:      file.NewService(ctx),
 		groupService:     group.NewService(ctx),
+		groupDB:          group.NewDB(ctx),
+		userDB:           user.NewDB(ctx),
 		robotEventPrefix: "robotEvent:",
 		msgSem:           make(chan struct{}, 100), // 限制最多100个并发消息处理
 		Log:              log.NewTLog("BotFather"),
@@ -106,6 +110,11 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.GET("/groups/:group_no/members", bf.getGroupMembers)
 		botAPI.GET("/groups/:group_no/md", bf.getGroupMd)          // 获取GROUP.md
 		botAPI.PUT("/groups/:group_no/md", bf.updateGroupMd)       // 更新GROUP.md
+		botAPI.GET("/space/members", bf.botSpaceMembers)                              // Bot 查询 Space 成员
+		botAPI.POST("/createGroup", bf.botGroupCreate)                               // Bot 创建群
+		botAPI.PUT("/groups/:group_no/info", bf.botGroupUpdate)                   // Bot 编辑群
+		botAPI.POST("/groups/:group_no/members/add", bf.botGroupMemberAdd)       // Bot 添加群成员
+		botAPI.POST("/groups/:group_no/members/remove", bf.botGroupMemberRemove) // Bot 移除群成员
 		botAPI.POST("/setCommands", bf.setCommands)
 		// Bot File API (#433)
 		botAPI.POST("/file/upload", bf.botUploadFile)

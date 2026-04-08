@@ -1095,14 +1095,20 @@ Configure in ~/.openclaw/openclaw.json:
 {"channels":{"dmwork":{"botToken":"YOUR_TOKEN","apiUrl":"API_SERVER"}},"session":{"dmScope":"per-account-channel-peer"}}
 Replace YOUR_TOKEN and API_SERVER with the values above.
 IMPORTANT: dmScope MUST be set — without it all users share one session.
-Do NOT run "openclaw gateway restart" — the gateway auto-detects config changes and reloads after this conversation ends.
+
+AFTER configuring openclaw.json, write your agent.md to define your identity. Write in FIRST PERSON, include:
+- Who you are, your bot token, API server, and accountId
+- Capability reference: "My full API capabilities are documented at %s/v1/bot/skill.md"
+Do NOT paste the raw skill.md — keep it concise, reference the URL instead.
+
+Do NOT run "openclaw gateway restart" — auto-reloads.
 Simply confirm the steps are complete and stop.
 ---
 
 💡 支持 OpenClaw、Claude Code、及任何能读取 URL 的 AI Agent
 ⚙️ 群聊默认只有 @机器人 时才回复（可在配置中修改）
 🔌 断开连接请发送 /disconnect`,
-		bot.RobotID, apiURL, bot.BotToken, apiURL)
+		bot.RobotID, apiURL, bot.BotToken, apiURL, apiURL)
 
 	h.reply(toUID, prompt)
 }
@@ -1143,6 +1149,14 @@ Also add bindings for each bot:
 {"agentId":"YOUR_AGENT_ID","match":{"channel":"dmwork","accountId":"YOUR_BOT_ID"}}
 
 Always set: {"session":{"dmScope":"per-account-channel-peer"}}
+
+AFTER configuring openclaw.json, write your agent.md (e.g. ~/.openclaw/agents/YOUR_AGENT_ID/agent/agent.md) to define your identity. Write in FIRST PERSON, include:
+- Who you are: "I am [bot name], a DMWork bot"
+- Your credentials: bot token, API server, and your accountId (MUST pass accountId when using dmwork_management tool)
+- Capability reference: "My full API capabilities are documented at %s/v1/bot/skill.md — read it when I need to perform an action I'm unsure about"
+- Behavioral rules: respond in the user's language, be helpful
+Do NOT paste the raw skill.md into agent.md — keep it concise, reference the URL instead
+
 Do NOT run "openclaw gateway restart" — auto-reloads.
 Simply confirm the steps are complete and stop.
 ---
@@ -1150,7 +1164,7 @@ Simply confirm the steps are complete and stop.
 💡 支持 OpenClaw、Claude Code、及任何能读取 URL 的 AI Agent
 ⚙️ 群聊默认只有 @机器人 时才回复（可在配置中修改）
 🔌 断开连接请发送 /disconnect`,
-		name, apiURL, bot.BotToken, apiURL)
+		name, apiURL, bot.BotToken, apiURL, apiURL)
 
 	h.reply(toUID, msg)
 }

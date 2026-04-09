@@ -521,7 +521,8 @@ func (bf *BotFather) botGroupCreate(c *wkhttp.Context) {
 		}, tx)
 		if err != nil {
 			bf.Error("insert member failed", zap.Error(err), zap.String("uid", memberUser.UID))
-			continue
+			c.ResponseError(errors.New("failed to create group"))
+			return
 		}
 		allMemberUIDs = append(allMemberUIDs, memberUser.UID)
 		memberVos = append(memberVos, &config.UserBaseVo{UID: memberUser.UID, Name: memberUser.Name})
@@ -548,23 +549,21 @@ func (bf *BotFather) botGroupCreate(c *wkhttp.Context) {
 	// botNeedAdmin 标记：commit 后设置 bot_admin
 	botInGroup := err == nil
 
-	// 先在 WuKongIM 创建频道（必须在发消息之前）
+	// 提交事务
+	if err := tx.Commit(); err != nil {
+		bf.Error("commit transaction failed", zap.Error(err))
+		c.ResponseError(errors.New("failed to create group"))
+		return
+	}
+
+	// 在 WuKongIM 创建频道（必须在发通知之前，放在 commit 之后避免孤儿频道）
 	err = bf.ctx.IMCreateOrUpdateChannel(&config.ChannelCreateReq{
 		ChannelID:   groupNo,
 		ChannelType: common.ChannelTypeGroup.Uint8(),
 		Subscribers: allMemberUIDs,
 	})
 	if err != nil {
-		bf.Error("failed to create IM channel", zap.Error(err))
-		c.ResponseError(errors.New("failed to create IM channel"))
-		return
-	}
-
-	// 提交事务
-	if err := tx.Commit(); err != nil {
-		bf.Error("commit transaction failed", zap.Error(err))
-		c.ResponseError(errors.New("failed to create group"))
-		return
+		bf.Error("failed to create IM channel (group created in DB, channel can be retried)", zap.Error(err))
 	}
 
 	// 设置 Bot 为 bot_admin（在 commit 后，因为 UpdateBotAdmin 不支持事务）

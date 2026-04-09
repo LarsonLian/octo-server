@@ -397,6 +397,180 @@ func TestBotSpaceMembers_HappyPath(t *testing.T) {
 	assert.GreaterOrEqual(t, len(members), 2)
 }
 
+// =====================================================================
+// 针对修复的测试
+// =====================================================================
+
+// 验证创建群时，members 中包含不存在的 UID 不会导致崩溃
+// QueryByUIDs 会过滤掉不存在的用户，只插入有效成员
+func TestBotGroupCreate_WithNonExistentMember(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_a", "Alice")
+
+	w := doRequest(handler, botReq("POST", "/v1/bot/createGroup", botToken, map[string]interface{}{
+		"name":    "Partial Members",
+		"members": []string{"user_a", "nonexistent_uid_12345"},
+		"creator": testutil.UID,
+	}))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	result := jsonResult(t, w)
+	assert.NotEmpty(t, result["group_no"])
+
+	// 验证群成员：应该有 creator + user_a + bot，没有 nonexistent_uid
+	groupNo := result["group_no"].(string)
+	var memberCount int
+	ctx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND is_deleted=0", groupNo).LoadOne(&memberCount)
+	assert.Equal(t, 3, memberCount) // owner + user_a + bot
+}
+
+// 验证创建群时 members 中有重复的 UID，不会重复插入
+func TestBotGroupCreate_DuplicateMembers(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_a", "Alice")
+
+	w := doRequest(handler, botReq("POST", "/v1/bot/createGroup", botToken, map[string]interface{}{
+		"name":    "Dedup Test",
+		"members": []string{"user_a", "user_a", "user_a"},
+		"creator": testutil.UID,
+	}))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	result := jsonResult(t, w)
+	groupNo := result["group_no"].(string)
+
+	var memberCount int
+	ctx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND is_deleted=0", groupNo).LoadOne(&memberCount)
+	// creator + user_a(一次) + bot = 3，不应该有重复
+	assert.Equal(t, 3, memberCount)
+}
+
+// 验证创建群时 creator 也在 members 列表中，不会重复插入
+func TestBotGroupCreate_CreatorInMembers(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_a", "Alice")
+
+	w := doRequest(handler, botReq("POST", "/v1/bot/createGroup", botToken, map[string]interface{}{
+		"name":    "Creator In Members",
+		"members": []string{testutil.UID, "user_a"},
+		"creator": testutil.UID,
+	}))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	result := jsonResult(t, w)
+	groupNo := result["group_no"].(string)
+
+	var memberCount int
+	ctx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND is_deleted=0", groupNo).LoadOne(&memberCount)
+	assert.Equal(t, 3, memberCount) // creator + user_a + bot（creator 不重复）
+}
+
+// 验证创建群后 Bot 自动成为 bot_admin，可以直接执行管理操作
+func TestBotGroupCreate_BotIsAutoAdmin(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_a", "Alice")
+	insertTestUser(t, ctx, "user_b", "Bob")
+
+	groupNo := createGroupViaAPI(t, handler, botToken, []string{"user_a", "user_b"})
+
+	// 验证 DB 中 bot 是 bot_admin
+	var botAdmin int
+	ctx.DB().SelectBySql(
+		"SELECT IFNULL(bot_admin, 0) FROM group_member WHERE group_no=? AND uid=?", groupNo, grpTestBotID,
+	).LoadOne(&botAdmin)
+	assert.Equal(t, 1, botAdmin)
+
+	// 验证 bot 能执行管理操作：移除成员
+	w := doRequest(handler, botReq("POST", fmt.Sprintf("/v1/bot/groups/%s/members/remove", groupNo), botToken, map[string]interface{}{
+		"members": []string{"user_b"},
+	}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	result := jsonResult(t, w)
+	assert.Equal(t, float64(1), result["removed"])
+}
+
+// 验证移除成员后重新添加（走 ExistMemberDelete 恢复路径）
+func TestBotGroupMemberAdd_ReaddRemovedMember(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_a", "Alice")
+	insertTestUser(t, ctx, "user_readd", "ReaddUser")
+
+	groupNo := createGroupViaAPI(t, handler, botToken, []string{"user_a", "user_readd"})
+
+	// 先移除
+	w := doRequest(handler, botReq("POST", fmt.Sprintf("/v1/bot/groups/%s/members/remove", groupNo), botToken, map[string]interface{}{
+		"members": []string{"user_readd"},
+	}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"removed":1`)
+
+	// 验证已被软删除
+	var isDeleted int
+	ctx.DB().SelectBySql(
+		"SELECT is_deleted FROM group_member WHERE group_no=? AND uid=?", groupNo, "user_readd",
+	).LoadOne(&isDeleted)
+	assert.Equal(t, 1, isDeleted)
+
+	// 重新添加
+	w = doRequest(handler, botReq("POST", fmt.Sprintf("/v1/bot/groups/%s/members/add", groupNo), botToken, map[string]interface{}{
+		"members": []string{"user_readd"},
+	}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	result := jsonResult(t, w)
+	assert.Equal(t, float64(1), result["added"])
+
+	// 验证已恢复
+	ctx.DB().SelectBySql(
+		"SELECT is_deleted FROM group_member WHERE group_no=? AND uid=?", groupNo, "user_readd",
+	).LoadOne(&isDeleted)
+	assert.Equal(t, 0, isDeleted)
+}
+
+// 验证编辑群同时传 name 和 notice 都能生效
+func TestBotGroupUpdate_NameAndNotice(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_a", "Alice")
+
+	groupNo := createGroupViaAPI(t, handler, botToken, []string{"user_a"})
+
+	newName := "New Name"
+	newNotice := "Hello World"
+	w := doRequest(handler, botReq("PUT", fmt.Sprintf("/v1/bot/groups/%s/info", groupNo), botToken, map[string]interface{}{
+		"name":   newName,
+		"notice": newNotice,
+	}))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 验证 DB 中两个字段都更新了
+	var dbName, dbNotice string
+	ctx.DB().SelectBySql("SELECT name FROM `group` WHERE group_no=?", groupNo).LoadOne(&dbName)
+	ctx.DB().SelectBySql("SELECT notice FROM `group` WHERE group_no=?", groupNo).LoadOne(&dbNotice)
+	assert.Equal(t, newName, dbName)
+	assert.Equal(t, newNotice, dbNotice)
+}
+
+// =====================================================================
+// botSpaceMembers (continued)
+// =====================================================================
+
 func TestBotSpaceMembers_KeywordSearch(t *testing.T) {
 	handler, ctx := setupGroupTestEnv(t)
 	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)

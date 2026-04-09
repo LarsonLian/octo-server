@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 )
 
 const (
@@ -13,9 +15,11 @@ const (
 	defaultMaxDuration   = 60
 	defaultMaxFileSize   = 5 * 1024 * 1024 // 5MB
 	maxChatContextLength = 10000           // max chat_context characters
+	maxContextTextLength = 10000           // max context_text characters
 )
 
 var defaultModels = []string{"gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro"}
+var defaultGPTModels = []string{"gpt-4o-mini-transcribe"}
 
 // VoiceConfig holds configuration for voice transcription
 type VoiceConfig struct {
@@ -23,15 +27,21 @@ type VoiceConfig struct {
 	LiteLLMKey   string
 	Timeout      int      // per-model timeout in seconds
 	TotalTimeout int      // total timeout across all model fallbacks in seconds
-	Models       []string // model fallback chain
+	Models       []string // model fallback chain (Gemini engine)
 	MaxDuration  int      // max audio duration in seconds
 	MaxFileSize  int64    // max file size in bytes
+	Engine       string   // "gemini" or "gpt"
+	GPTModels    []string // model fallback chain for GPT engine
+	Language     string   // language code for GPT engine, empty = auto-detect
+	EditMode     string   // "edit" or "append"
 }
 
 // NewVoiceConfigFromEnv reads voice config from environment variables
 func NewVoiceConfigFromEnv() *VoiceConfig {
 	models := make([]string, len(defaultModels))
 	copy(models, defaultModels)
+	gptModels := make([]string, len(defaultGPTModels))
+	copy(gptModels, defaultGPTModels)
 
 	cfg := &VoiceConfig{
 		LiteLLMUrl:   os.Getenv("VOICE_LITELLM_URL"),
@@ -41,6 +51,8 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 		Models:       models,
 		MaxDuration:  defaultMaxDuration,
 		MaxFileSize:  defaultMaxFileSize,
+		Engine:       "gemini",
+		GPTModels:    gptModels,
 	}
 
 	if v := os.Getenv("VOICE_LITELLM_TIMEOUT"); v != "" {
@@ -81,6 +93,46 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 		}
 	}
 
+	if v := os.Getenv("VOICE_ENGINE"); v == "gpt" || v == "gemini" {
+		cfg.Engine = v
+	}
+
+	if v := os.Getenv("VOICE_GPT_MODELS"); v != "" {
+		models := strings.Split(v, ",")
+		trimmed := make([]string, 0, len(models))
+		for _, m := range models {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				trimmed = append(trimmed, m)
+			}
+		}
+		if len(trimmed) > 0 {
+			cfg.GPTModels = trimmed
+		}
+	}
+
+	if v := os.Getenv("VOICE_LANGUAGE"); v != "" {
+		cfg.Language = v
+	}
+
+	// EditMode: explicit setting takes priority, otherwise auto-decide by engine
+	if v := os.Getenv("VOICE_EDIT_MODE"); v == "edit" || v == "append" {
+		cfg.EditMode = v
+	} else {
+		if cfg.Engine == "gpt" {
+			cfg.EditMode = "append"
+		} else {
+			cfg.EditMode = "edit"
+		}
+	}
+
+	// GPT does not support edit mode, force to append
+	if cfg.Engine == "gpt" && cfg.EditMode == "edit" {
+		lg := log.NewTLog("VoiceConfig")
+		lg.Warn("GPT engine does not support edit mode, forcing append")
+		cfg.EditMode = "append"
+	}
+
 	return cfg
 }
 
@@ -92,8 +144,14 @@ func (c *VoiceConfig) Validate() error {
 	if c.LiteLLMKey == "" {
 		return errors.New("VOICE_LITELLM_KEY is required")
 	}
-	if len(c.Models) == 0 {
-		return errors.New("VOICE_MODELS is required")
+	if c.Engine == "gpt" {
+		if len(c.GPTModels) == 0 {
+			return errors.New("VOICE_GPT_MODELS is required for GPT engine")
+		}
+	} else {
+		if len(c.Models) == 0 {
+			return errors.New("VOICE_MODELS is required")
+		}
 	}
 	return nil
 }

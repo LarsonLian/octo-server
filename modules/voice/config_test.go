@@ -15,6 +15,10 @@ func clearVoiceEnv() {
 	os.Unsetenv("VOICE_MODELS")
 	os.Unsetenv("VOICE_MAX_DURATION")
 	os.Unsetenv("VOICE_MAX_FILE_SIZE")
+	os.Unsetenv("VOICE_ENGINE")
+	os.Unsetenv("VOICE_GPT_MODELS")
+	os.Unsetenv("VOICE_LANGUAGE")
+	os.Unsetenv("VOICE_EDIT_MODE")
 }
 
 func TestNewVoiceConfigFromEnv_Defaults(t *testing.T) {
@@ -30,6 +34,10 @@ func TestNewVoiceConfigFromEnv_Defaults(t *testing.T) {
 	assert.Equal(t, []string{"gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro"}, cfg.Models)
 	assert.Equal(t, 60, cfg.MaxDuration)
 	assert.Equal(t, int64(5*1024*1024), cfg.MaxFileSize)
+	assert.Equal(t, "gemini", cfg.Engine)
+	assert.Equal(t, []string{"gpt-4o-mini-transcribe"}, cfg.GPTModels)
+	assert.Equal(t, "", cfg.Language)
+	assert.Equal(t, "edit", cfg.EditMode) // gemini defaults to edit
 }
 
 func TestNewVoiceConfigFromEnv_AllSet(t *testing.T) {
@@ -43,6 +51,10 @@ func TestNewVoiceConfigFromEnv_AllSet(t *testing.T) {
 	os.Setenv("VOICE_MODELS", "model-a, model-b, model-c")
 	os.Setenv("VOICE_MAX_DURATION", "120")
 	os.Setenv("VOICE_MAX_FILE_SIZE", "10485760")
+	os.Setenv("VOICE_ENGINE", "gpt")
+	os.Setenv("VOICE_GPT_MODELS", "gpt-a, gpt-b")
+	os.Setenv("VOICE_LANGUAGE", "zh")
+	os.Setenv("VOICE_EDIT_MODE", "append")
 
 	cfg := NewVoiceConfigFromEnv()
 
@@ -53,6 +65,10 @@ func TestNewVoiceConfigFromEnv_AllSet(t *testing.T) {
 	assert.Equal(t, []string{"model-a", "model-b", "model-c"}, cfg.Models)
 	assert.Equal(t, 120, cfg.MaxDuration)
 	assert.Equal(t, int64(10485760), cfg.MaxFileSize)
+	assert.Equal(t, "gpt", cfg.Engine)
+	assert.Equal(t, []string{"gpt-a", "gpt-b"}, cfg.GPTModels)
+	assert.Equal(t, "zh", cfg.Language)
+	assert.Equal(t, "append", cfg.EditMode)
 }
 
 func TestNewVoiceConfigFromEnv_InvalidNumbers(t *testing.T) {
@@ -121,7 +137,186 @@ func TestVoiceConfig_Validate_Valid(t *testing.T) {
 		LiteLLMUrl: "https://example.com",
 		LiteLLMKey: "key",
 		Models:     []string{"model-a"},
+		Engine:     "gemini",
 	}
 	err := cfg.Validate()
 	assert.NoError(t, err)
+}
+
+// --- Engine config tests ---
+
+func TestNewVoiceConfigFromEnv_EngineGPT(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "gpt")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "gpt", cfg.Engine)
+}
+
+func TestNewVoiceConfigFromEnv_EngineGemini(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "gemini")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "gemini", cfg.Engine)
+}
+
+func TestNewVoiceConfigFromEnv_EngineInvalid(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "invalid")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "gemini", cfg.Engine)
+}
+
+func TestNewVoiceConfigFromEnv_GPTModels(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_GPT_MODELS", "model-x,model-y,model-z")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, []string{"model-x", "model-y", "model-z"}, cfg.GPTModels)
+}
+
+func TestNewVoiceConfigFromEnv_GPTModelsWithSpaces(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_GPT_MODELS", " model-x , model-y , model-z ")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, []string{"model-x", "model-y", "model-z"}, cfg.GPTModels)
+}
+
+func TestNewVoiceConfigFromEnv_GPTModelsDefault(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, []string{"gpt-4o-mini-transcribe"}, cfg.GPTModels)
+}
+
+func TestNewVoiceConfigFromEnv_Language(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_LANGUAGE", "zh")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "zh", cfg.Language)
+}
+
+func TestVoiceConfig_Validate_GPTWithModels(t *testing.T) {
+	cfg := &VoiceConfig{
+		LiteLLMUrl: "https://example.com",
+		LiteLLMKey: "key",
+		Engine:     "gpt",
+		GPTModels:  []string{"gpt-4o-mini-transcribe"},
+	}
+	err := cfg.Validate()
+	assert.NoError(t, err)
+}
+
+func TestVoiceConfig_Validate_GPTWithoutModels(t *testing.T) {
+	cfg := &VoiceConfig{
+		LiteLLMUrl: "https://example.com",
+		LiteLLMKey: "key",
+		Engine:     "gpt",
+		GPTModels:  []string{},
+	}
+	err := cfg.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "VOICE_GPT_MODELS")
+}
+
+func TestVoiceConfig_Validate_GeminiWithModels(t *testing.T) {
+	cfg := &VoiceConfig{
+		LiteLLMUrl: "https://example.com",
+		LiteLLMKey: "key",
+		Engine:     "gemini",
+		Models:     []string{"gemini-3-flash-preview"},
+	}
+	err := cfg.Validate()
+	assert.NoError(t, err)
+}
+
+func TestVoiceConfig_Validate_GeminiWithoutModels(t *testing.T) {
+	cfg := &VoiceConfig{
+		LiteLLMUrl: "https://example.com",
+		LiteLLMKey: "key",
+		Engine:     "gemini",
+		Models:     []string{},
+	}
+	err := cfg.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "VOICE_MODELS")
+}
+
+// --- EditMode tests ---
+
+func TestEditMode_GeminiDefaultsToEdit(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "gemini")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "edit", cfg.EditMode)
+}
+
+func TestEditMode_GPTDefaultsToAppend(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "gpt")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "append", cfg.EditMode)
+}
+
+func TestEditMode_ExplicitAppendOnGemini(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "gemini")
+	os.Setenv("VOICE_EDIT_MODE", "append")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "append", cfg.EditMode)
+}
+
+func TestEditMode_GPTForcedToAppendWhenEditSet(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "gpt")
+	os.Setenv("VOICE_EDIT_MODE", "edit")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "append", cfg.EditMode) // forced to append
+}
+
+func TestEditMode_InvalidValueDefaultsByEngine(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_EDIT_MODE", "invalid")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "edit", cfg.EditMode) // gemini default
+
+	os.Setenv("VOICE_ENGINE", "gpt")
+	cfg = NewVoiceConfigFromEnv()
+	assert.Equal(t, "append", cfg.EditMode) // gpt default
+}
+
+func TestVoiceConfig_Validate_GPTEngine(t *testing.T) {
+	cfg := &VoiceConfig{
+		LiteLLMUrl: "https://example.com",
+		LiteLLMKey: "key",
+		Engine:     "gpt",
+		GPTModels:  []string{"gpt-4o-mini-transcribe"},
+	}
+	assert.NoError(t, cfg.Validate())
+
+	cfg.GPTModels = []string{}
+	err := cfg.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "VOICE_GPT_MODELS")
 }

@@ -72,6 +72,12 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 	}
 
 	contextText := c.Request.FormValue("context_text")
+	if len(contextText) > maxContextTextLength {
+		v.Warn("context_text exceeds max length, truncating to keep recent text",
+			zap.Int("original_length", len(contextText)),
+			zap.Int("max_length", maxContextTextLength))
+		contextText = contextText[len(contextText)-maxContextTextLength:]
+	}
 
 	chatContext := c.Request.FormValue("chat_context")
 	if len(chatContext) > maxChatContextLength {
@@ -95,6 +101,7 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 		"status": http.StatusOK,
 		"text":   text,
 		"m":      shortenModelName(model),
+		"engine": shortenEngineName(v.cfg.Engine),
 	})
 }
 
@@ -104,6 +111,8 @@ func (v *Voice) getConfig(c *wkhttp.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"enabled":      enabled,
 		"max_duration": v.cfg.MaxDuration,
+		"engine":       shortenEngineName(v.cfg.Engine),
+		"edit_mode":    v.cfg.EditMode,
 	})
 }
 
@@ -115,7 +124,20 @@ func shortenModelName(model string) string {
 		return "g3fp"
 	case "gemini-2.5-pro":
 		return "g25p"
+	case "gpt-4o-mini-transcribe":
+		return "g4omt"
 	default:
 		return model
+	}
+}
+
+func shortenEngineName(engine string) string {
+	switch engine {
+	case "gemini":
+		return "gm"
+	case "gpt":
+		return "gp"
+	default:
+		return engine
 	}
 }

@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // VoiceService handles voice transcription via LiteLLM
@@ -27,17 +29,89 @@ func NewVoiceService(cfg *VoiceConfig) *VoiceService {
 	}
 }
 
-// Transcribe transcribes audio data using the configured model fallback chain.
-// Returns the transcribed text, the model used, or an error.
+// Transcribe dispatches to append or edit path based on EditMode.
 func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText string, chatContext string) (string, string, error) {
+	switch s.config.EditMode {
+	case "append":
+		return s.transcribeAppend(audioData, mimeType, contextText, chatContext)
+	default: // "edit"
+		return s.transcribeEdit(audioData, mimeType, contextText, chatContext)
+	}
+}
+
+// transcribeAppend — pure transcription + backend join, used by both engines.
+// NO_SPEECH: both empty and [NO_SPEECH] sentinel are treated as silence.
+func (s *VoiceService) transcribeAppend(audioData []byte, mimeType string,
+	contextText string, chatContext string) (string, string, error) {
+
+	prompt := buildAppendPrompt(contextText, chatContext)
+
+	var text, model string
+	var err error
+	switch s.config.Engine {
+	case "gpt":
+		text, model, err = s.callGPTWithModelFallback(audioData, mimeType, prompt)
+	default: // gemini
+		text, model, err = s.callWithModelFallback(audioData, mimeType, prompt)
+	}
+	if err != nil {
+		return "", "", err
+	}
+
+	// NO_SPEECH: both empty and sentinel treated as silence
+	if isNoSpeech(text) {
+		if contextText != "" {
+			return contextText, model, nil
+		}
+		return "", model, nil
+	}
+
+	// Backend join
+	if contextText != "" {
+		text = joinContextAndText(contextText, text)
+	}
+
+	return text, model, nil
+}
+
+// transcribeEdit — Gemini only, LLM performs editing + whitespace restore.
+// NO_SPEECH: only [NO_SPEECH] sentinel is silence; empty string is legitimate "delete everything".
+func (s *VoiceService) transcribeEdit(audioData []byte, mimeType string,
+	contextText string, chatContext string) (string, string, error) {
+
 	prompt := buildPrompt(contextText, chatContext)
 
-	totalCtx, totalCancel := context.WithTimeout(context.Background(), time.Duration(s.config.TotalTimeout)*time.Second)
+	text, model, err := s.callWithModelFallback(audioData, mimeType, prompt)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Only sentinel counts as silence; empty string = "delete everything"
+	if text == noSpeechSentinel {
+		if contextText != "" {
+			return contextText, model, nil
+		}
+		return "", model, nil
+	}
+
+	// Restore trailing whitespace that LLM may have stripped
+	if contextText != "" {
+		text = restoreTrailingWhitespace(contextText, text)
+	}
+
+	return text, model, nil
+}
+
+// callWithModelFallback wraps callLiteLLM with model loop + total timeout.
+func (s *VoiceService) callWithModelFallback(audioData []byte, mimeType string,
+	prompt string) (string, string, error) {
+
+	totalCtx, totalCancel := context.WithTimeout(context.Background(),
+		time.Duration(s.config.TotalTimeout)*time.Second)
 	defer totalCancel()
 
 	var lastErr error
 	for _, model := range s.config.Models {
-		// Check if total deadline already expired
 		if totalCtx.Err() != nil {
 			break
 		}
@@ -48,8 +122,6 @@ func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText
 		}
 
 		lastErr = err
-
-		// Only retry on 429, 5xx, or timeout; 4xx (except 429) returns immediately
 		if isNonRetryableError(err) {
 			return "", model, err
 		}
@@ -61,14 +133,50 @@ func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText
 	return "", "", fmt.Errorf("all models failed: %w", lastErr)
 }
 
+// callGPTWithModelFallback wraps callAudioTranscriptions with model loop + total timeout.
+func (s *VoiceService) callGPTWithModelFallback(audioData []byte, mimeType string,
+	prompt string) (string, string, error) {
+
+	totalCtx, totalCancel := context.WithTimeout(context.Background(),
+		time.Duration(s.config.TotalTimeout)*time.Second)
+	defer totalCancel()
+
+	var lastErr error
+	for _, model := range s.config.GPTModels {
+		if totalCtx.Err() != nil {
+			break
+		}
+
+		text, err := s.callAudioTranscriptions(totalCtx, model, audioData, mimeType, prompt)
+		if err == nil {
+			return text, model, nil
+		}
+
+		lastErr = err
+		if isNonRetryableError(err) {
+			return "", model, err
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no GPT models configured")
+	}
+	return "", "", fmt.Errorf("all GPT models failed: %w", lastErr)
+}
+
 // callLiteLLM sends a chat completion request to LiteLLM with audio content.
-// NOTE: The input_audio format uses OpenAI-compatible structure. This may need
-// adjustment for LiteLLM+Gemini backends - verify the actual format accepted.
 func (s *VoiceService) callLiteLLM(totalCtx context.Context, model string, audioData []byte, mimeType string, prompt string) (string, error) {
 	b64Audio := base64.StdEncoding.EncodeToString(audioData)
 
+	// Only use reasoning_effort=low for Gemini 3.1 Pro (reduces latency without hurting quality)
+	var reasoningEffort string
+	if strings.Contains(model, "3.1-pro") {
+		reasoningEffort = "low"
+	}
+
 	reqBody := chatCompletionRequest{
-		Model: model,
+		Model:           model,
+		ReasoningEffort: reasoningEffort,
 		Messages: []message{
 			{
 				Role: "user",
@@ -94,7 +202,6 @@ func (s *VoiceService) callLiteLLM(totalCtx context.Context, model string, audio
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	// Use the shorter of per-model timeout and remaining total deadline
 	perModelTimeout := time.Duration(s.config.Timeout) * time.Second
 	ctx, cancel := context.WithTimeout(totalCtx, perModelTimeout)
 	defer cancel()
@@ -134,13 +241,128 @@ func (s *VoiceService) callLiteLLM(totalCtx context.Context, model string, audio
 	}
 
 	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	return result, nil
+}
 
-	// Handle no-speech sentinel and null content
-	if isNoSpeech(result) {
-		return "", nil
+// callAudioTranscriptions sends audio to the OpenAI-compatible audio transcriptions API.
+func (s *VoiceService) callAudioTranscriptions(totalCtx context.Context, model string,
+	audioData []byte, mimeType string, prompt string) (string, error) {
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	writer.WriteField("model", model)
+
+	if s.config.Language != "" {
+		writer.WriteField("language", s.config.Language)
 	}
 
-	return result, nil
+	if prompt != "" {
+		writer.WriteField("prompt", prompt)
+	}
+
+	ext := mimeTypeToFormat(mimeType)
+	part, err := writer.CreateFormFile("file", "audio."+ext)
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	part.Write(audioData)
+	writer.Close()
+
+	perModelTimeout := time.Duration(s.config.Timeout) * time.Second
+	ctx, cancel := context.WithTimeout(totalCtx, perModelTimeout)
+	defer cancel()
+
+	url := strings.TrimRight(s.config.LiteLLMUrl, "/") + "/audio/transcriptions"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, &buf)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+s.config.LiteLLMKey)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", &apiError{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
+
+	var result struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+
+	return strings.TrimSpace(result.Text), nil
+}
+
+// joinContextAndText joins existing text and transcription result.
+// CJK characters (incl. Japanese kana, Korean) don't get a space between them.
+func joinContextAndText(contextText, newText string) string {
+	if contextText == "" || newText == "" {
+		return contextText + newText
+	}
+	ctxRunes := []rune(contextText)
+	newRunes := []rune(newText)
+	last := ctxRunes[len(ctxRunes)-1]
+	first := newRunes[0]
+
+	// Trailing space or punctuation → join directly
+	if unicode.IsSpace(last) || isPunctuation(last) {
+		return contextText + newText
+	}
+	// Either side is CJK → no space
+	if isCJK(last) || isCJK(first) {
+		return contextText + newText
+	}
+	// Other (English etc.) → add space
+	return contextText + " " + newText
+}
+
+// isCJK detects CJK unified ideographs, Japanese kana, Korean syllables, and related symbols.
+func isCJK(r rune) bool {
+	return (r >= 0x4e00 && r <= 0x9fff) || // CJK Unified Ideographs
+		(r >= 0x3400 && r <= 0x4dbf) || // CJK Extension A
+		(r >= 0x3000 && r <= 0x303f) || // CJK Symbols and Punctuation
+		(r >= 0xff00 && r <= 0xffef) || // Fullwidth Forms
+		(r >= 0x3040 && r <= 0x309f) || // Hiragana
+		(r >= 0x30a0 && r <= 0x30ff) || // Katakana
+		(r >= 0xac00 && r <= 0xd7af) // Hangul Syllables
+}
+
+func isPunctuation(r rune) bool {
+	return strings.ContainsRune(`，。！？；：、,.!?;:…—·"'）」】》〉`+"\u201C\u201D\u2018\u2019", r)
+}
+
+// restoreTrailingWhitespace restores trailing whitespace stripped by LLM.
+// Append scenario (HasPrefix match): whitespace restored between original and appended text.
+// Edit scenario (no match): whitespace appended to the end.
+func restoreTrailingWhitespace(contextText, text string) string {
+	trimmedCtx := strings.TrimRight(contextText, " \t\n\r")
+	trailing := contextText[len(trimmedCtx):]
+
+	if trailing == "" || trimmedCtx == "" {
+		return text
+	}
+
+	if strings.HasPrefix(text, trimmedCtx) {
+		// Append scenario: original preserved, restore whitespace in between
+		rest := text[len(trimmedCtx):]
+		return trimmedCtx + trailing + strings.TrimLeft(rest, " \t")
+	}
+
+	// Edit scenario: original was modified, restore trailing whitespace
+	return strings.TrimRight(text, " \t\n\r") + trailing
 }
 
 // mimeTypeToFormat converts MIME type to a short format string for the API
@@ -185,8 +407,9 @@ func isNonRetryableError(err error) bool {
 // Request/response types for OpenAI-compatible chat completion API
 
 type chatCompletionRequest struct {
-	Model    string    `json:"model"`
-	Messages []message `json:"messages"`
+	Model            string            `json:"model"`
+	Messages         []message         `json:"messages"`
+	ReasoningEffort  string            `json:"reasoning_effort,omitempty"`
 }
 
 type message struct {

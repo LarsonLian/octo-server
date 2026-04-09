@@ -605,6 +605,16 @@ func (g *Group) handleOrgOrDeptEmployeeUpdate(data []byte, commit config.EventCo
 		commit(err)
 		return
 	}
+
+	// 同步新成员到群内所有子区的 IM 订阅（允许发消息）
+	for _, m := range addMembers {
+		uids := make([]string, 0, len(m.Members))
+		for _, member := range m.Members {
+			uids = append(uids, member.EmployeeUid)
+		}
+		g.addUsersToGroupThreads(m.GroupNo, uids)
+	}
+
 	if len(deleteMembers) > 0 {
 		for _, m := range deleteMembers {
 			members := make([]string, 0)

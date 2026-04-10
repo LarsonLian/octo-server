@@ -301,6 +301,11 @@ func (m *Message) messageEdit(c *wkhttp.Context) {
 		c.ResponseError(errors.New("只能编辑自己发送的消息"))
 		return
 	}
+	// TOCTOU 交叉校验：确保权限检查的消息与待编辑的消息是同一条
+	if req.MessageID != strconv.FormatInt(resp.Messages[0].MessageID, 10) {
+		c.ResponseError(errors.New("消息ID与消息序号不匹配"))
+		return
+	}
 
 	contentEdit := dbr.NewNullString(req.ContentEdit).String
 	contentMD5 := util.MD5(contentEdit)
@@ -1311,6 +1316,11 @@ func (m *Message) mutualDelete(c *wkhttp.Context) {
 		c.ResponseError(errors.New("用户无权删除此消息"))
 		return
 	}
+	// TOCTOU 交叉校验：确保权限检查的消息与待删除的消息是同一条
+	if req.MessageID != strconv.FormatInt(resp.Messages[0].MessageID, 10) {
+		c.ResponseError(errors.New("消息ID与消息序号不匹配"))
+		return
+	}
 	version, err := m.genMessageExtraSeq(fakeChannelID)
 	if err != nil {
 		m.Error("生成消息扩展序列号失败！", zap.Error(err))
@@ -1611,8 +1621,9 @@ func (m *Message) hasRevokePermission(messageM *messageModel, loginUID string) (
 		if err != nil {
 			return false, err
 		}
-		if fromMember == nil && loginMember.Role != int(common.GroupMemberRoleNormal) {
-			return true, nil
+		if fromMember == nil {
+			// 消息发送者已不在群：管理员/创建者可撤回，普通成员不可
+			return loginMember.Role != int(common.GroupMemberRoleNormal), nil
 		}
 		if fromMember.Role == int(common.GroupMemberRoleCreater) || loginMember.Role == int(common.GroupMemberRoleNormal) {
 			return false, nil

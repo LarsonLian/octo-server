@@ -1221,15 +1221,23 @@ func (s *Space) notifyAdminsNewJoinApply(applicantUID, spaceId, spaceName, remar
 	}
 
 	applicantName := applicantUID
-	var name string
-	cnt, _ := s.ctx.DB().SelectBySql("SELECT name FROM `user` WHERE uid=?", applicantUID).Load(&name)
-	if cnt > 0 && name != "" {
-		applicantName = name
+	var userInfo struct {
+		Name  string
+		Email string
+	}
+	cnt, _ := s.ctx.DB().SelectBySql("SELECT IFNULL(name,'') as name, IFNULL(email,'') as email FROM `user` WHERE uid=?", applicantUID).Load(&userInfo)
+	if cnt > 0 && userInfo.Name != "" {
+		applicantName = userInfo.Name
+	}
+
+	emailText := ""
+	if userInfo.Email != "" {
+		emailText = fmt.Sprintf("\n\n邮箱: %s", userInfo.Email)
 	}
 
 	remarkText := ""
 	if remark != "" {
-		remarkText = fmt.Sprintf("\n备注: %s", remark)
+		remarkText = fmt.Sprintf("\n\n备注: %s", remark)
 	}
 
 	approveURL := ""
@@ -1237,8 +1245,8 @@ func (s *Space) notifyAdminsNewJoinApply(applicantUID, spaceId, spaceName, remar
 		approveURL = fmt.Sprintf("\n\n审批链接: %s/space/%s/join-applies", baseURL, spaceId)
 	}
 
-	content := fmt.Sprintf("有新的 Space 加入申请\n用户: %s (%s)\n空间: %s%s%s",
-		applicantName, applicantUID, spaceName, remarkText, approveURL)
+	content := fmt.Sprintf("有新的 Space 加入申请\n\n用户: %s (%s)\n\n空间: %s%s%s%s",
+		applicantName, applicantUID, spaceName, emailText, remarkText, approveURL)
 
 	for _, admin := range admins {
 		notifyPayload := map[string]interface{}{

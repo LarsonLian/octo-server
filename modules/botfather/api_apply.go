@@ -58,11 +58,8 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 		return
 	}
 
-	// 检查access_mode
-	switch robot.AccessMode {
-	case AccessModeForbidden:
-		c.ResponseError(errors.New("该AI禁止申请"))
-		return
+	// 检查auto_approve（数据库实际字段，两态：0=需要审批 1=自动通过）
+	switch robot.AutoApprove {
 	case AccessModeAutoApprove:
 		// 自动通过：直接建立好友关系
 		err = bf.createFriendRelation(loginUID, req.RobotUID)

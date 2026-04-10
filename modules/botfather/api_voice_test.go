@@ -25,7 +25,7 @@ func setupVoiceTestEnv(t *testing.T) (*server.Server, *BotFather, string) {
 	botToken := "bf_" + robotID
 
 	createTestUser(t, bf, ownerUID, "Voice Owner")
-	createTestRobot(t, bf, robotID, ownerUID)
+	createTestRobot(t, bf, robotID, ownerUID, 0)
 
 	// Create space
 	_, err := bf.db.session.InsertBySql(

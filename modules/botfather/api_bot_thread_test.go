@@ -28,7 +28,7 @@ func setupBotThreadTestData(t *testing.T) (s *server.Server, bf *BotFather, robo
 	ownerUID := "group_owner_001"
 
 	createTestUser(t, bf, ownerUID, "群主")
-	createTestRobot(t, bf, robotID, ownerUID)
+	createTestRobot(t, bf, robotID, ownerUID, 0)
 
 	// robot 也需要 user 记录（thread service 查 member name 时需要）
 	_, err := bf.db.session.InsertInto("user").Columns(
@@ -124,7 +124,7 @@ func TestBotCreateThread_NotGroupMember(t *testing.T) {
 	// 创建一个不在群内的 bot
 	outsiderID := "outsider_bot"
 	outsiderToken := "bf_" + outsiderID
-	createTestRobot(t, bf, outsiderID, "group_owner_001")
+	createTestRobot(t, bf, outsiderID, "group_owner_001", 0)
 
 	w := botRequest(t, s, "POST", "/v1/bot/groups/"+"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"+"/threads", outsiderToken, map[string]interface{}{
 		"name": "不应该创建成功",
@@ -204,7 +204,7 @@ func TestBotDeleteThread_NotCreator(t *testing.T) {
 	// 用另一个 bot 创建子区
 	otherBotID := "other_bot"
 	otherToken := "bf_" + otherBotID
-	createTestRobot(t, bf, otherBotID, "group_owner_001")
+	createTestRobot(t, bf, otherBotID, "group_owner_001", 0)
 	_, err := bf.db.session.InsertInto("user").Columns(
 		"uid", "name", "username", "short_no", "status", "robot",
 	).Values(
@@ -253,7 +253,7 @@ func TestBotJoinAndLeaveThread(t *testing.T) {
 	// 用另一个 bot 创建子区
 	otherBotID := "join_test_bot"
 	otherToken := "bf_" + otherBotID
-	createTestRobot(t, bf, otherBotID, "group_owner_001")
+	createTestRobot(t, bf, otherBotID, "group_owner_001", 0)
 	_, err := bf.db.session.InsertInto("user").Columns(
 		"uid", "name", "username", "short_no", "status", "robot",
 	).Values(

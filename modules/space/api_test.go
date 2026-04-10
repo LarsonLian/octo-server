@@ -2,20 +2,72 @@ package space
 
 import (
 	"bytes"
+	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
+
+	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/server"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	"github.com/stretchr/testify/assert"
 )
 
+var (
+	testSrv     *server.Server
+	testCtx     *config.Context
+	testSpaceDB *DB
+)
+
+// TestMain 确保 space 迁移所依赖的外部表存在，并创建共享测试服务器
+func TestMain(m *testing.M) {
+	db, err := sql.Open("mysql", "root:demo@tcp(127.0.0.1)/test?charset=utf8mb4&parseTime=true")
+	if err != nil {
+		panic("连接测试数据库失败: " + err.Error())
+	}
+
+	// space 迁移脚本依赖 group 和 robot 表
+	depDDLs := []string{
+		"CREATE TABLE IF NOT EXISTS `group` (id BIGINT AUTO_INCREMENT PRIMARY KEY, group_no VARCHAR(40) NOT NULL DEFAULT '', name VARCHAR(100) DEFAULT '', creator VARCHAR(40) DEFAULT '', status SMALLINT DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE KEY idx_group_no(group_no)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+		"CREATE TABLE IF NOT EXISTS group_member (id BIGINT AUTO_INCREMENT PRIMARY KEY, group_no VARCHAR(40) DEFAULT '', uid VARCHAR(40) DEFAULT '', role INT DEFAULT 0, is_deleted SMALLINT DEFAULT 0, status SMALLINT DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+		"CREATE TABLE IF NOT EXISTS robot (id BIGINT AUTO_INCREMENT PRIMARY KEY, robot_id VARCHAR(40) NOT NULL DEFAULT '', token VARCHAR(200) DEFAULT '', status SMALLINT DEFAULT 1, creator_uid VARCHAR(40) DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE KEY idx_robot_id(robot_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+		"CREATE TABLE IF NOT EXISTS `user` (id BIGINT AUTO_INCREMENT PRIMARY KEY, uid VARCHAR(40) NOT NULL DEFAULT '', name VARCHAR(100) DEFAULT '', avatar VARCHAR(200) DEFAULT '', robot SMALLINT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE KEY idx_uid(uid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+	}
+	for _, ddl := range depDDLs {
+		if _, err := db.Exec(ddl); err != nil {
+			panic("创建依赖表失败: " + err.Error())
+		}
+	}
+	db.Close()
+
+	// 创建共享测试服务器（只初始化一次，避免路由重复注册）
+	s, ctx := testutil.NewTestServer()
+	testSrv = s
+	testCtx = ctx
+	testSpaceDB = NewDB(ctx)
+
+	os.Exit(m.Run())
+}
+
+func strPtr(s string) *string { return &s }
+
+// setup 返回共享的测试服务器和 Space 实例，并清理表数据
+func setup(t *testing.T) (*server.Server, *Space, error) {
+	t.Helper()
+	err := testutil.CleanAllTables(testCtx)
+	assert.NoError(t, err)
+	return testSrv, New(testCtx), err
+}
+
 func TestGetInvitePreview(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -72,7 +124,6 @@ func TestGetInvitePreview(t *testing.T) {
 func TestGetInvitePreviewWithBots(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -102,12 +153,12 @@ func TestGetInvitePreviewWithBots(t *testing.T) {
 
 	// 创建一个 Bot 用户
 	botUID := "bot-001"
-	_, err = ctx.DB().InsertInto("user").Columns("uid", "name", "avatar").
+	_, err = testCtx.DB().InsertInto("user").Columns("uid", "name", "avatar").
 		Values(botUID, "AI 助手", "https://example.com/bot.png").Exec()
 	assert.NoError(t, err)
 
 	// 在 robot 表中注册 Bot
-	_, err = ctx.DB().InsertInto("robot").Columns("robot_id", "token", "status").
+	_, err = testCtx.DB().InsertInto("robot").Columns("robot_id", "token", "status").
 		Values(botUID, "test-token", 1).Exec()
 	assert.NoError(t, err)
 
@@ -144,13 +195,7 @@ func TestGetInvitePreviewWithBots(t *testing.T) {
 }
 
 func TestGetInvitePreviewInvalidCode(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
-	f := New(ctx)
-	f.Route(s.GetRoute())
-
-	// 清空旧数据
-	err := testutil.CleanAllTables(ctx)
-	assert.NoError(t, err)
+	s, _, err := setup(t)
 
 	// 测试无效邀请码
 	w := httptest.NewRecorder()
@@ -165,7 +210,6 @@ func TestGetInvitePreviewInvalidCode(t *testing.T) {
 func TestUpdateInvite(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -229,7 +273,6 @@ func TestUpdateInvite(t *testing.T) {
 func TestUpdateInviteNoPermission(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -281,7 +324,6 @@ func TestUpdateInviteNoPermission(t *testing.T) {
 func TestUpdateInviteInvalidCode(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -323,7 +365,6 @@ func TestUpdateInviteInvalidCode(t *testing.T) {
 func TestJoinSpaceFullReturnsSpaceFullError(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -379,7 +420,6 @@ func TestJoinSpaceFullReturnsSpaceFullError(t *testing.T) {
 func TestJoinSpaceSuccessWithCapacity(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -438,7 +478,6 @@ func TestJoinSpaceSuccessWithCapacity(t *testing.T) {
 func TestJoinSpaceUnlimitedCapacity(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -494,7 +533,6 @@ func TestJoinSpaceUnlimitedCapacity(t *testing.T) {
 func TestJoinSpaceWithPresetGroup(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -502,7 +540,7 @@ func TestJoinSpaceWithPresetGroup(t *testing.T) {
 
 	// 创建测试群组
 	groupNo := "test-group-001"
-	_, err = ctx.DB().InsertInto("group").Columns("group_no", "name", "creator", "status").
+	_, err = testCtx.DB().InsertInto("group").Columns("group_no", "name", "creator", "status").
 		Values(groupNo, "测试预置群", "admin", 1).Exec()
 	assert.NoError(t, err)
 
@@ -512,7 +550,7 @@ func TestJoinSpaceWithPresetGroup(t *testing.T) {
 	err = f.db.insertSpaceNoTx(&SpaceModel{
 		SpaceId:        spaceId,
 		Name:           "带预置群的空间",
-		PresetGroupIds: `["` + groupNo + `"]`,
+		PresetGroupIds: strPtr(`["` + groupNo + `"]`),
 		Creator:        "admin",
 		Status:         1,
 	})
@@ -552,7 +590,7 @@ func TestJoinSpaceWithPresetGroup(t *testing.T) {
 	// 验证用户已加入预置群（使用 Eventually 等待异步操作完成）
 	assert.Eventually(t, func() bool {
 		var count int
-		_, err := ctx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND uid=? AND is_deleted=0", groupNo, testutil.UID).Load(&count)
+		_, err := testCtx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND uid=? AND is_deleted=0", groupNo, testutil.UID).Load(&count)
 		return err == nil && count == 1
 	}, time.Second, 10*time.Millisecond, "用户应该已自动加入预置群")
 }
@@ -560,7 +598,6 @@ func TestJoinSpaceWithPresetGroup(t *testing.T) {
 func TestJoinSpaceWithNoPresetGroup(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -572,7 +609,7 @@ func TestJoinSpaceWithNoPresetGroup(t *testing.T) {
 	err = f.db.insertSpaceNoTx(&SpaceModel{
 		SpaceId:        spaceId,
 		Name:           "无预置群的空间",
-		PresetGroupIds: "", // 没有预置群
+		PresetGroupIds: strPtr(""), // 没有预置群
 		Creator:        "admin",
 		Status:         1,
 	})
@@ -618,7 +655,6 @@ func TestJoinSpaceWithNoPresetGroup(t *testing.T) {
 func TestJoinSpacePresetGroupIdempotent(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -626,12 +662,12 @@ func TestJoinSpacePresetGroupIdempotent(t *testing.T) {
 
 	// 创建测试群组
 	groupNo := "test-group-idem"
-	_, err = ctx.DB().InsertInto("group").Columns("group_no", "name", "creator", "status").
+	_, err = testCtx.DB().InsertInto("group").Columns("group_no", "name", "creator", "status").
 		Values(groupNo, "幂等测试群", "admin", 1).Exec()
 	assert.NoError(t, err)
 
 	// 用户已在群中
-	_, err = ctx.DB().InsertInto("group_member").
+	_, err = testCtx.DB().InsertInto("group_member").
 		Columns("group_no", "uid", "role", "is_deleted", "status").
 		Values(groupNo, testutil.UID, 0, 0, 1).Exec()
 	assert.NoError(t, err)
@@ -642,7 +678,7 @@ func TestJoinSpacePresetGroupIdempotent(t *testing.T) {
 	err = f.db.insertSpaceNoTx(&SpaceModel{
 		SpaceId:       spaceId,
 		Name:          "幂等测试空间",
-		PresetGroupIds: `["` + groupNo + `"]`,
+		PresetGroupIds: strPtr(`["` + groupNo + `"]`),
 		Creator:       "admin",
 		Status:        1,
 	})
@@ -682,7 +718,7 @@ func TestJoinSpacePresetGroupIdempotent(t *testing.T) {
 	// 验证群成员记录仍然只有一条（使用 Eventually 等待异步操作完成）
 	assert.Eventually(t, func() bool {
 		var count int
-		_, err := ctx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND uid=?", groupNo, testutil.UID).Load(&count)
+		_, err := testCtx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND uid=?", groupNo, testutil.UID).Load(&count)
 		return err == nil && count == 1
 	}, time.Second, 10*time.Millisecond, "群成员记录应该只有一条（幂等）")
 }
@@ -690,7 +726,6 @@ func TestJoinSpacePresetGroupIdempotent(t *testing.T) {
 func TestJoinSpacePresetGroupDisbanded(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	f := New(ctx)
-	f.Route(s.GetRoute())
 
 	// 清空旧数据
 	err := testutil.CleanAllTables(ctx)
@@ -698,7 +733,7 @@ func TestJoinSpacePresetGroupDisbanded(t *testing.T) {
 
 	// 创建已解散的群组（status=2 表示解散）
 	groupNo := "test-group-disbanded"
-	_, err = ctx.DB().InsertInto("group").Columns("group_no", "name", "creator", "status").
+	_, err = testCtx.DB().InsertInto("group").Columns("group_no", "name", "creator", "status").
 		Values(groupNo, "已解散的群", "admin", 2).Exec()
 	assert.NoError(t, err)
 
@@ -708,7 +743,7 @@ func TestJoinSpacePresetGroupDisbanded(t *testing.T) {
 	err = f.db.insertSpaceNoTx(&SpaceModel{
 		SpaceId:       spaceId,
 		Name:          "预置群已解散的空间",
-		PresetGroupIds: `["` + groupNo + `"]`,
+		PresetGroupIds: strPtr(`["` + groupNo + `"]`),
 		Creator:       "admin",
 		Status:        1,
 	})
@@ -749,7 +784,7 @@ func TestJoinSpacePresetGroupDisbanded(t *testing.T) {
 	// 注意：这里验证的是 count == 0，需要等待足够时间确保如果会加入，已经加入了
 	time.Sleep(50 * time.Millisecond) // 给异步操作一点时间
 	var count int
-	_, err = ctx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND uid=?", groupNo, testutil.UID).Load(&count)
+	_, err = testCtx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND uid=?", groupNo, testutil.UID).Load(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, count, "用户不应该加入已解散的群")
 
@@ -757,4 +792,350 @@ func TestJoinSpacePresetGroupDisbanded(t *testing.T) {
 	member, err := f.db.queryMember(spaceId, testutil.UID)
 	assert.NoError(t, err)
 	assert.NotNil(t, member)
+}
+
+// === Join Apply (Approval Flow) Tests ===
+
+func TestJoinSpaceApprovalMode_CreatesPendingApply(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-approve"
+	inviteCode := "appr1234"
+	ownerUID := "owner-approve"
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId:  spaceId,
+		Name:     "需审批空间",
+		Creator:  ownerUID,
+		JoinMode: 1,
+		Status:   1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: ownerUID, Role: 2, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertInvitation(&InvitationModel{
+		SpaceId: spaceId, InviteCode: inviteCode, Creator: ownerUID, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/space/join",
+		bytes.NewReader([]byte(util.ToJson(map[string]string{
+			"invite_code": inviteCode,
+		}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"status":"pending"`)
+	assert.Contains(t, body, spaceId)
+
+	// 验证用户没有成为成员
+	mbr, err := f.db.queryMember(spaceId, testutil.UID)
+	assert.NoError(t, err)
+	assert.Nil(t, mbr, "用户不应该直接成为成员")
+
+	// 验证申请记录已创建
+	apply, err := f.db.queryPendingApplyBySpaceAndUID(spaceId, testutil.UID)
+	assert.NoError(t, err)
+	assert.NotNil(t, apply)
+	assert.Equal(t, 0, apply.Status)
+	assert.Equal(t, inviteCode, apply.InviteCode)
+
+	// 验证邀请码使用次数没有增加
+	invitation, err := f.db.queryInvitationByCode(inviteCode)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, invitation.UsedCount, "审批模式不应消耗邀请码次数")
+}
+
+func TestJoinSpaceApprovalMode_DuplicateApply(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-dup-apply"
+	inviteCode := "dup12345"
+	ownerUID := "owner-dup"
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "重复申请测试", Creator: ownerUID, JoinMode: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: ownerUID, Role: 2, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertInvitation(&InvitationModel{
+		SpaceId: spaceId, InviteCode: inviteCode, Creator: ownerUID, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/space/join",
+		bytes.NewReader([]byte(util.ToJson(map[string]string{"invite_code": inviteCode}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"status":"pending"`)
+
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest("POST", "/v1/space/join",
+		bytes.NewReader([]byte(util.ToJson(map[string]string{"invite_code": inviteCode}))))
+	req2.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w2, req2)
+	assert.Equal(t, http.StatusOK, w2.Code)
+	assert.Contains(t, w2.Body.String(), `"status":"pending"`)
+}
+
+func TestJoinSpaceApprovalMode_AlreadyMember(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-already"
+	inviteCode := "alrd1234"
+	ownerUID := "owner-already"
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "已是成员测试", Creator: ownerUID, JoinMode: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: ownerUID, Role: 2, Status: 1,
+	})
+	assert.NoError(t, err)
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: testutil.UID, Role: 0, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertInvitation(&InvitationModel{
+		SpaceId: spaceId, InviteCode: inviteCode, Creator: ownerUID, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/space/join",
+		bytes.NewReader([]byte(util.ToJson(map[string]string{"invite_code": inviteCode}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "已经是该空间成员")
+}
+
+func TestJoinApplies_ListPending(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-list-apply"
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "申请列表测试", Creator: testutil.UID, JoinMode: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: testutil.UID, Role: 2, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.upsertJoinApply(&spaceJoinApplyModel{
+		SpaceId: spaceId, UID: "applicant-1", InviteCode: "inv1", Status: 0,
+	})
+	assert.NoError(t, err)
+	err = f.db.upsertJoinApply(&spaceJoinApplyModel{
+		SpaceId: spaceId, UID: "applicant-2", InviteCode: "inv2", Remark: "请让我加入", Status: 0,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/space/"+spaceId+"/join-applies", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"count":2`)
+	assert.Contains(t, body, `"applicant-1"`)
+	assert.Contains(t, body, `"applicant-2"`)
+}
+
+func TestJoinApplies_NoPermission(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-noperm"
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "无权限测试", Creator: "other", JoinMode: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: testutil.UID, Role: 0, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/space/"+spaceId+"/join-applies", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "无权限")
+}
+
+func TestApproveJoinApply_Success(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-approve-ok"
+	applicantUID := "applicant-approve"
+
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "审批通过测试", Creator: testutil.UID, JoinMode: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: testutil.UID, Role: 2, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.upsertJoinApply(&spaceJoinApplyModel{
+		SpaceId: spaceId, UID: applicantUID, InviteCode: "apprinv1", Status: 0,
+	})
+	assert.NoError(t, err)
+
+	apply, err := f.db.queryPendingApplyBySpaceAndUID(spaceId, applicantUID)
+	assert.NoError(t, err)
+	assert.NotNil(t, apply)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST",
+		fmt.Sprintf("/v1/space/%s/join-applies/%d/approve", spaceId, apply.Id), nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	mbr, err := f.db.queryMember(spaceId, applicantUID)
+	assert.NoError(t, err)
+	assert.NotNil(t, mbr, "审批通过后用户应成为成员")
+	assert.Equal(t, 0, mbr.Role)
+
+	updatedApply, err := f.db.queryJoinApplyByID(apply.Id)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, updatedApply.Status)
+	assert.Equal(t, testutil.UID, updatedApply.ReviewerUID)
+}
+
+func TestRejectJoinApply_Success(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-reject"
+	applicantUID := "applicant-reject"
+
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "拒绝测试", Creator: testutil.UID, JoinMode: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: testutil.UID, Role: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.upsertJoinApply(&spaceJoinApplyModel{
+		SpaceId: spaceId, UID: applicantUID, InviteCode: "rejinv1", Status: 0,
+	})
+	assert.NoError(t, err)
+
+	apply, err := f.db.queryPendingApplyBySpaceAndUID(spaceId, applicantUID)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST",
+		fmt.Sprintf("/v1/space/%s/join-applies/%d/reject", spaceId, apply.Id), nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	mbr, err := f.db.queryMember(spaceId, applicantUID)
+	assert.NoError(t, err)
+	assert.Nil(t, mbr, "被拒绝的用户不应成为成员")
+
+	updatedApply, err := f.db.queryJoinApplyByID(apply.Id)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, updatedApply.Status)
+}
+
+func TestApproveJoinApply_SpaceFull(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-approve-full"
+	applicantUID := "applicant-full"
+
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "满员审批测试", Creator: testutil.UID,
+		JoinMode: 1, MaxUsers: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: testutil.UID, Role: 2, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.upsertJoinApply(&spaceJoinApplyModel{
+		SpaceId: spaceId, UID: applicantUID, InviteCode: "fullinv1", Status: 0,
+	})
+	assert.NoError(t, err)
+
+	apply, err := f.db.queryPendingApplyBySpaceAndUID(spaceId, applicantUID)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST",
+		fmt.Sprintf("/v1/space/%s/join-applies/%d/approve", spaceId, apply.Id), nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "空间已满")
+}
+
+func TestJoinSpaceDirectMode_StillWorks(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-direct"
+	inviteCode := "direct12"
+	ownerUID := "owner-direct"
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "直接加入空间", Creator: ownerUID, JoinMode: 0, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: ownerUID, Role: 2, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	err = f.db.insertInvitation(&InvitationModel{
+		SpaceId: spaceId, InviteCode: inviteCode, Creator: ownerUID, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/space/join",
+		bytes.NewReader([]byte(util.ToJson(map[string]string{"invite_code": inviteCode}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"space_id"`)
+	assert.NotContains(t, body, `"pending"`)
+
+	mbr, err := f.db.queryMember(spaceId, testutil.UID)
+	assert.NoError(t, err)
+	assert.NotNil(t, mbr)
 }

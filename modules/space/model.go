@@ -11,9 +11,10 @@ type SpaceModel struct {
 	Description    string // 空间描述
 	Logo           string // 空间Logo
 	Creator        string // 创建者uid
-	MaxUsers       int    // 最大成员数 0.不限制
+	MaxUsers       int     // 最大成员数 0.不限制
 	PresetGroupIds *string // 预设群组ID列表（JSON数组）
-	Status         int    // 状态 1.正常 0.已解散
+	JoinMode       int     // 加入模式 0=直接加入 1=需要审批
+	Status         int     // 状态 1.正常 0.已解散
 	Version        int64  // 版本号
 	db.BaseModel
 }
@@ -40,6 +41,24 @@ type InvitationModel struct {
 	db.BaseModel
 }
 
+// spaceJoinApplyModel 加入申请表模型
+type spaceJoinApplyModel struct {
+	Id          int64  // 申请ID
+	SpaceId     string // 空间ID
+	UID         string // 申请人UID
+	InviteCode  string // 使用的邀请码
+	Remark      string // 申请备注
+	Status      int    // 0=待处理 1=通过 2=拒绝
+	ReviewerUID string // 审批人UID
+	db.BaseModel
+}
+
+// spaceJoinApplyDetailModel 带申请人名称的申请详情
+type spaceJoinApplyDetailModel struct {
+	spaceJoinApplyModel
+	ApplicantName string // 申请人名称
+}
+
 // ---------- Request Models ----------
 
 type createSpaceReq struct {
@@ -53,6 +72,7 @@ type updateSpaceReq struct {
 	Description    string  `json:"description"`
 	Logo           string  `json:"logo"`
 	PresetGroupIds *string `json:"preset_group_ids"`
+	JoinMode       *int    `json:"join_mode"`
 }
 
 type addMemberReq struct {
@@ -69,6 +89,7 @@ type updateMemberRoleReq struct {
 
 type joinSpaceReq struct {
 	InviteCode string `json:"invite_code"`
+	Remark     string `json:"remark"`
 }
 
 // ---------- Response Models ----------
@@ -84,6 +105,7 @@ type spaceResp struct {
 	MaxUsers    int    `json:"max_users"`
 	MemberCount int    `json:"member_count"`
 	InviteCode  string `json:"invite_code"`
+	JoinMode    int    `json:"join_mode"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
 }
@@ -147,4 +169,23 @@ type SpaceDetailModel struct {
 	SpaceModel
 	Role        int // 当前用户角色
 	MemberCount int // 成员数
+}
+
+// ---------- Join Apply Response Models ----------
+
+// spaceJoinApplyResp 加入申请响应
+type spaceJoinApplyResp struct {
+	ID            int64  `json:"id"`
+	SpaceId       string `json:"space_id"`
+	UID           string `json:"uid"`
+	ApplicantName string `json:"applicant_name"`
+	Remark        string `json:"remark"`
+	Status        int    `json:"status"`
+	CreatedAt     string `json:"created_at"`
+}
+
+// spaceJoinApplyListResp 加入申请列表响应
+type spaceJoinApplyListResp struct {
+	List  []*spaceJoinApplyResp `json:"list"`
+	Count int64                 `json:"count"`
 }

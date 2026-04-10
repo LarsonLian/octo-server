@@ -3,12 +3,15 @@ package space
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
+	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -70,6 +73,10 @@ func (s *Space) Route(r *wkhttp.WKHttp) {
 
 		auth.POST("/:space_id/invite", s.createInvite)
 		auth.PUT("/:space_id/invite/:code", s.updateInvite)
+
+		auth.GET("/:space_id/join-applies", s.joinApplies)
+		auth.POST("/:space_id/join-applies/:id/approve", s.approveJoinApply)
+		auth.POST("/:space_id/join-applies/:id/reject", s.rejectJoinApply)
 	}
 
 	open := r.Group("/v1/space")
@@ -206,6 +213,7 @@ func (s *Space) getSpace(c *wkhttp.Context) {
 		MaxUsers:    detail.MaxUsers,
 		MemberCount: detail.MemberCount,
 		InviteCode:  inviteCode,
+		JoinMode:    detail.JoinMode,
 		CreatedAt:   detail.CreatedAt.String(),
 		UpdatedAt:   detail.UpdatedAt.String(),
 	})
@@ -235,8 +243,12 @@ func (s *Space) updateSpace(c *wkhttp.Context) {
 		c.ResponseError(errors.New("请求参数错误"))
 		return
 	}
+	if req.JoinMode != nil && (*req.JoinMode < 0 || *req.JoinMode > 1) {
+		c.ResponseError(errors.New("无效的加入模式，仅支持 0(直接加入) 或 1(需要审批)"))
+		return
+	}
 
-	err = s.db.updateSpace(spaceId, req.Name, req.Description, req.Logo, req.PresetGroupIds)
+	err = s.db.updateSpace(spaceId, req.Name, req.Description, req.Logo, req.PresetGroupIds, req.JoinMode)
 	if err != nil {
 		c.ResponseError(errors.New("更新空间失败"))
 		return
@@ -296,6 +308,7 @@ func (s *Space) mySpaces(c *wkhttp.Context) {
 			MaxUsers:    sp.MaxUsers,
 			MemberCount: sp.MemberCount,
 			InviteCode:  inviteCode,
+			JoinMode:    sp.JoinMode,
 			CreatedAt:   sp.CreatedAt.String(),
 			UpdatedAt:   sp.UpdatedAt.String(),
 		})
@@ -656,7 +669,76 @@ func (s *Space) joinSpace(c *wkhttp.Context) {
 		}
 	}
 
-	// 原子检查并递增使用次数（防止 TOCTOU 竞态条件）
+	// 检查空间是否存在
+	space, err := s.db.querySpaceByID(invitation.SpaceId)
+	if err != nil || space == nil {
+		c.ResponseError(errors.New("空间不存在或已解散"))
+		return
+	}
+
+	// 需要审批模式
+	if space.JoinMode == 1 {
+		if len(req.Remark) > 200 {
+			c.ResponseError(errors.New("申请备注不能超过200字"))
+			return
+		}
+
+		// 只读校验邀请码次数（不消耗，审批通过时也跳过）
+		if invitation.MaxUses > 0 && invitation.UsedCount >= invitation.MaxUses {
+			c.ResponseError(errors.New("邀请码已达到使用次数上限"))
+			return
+		}
+
+		// 检查是否已是成员
+		existing, err := s.db.queryMemberIncludeRemoved(invitation.SpaceId, loginUID)
+		if err != nil {
+			c.ResponseError(errors.New("查询成员信息失败"))
+			return
+		}
+		if existing != nil && existing.Status == 1 {
+			c.ResponseError(errors.New("你已经是该空间成员"))
+			return
+		}
+
+		// 检查是否已有待处理申请
+		pendingApply, err := s.db.queryPendingApplyBySpaceAndUID(invitation.SpaceId, loginUID)
+		if err != nil {
+			c.ResponseError(errors.New("查询申请信息失败"))
+			return
+		}
+		if pendingApply != nil {
+			c.Response(map[string]interface{}{
+				"status":   "pending",
+				"space_id": invitation.SpaceId,
+				"msg":      "申请已提交，请等待审批",
+			})
+			return
+		}
+
+		// 创建或重置申请记录（被拒后重新申请时覆盖更新）
+		err = s.db.upsertJoinApply(&spaceJoinApplyModel{
+			SpaceId:    invitation.SpaceId,
+			UID:        loginUID,
+			InviteCode: req.InviteCode,
+			Remark:     req.Remark,
+		})
+		if err != nil {
+			c.ResponseError(errors.New("提交申请失败"))
+			return
+		}
+
+		// 异步通知管理员
+		go s.notifyAdminsNewJoinApply(loginUID, invitation.SpaceId, space.Name, req.Remark)
+
+		c.Response(map[string]interface{}{
+			"status":   "pending",
+			"space_id": invitation.SpaceId,
+			"msg":      "申请已提交，请等待审批",
+		})
+		return
+	}
+
+	// 直接加入模式：原子检查并递增使用次数
 	allowed, err := s.db.incrementInviteUsedCountAtomic(req.InviteCode)
 	if err != nil {
 		c.ResponseError(errors.New("检查邀请码使用次数失败"))
@@ -667,36 +749,18 @@ func (s *Space) joinSpace(c *wkhttp.Context) {
 		return
 	}
 
-	// 检查空间是否存在
-	space, err := s.db.querySpaceByID(invitation.SpaceId)
-	if err != nil || space == nil {
-		c.ResponseError(errors.New("空间不存在或已解散"))
-		return
-	}
-
-	// 检查是否已经是成员
-	existing, err := s.db.queryMemberIncludeRemoved(invitation.SpaceId, loginUID)
-	if err != nil {
-		c.ResponseError(errors.New("查询成员信息失败"))
-		return
-	}
-	if existing != nil {
-		if existing.Status == 1 {
-			c.ResponseError(errors.New("你已经是该空间成员"))
-			return
-		}
-		// 原子检查容量并重新激活成员
-		err = s.db.atomicReactivateMemberIfNotFull(invitation.SpaceId, loginUID, space.MaxUsers)
-	} else {
-		// 原子检查容量并添加新成员
-		err = s.db.atomicAddMemberIfNotFull(invitation.SpaceId, loginUID, space.MaxUsers)
-	}
-	if err != nil {
-		if errors.Is(err, ErrSpaceFull) {
+	// 执行加入逻辑
+	joinErr := s.executeJoinSpace(loginUID, invitation.SpaceId, space)
+	if joinErr != nil {
+		if errors.Is(joinErr, ErrSpaceFull) {
 			c.ResponseWithStatus(http.StatusBadRequest, map[string]interface{}{
 				"status": "SPACE_FULL",
 				"msg":    "空间已满，无法加入",
 			})
+			return
+		}
+		if errors.Is(joinErr, ErrAlreadyMember) {
+			c.ResponseError(errors.New("你已经是该空间成员"))
 			return
 		}
 		c.ResponseError(errors.New("加入空间失败"))
@@ -706,14 +770,35 @@ func (s *Space) joinSpace(c *wkhttp.Context) {
 	c.Response(map[string]string{
 		"space_id": invitation.SpaceId,
 	})
+}
 
-	// 异步加入预设群组（不影响 joinSpace 结果）
+// executeJoinSpace 执行加入空间的核心逻辑（供直接加入和审批通过共用）
+func (s *Space) executeJoinSpace(uid, spaceId string, space *SpaceModel) error {
+	existing, err := s.db.queryMemberIncludeRemoved(spaceId, uid)
+	if err != nil {
+		return fmt.Errorf("query member failed: %w", err)
+	}
+	if existing != nil {
+		if existing.Status == 1 {
+			return ErrAlreadyMember
+		}
+		err = s.db.atomicReactivateMemberIfNotFull(spaceId, uid, space.MaxUsers)
+	} else {
+		err = s.db.atomicAddMemberIfNotFull(spaceId, uid, space.MaxUsers)
+	}
+	if err != nil {
+		return err
+	}
+
+	// 异步加入预设群组
 	if space.PresetGroupIds != nil && *space.PresetGroupIds != "" {
-		go s.joinPresetGroups(loginUID, space.SpaceId, *space.PresetGroupIds)
+		go s.joinPresetGroups(uid, spaceId, *space.PresetGroupIds)
 	}
 
 	// 触发 SpaceMemberJoin 事件
-	go s.fireSpaceMemberJoinEvent(loginUID, invitation.SpaceId)
+	go s.fireSpaceMemberJoinEvent(uid, spaceId)
+
+	return nil
 }
 
 // joinPresetGroups 将用户加入预设群组（通过直接DB操作避免循环依赖）
@@ -925,8 +1010,288 @@ func (s *Space) updateInvite(c *wkhttp.Context) {
 	c.ResponseOK()
 }
 
+// joinApplies 管理员查看待审批的加入申请列表
+func (s *Space) joinApplies(c *wkhttp.Context) {
+	loginUID := c.GetLoginUID()
+	spaceId := c.Param("space_id")
+
+	member, err := s.db.queryMember(spaceId, loginUID)
+	if err != nil {
+		c.ResponseError(errors.New("查询成员信息失败"))
+		return
+	}
+	if member == nil || member.Role < 1 {
+		c.ResponseError(errors.New("无权限查看申请列表"))
+		return
+	}
+
+	pageStr := c.Query("page")
+	pageSizeStr := c.Query("page_size")
+	page := 1
+	pageSize := 20
+	if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+		page = p
+	}
+	if ps, err := strconv.Atoi(pageSizeStr); err == nil && ps > 0 && ps <= 100 {
+		pageSize = ps
+	}
+	offset := (page - 1) * pageSize
+
+	list, err := s.db.queryPendingAppliesBySpace(spaceId, pageSize, offset)
+	if err != nil {
+		c.ResponseError(errors.New("查询申请列表失败"))
+		return
+	}
+	count, err := s.db.queryPendingApplyCountBySpace(spaceId)
+	if err != nil {
+		c.ResponseError(errors.New("查询申请数量失败"))
+		return
+	}
+
+	respList := make([]*spaceJoinApplyResp, 0, len(list))
+	for _, apply := range list {
+		applicantName := apply.ApplicantName
+		if applicantName == "" {
+			applicantName = apply.UID
+		}
+
+		respList = append(respList, &spaceJoinApplyResp{
+			ID:            apply.Id,
+			SpaceId:       apply.SpaceId,
+			UID:           apply.UID,
+			ApplicantName: applicantName,
+			Remark:        apply.Remark,
+			Status:        apply.Status,
+			CreatedAt:     apply.CreatedAt.String(),
+		})
+	}
+
+	c.Response(&spaceJoinApplyListResp{
+		List:  respList,
+		Count: count,
+	})
+}
+
+// approveJoinApply 管理员通过加入申请
+func (s *Space) approveJoinApply(c *wkhttp.Context) {
+	loginUID := c.GetLoginUID()
+	spaceId := c.Param("space_id")
+	applyIDStr := c.Param("id")
+
+	applyID, err := strconv.ParseInt(applyIDStr, 10, 64)
+	if err != nil || applyID <= 0 {
+		c.ResponseError(errors.New("申请ID无效"))
+		return
+	}
+
+	member, err := s.db.queryMember(spaceId, loginUID)
+	if err != nil {
+		c.ResponseError(errors.New("查询成员信息失败"))
+		return
+	}
+	if member == nil || member.Role < 1 {
+		c.ResponseError(errors.New("无权限审批"))
+		return
+	}
+
+	apply, err := s.db.queryJoinApplyByID(applyID)
+	if err != nil {
+		c.ResponseError(errors.New("查询申请记录失败"))
+		return
+	}
+	if apply == nil {
+		c.ResponseError(errors.New("申请记录不存在"))
+		return
+	}
+	if apply.SpaceId != spaceId {
+		c.ResponseError(errors.New("申请记录不属于当前空间"))
+		return
+	}
+	if apply.Status != 0 {
+		c.ResponseError(errors.New("该申请已被处理"))
+		return
+	}
+
+	space, err := s.db.querySpaceByID(spaceId)
+	if err != nil || space == nil {
+		c.ResponseError(errors.New("空间不存在或已解散"))
+		return
+	}
+
+	// 先更新申请状态（防止并发审批 + 确保加入后状态一致）
+	affected, err := s.db.updateJoinApplyStatus(applyID, 1, loginUID)
+	if err != nil {
+		c.ResponseError(errors.New("更新申请状态失败"))
+		return
+	}
+	if affected == 0 {
+		// 已被其他管理员处理
+		c.ResponseOK()
+		return
+	}
+
+	// 执行加入逻辑（跳过邀请码校验，管理员审批即授权）
+	joinErr := s.executeJoinSpace(apply.UID, spaceId, space)
+	if joinErr != nil {
+		if errors.Is(joinErr, ErrSpaceFull) {
+			// 回滚申请状态
+			_, _ = s.db.updateJoinApplyStatusRaw(applyID, 0, "")
+			c.ResponseError(errors.New("空间已满，无法通过申请"))
+			return
+		}
+		if errors.Is(joinErr, ErrAlreadyMember) {
+			// 用户已通过其他方式加入，状态已更新，直接成功
+			c.ResponseOK()
+			return
+		}
+		// 回滚申请状态
+		_, _ = s.db.updateJoinApplyStatusRaw(applyID, 0, "")
+		c.ResponseError(errors.New("加入空间失败"))
+		return
+	}
+
+	go s.notifyApplicantJoinResult(apply.UID, spaceId, space.Name, true)
+
+	c.ResponseOK()
+}
+
+// rejectJoinApply 管理员拒绝加入申请
+func (s *Space) rejectJoinApply(c *wkhttp.Context) {
+	loginUID := c.GetLoginUID()
+	spaceId := c.Param("space_id")
+	applyIDStr := c.Param("id")
+
+	applyID, err := strconv.ParseInt(applyIDStr, 10, 64)
+	if err != nil || applyID <= 0 {
+		c.ResponseError(errors.New("申请ID无效"))
+		return
+	}
+
+	member, err := s.db.queryMember(spaceId, loginUID)
+	if err != nil {
+		c.ResponseError(errors.New("查询成员信息失败"))
+		return
+	}
+	if member == nil || member.Role < 1 {
+		c.ResponseError(errors.New("无权限审批"))
+		return
+	}
+
+	apply, err := s.db.queryJoinApplyByID(applyID)
+	if err != nil {
+		c.ResponseError(errors.New("查询申请记录失败"))
+		return
+	}
+	if apply == nil {
+		c.ResponseError(errors.New("申请记录不存在"))
+		return
+	}
+	if apply.SpaceId != spaceId {
+		c.ResponseError(errors.New("申请记录不属于当前空间"))
+		return
+	}
+	if apply.Status != 0 {
+		c.ResponseError(errors.New("该申请已被处理"))
+		return
+	}
+
+	_, err = s.db.updateJoinApplyStatus(applyID, 2, loginUID)
+	if err != nil {
+		c.ResponseError(errors.New("更新申请状态失败"))
+		return
+	}
+
+	spaceName := ""
+	space, _ := s.db.querySpaceByID(spaceId)
+	if space != nil {
+		spaceName = space.Name
+	}
+
+	go s.notifyApplicantJoinResult(apply.UID, spaceId, spaceName, false)
+
+	c.ResponseOK()
+}
+
+// notifyAdminsNewJoinApply 通过 BotFather 通知管理员有新的加入申请
+func (s *Space) notifyAdminsNewJoinApply(applicantUID, spaceId, spaceName, remark string) {
+	admins, err := s.db.queryAdminsAndOwner(spaceId)
+	if err != nil || len(admins) == 0 {
+		s.Warn("查询管理员列表失败或无管理员", zap.Error(err), zap.String("spaceId", spaceId))
+		return
+	}
+
+	applicantName := applicantUID
+	var name string
+	cnt, _ := s.ctx.DB().SelectBySql("SELECT name FROM `user` WHERE uid=?", applicantUID).Load(&name)
+	if cnt > 0 && name != "" {
+		applicantName = name
+	}
+
+	remarkText := ""
+	if remark != "" {
+		remarkText = fmt.Sprintf("\n备注: %s", remark)
+	}
+
+	approveURL := ""
+	if baseURL := os.Getenv("DM_SPACE_APPROVE_URL"); baseURL != "" {
+		approveURL = fmt.Sprintf("\n\n审批链接: %s/space/%s/join-applies", baseURL, spaceId)
+	}
+
+	content := fmt.Sprintf("有新的 Space 加入申请\n用户: %s (%s)\n空间: %s%s%s",
+		applicantName, applicantUID, spaceName, remarkText, approveURL)
+
+	for _, admin := range admins {
+		notifyPayload := map[string]interface{}{
+			"content":  content,
+			"type":     common.Text,
+			"space_id": spaceId,
+		}
+		payload := []byte(util.ToJson(notifyPayload))
+		if err := s.ctx.SendMessage(&config.MsgSendReq{
+			FromUID:     s.ctx.GetConfig().Account.SystemUID,
+			ChannelID:   admin.UID,
+			ChannelType: common.ChannelTypePerson.Uint8(),
+			Payload:     payload,
+			Header: config.MsgHeader{
+				RedDot: 1,
+			},
+		}); err != nil {
+			s.Warn("发送加入申请通知失败", zap.Error(err), zap.String("adminUID", admin.UID), zap.String("spaceId", spaceId))
+		}
+	}
+}
+
+// notifyApplicantJoinResult 通知申请人审批结果
+func (s *Space) notifyApplicantJoinResult(applicantUID, spaceId, spaceName string, approved bool) {
+	var content string
+	if approved {
+		content = fmt.Sprintf("你的 Space 加入申请已通过！\n空间: %s\n现在可以进入空间了", spaceName)
+	} else {
+		content = fmt.Sprintf("你的 Space 加入申请被拒绝\n空间: %s", spaceName)
+	}
+
+	resultPayload := map[string]interface{}{
+		"content":  content,
+		"type":     common.Text,
+		"space_id": spaceId,
+	}
+	payload := []byte(util.ToJson(resultPayload))
+	_ = s.ctx.SendMessage(&config.MsgSendReq{
+		FromUID:     s.ctx.GetConfig().Account.SystemUID,
+		ChannelID:   applicantUID,
+		ChannelType: common.ChannelTypePerson.Uint8(),
+		Payload:     payload,
+		Header: config.MsgHeader{
+			RedDot: 1,
+		},
+	})
+}
+
 // fireSpaceMemberJoinEvent 触发 SpaceMemberJoin 事件
 func (s *Space) fireSpaceMemberJoinEvent(uid string, spaceId string) {
+	if s.ctx.Event == nil {
+		return
+	}
 	tx, err := s.ctx.DB().Begin()
 	if err != nil {
 		s.Error("开启SpaceMemberJoin事件事务失败", zap.Error(err))

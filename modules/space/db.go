@@ -52,7 +52,7 @@ func (d *DB) querySpaceByID(spaceId string) (*SpaceModel, error) {
 	return &m, err
 }
 
-func (d *DB) updateSpace(spaceId string, name string, description string, logo string, presetGroupIds *string) error {
+func (d *DB) updateSpace(spaceId string, name string, description string, logo string, presetGroupIds *string, joinMode *int) error {
 	builder := d.session.Update("space").
 		Set("name", name).
 		Set("description", description).
@@ -60,6 +60,9 @@ func (d *DB) updateSpace(spaceId string, name string, description string, logo s
 		Set("updated_at", time.Now())
 	if presetGroupIds != nil {
 		builder = builder.Set("preset_group_ids", *presetGroupIds)
+	}
+	if joinMode != nil {
+		builder = builder.Set("join_mode", *joinMode)
 	}
 	_, err := builder.Where("space_id=?", spaceId).Exec()
 	return err
@@ -350,6 +353,9 @@ func (d *DB) insertMemberIgnore(m *MemberModel) error {
 // ErrSpaceFull indicates the space has reached its member capacity
 var ErrSpaceFull = errors.New("SPACE_FULL")
 
+// ErrAlreadyMember indicates the user is already an active member
+var ErrAlreadyMember = errors.New("already_member")
+
 // atomicAddMemberIfNotFull atomically checks capacity and adds a member.
 // Uses SELECT ... FOR UPDATE to prevent race conditions.
 // Returns ErrSpaceFull if the space has reached its member limit.
@@ -423,4 +429,92 @@ func (d *DB) atomicReactivateMemberIfNotFull(spaceId string, uid string, maxUser
 	}
 
 	return tx.Commit()
+}
+
+// ---------- Admin/Owner Query ----------
+
+// queryAdminsAndOwner 查询 Space 的管理员和拥有者（role >= 1）
+func (d *DB) queryAdminsAndOwner(spaceId string) ([]*MemberModel, error) {
+	var models []*MemberModel
+	_, err := d.session.Select("*").From("space_member").
+		Where("space_id=? AND status=1 AND role>=1", spaceId).
+		Load(&models)
+	return models, err
+}
+
+// ---------- Join Apply CRUD ----------
+
+func (d *DB) upsertJoinApply(m *spaceJoinApplyModel) error {
+	_, err := d.session.InsertBySql(
+		"INSERT INTO space_join_apply (space_id, uid, invite_code, remark, status, reviewer_uid) VALUES (?, ?, ?, ?, 0, '') "+
+			"ON DUPLICATE KEY UPDATE status=0, invite_code=VALUES(invite_code), remark=VALUES(remark), reviewer_uid='', updated_at=NOW()",
+		m.SpaceId, m.UID, m.InviteCode, m.Remark,
+	).Exec()
+	return err
+}
+
+func (d *DB) queryJoinApplyByID(id int64) (*spaceJoinApplyModel, error) {
+	var m spaceJoinApplyModel
+	_, err := d.session.Select("*").From("space_join_apply").
+		Where("id=?", id).Load(&m)
+	if m.Id == 0 {
+		return nil, nil
+	}
+	return &m, err
+}
+
+func (d *DB) queryPendingApplyBySpaceAndUID(spaceId, uid string) (*spaceJoinApplyModel, error) {
+	var m spaceJoinApplyModel
+	_, err := d.session.Select("*").From("space_join_apply").
+		Where("space_id=? AND uid=? AND status=0", spaceId, uid).Load(&m)
+	if m.Id == 0 {
+		return nil, nil
+	}
+	return &m, err
+}
+
+func (d *DB) queryPendingAppliesBySpace(spaceId string, limit, offset int) ([]*spaceJoinApplyDetailModel, error) {
+	var models []*spaceJoinApplyDetailModel
+	_, err := d.session.SelectBySql(`
+		SELECT a.*, IFNULL(u.name,'') as applicant_name
+		FROM space_join_apply a
+		LEFT JOIN user u ON u.uid=a.uid
+		WHERE a.space_id=? AND a.status=0
+		ORDER BY a.created_at DESC
+		LIMIT ? OFFSET ?
+	`, spaceId, limit, offset).Load(&models)
+	return models, err
+}
+
+func (d *DB) queryPendingApplyCountBySpace(spaceId string) (int64, error) {
+	var count int64
+	_, err := d.session.SelectBySql(
+		"SELECT COUNT(*) FROM space_join_apply WHERE space_id=? AND status=0", spaceId,
+	).Load(&count)
+	return count, err
+}
+
+func (d *DB) updateJoinApplyStatus(id int64, status int, reviewerUID string) (int64, error) {
+	result, err := d.session.Update("space_join_apply").
+		Set("status", status).
+		Set("reviewer_uid", reviewerUID).
+		Set("updated_at", time.Now()).
+		Where("id=? AND status=0", id).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// updateJoinApplyStatusRaw 无条件更新状态（用于回滚）
+func (d *DB) updateJoinApplyStatusRaw(id int64, status int, reviewerUID string) (int64, error) {
+	result, err := d.session.Update("space_join_apply").
+		Set("status", status).
+		Set("reviewer_uid", reviewerUID).
+		Set("updated_at", time.Now()).
+		Where("id=?", id).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

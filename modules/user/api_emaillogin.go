@@ -112,6 +112,11 @@ func (u *User) emailRegister(c *wkhttp.Context) {
 		return
 	}
 
+	if err := ValidateName(req.Name); err != nil {
+		c.ResponseError(err)
+		return
+	}
+
 	uid := util.GenerUUID()
 	model := &createUserModel{
 		UID:      uid,

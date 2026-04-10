@@ -159,6 +159,7 @@ func (u *User) giteeOAuth(c *wkhttp.Context) {
 		if strings.TrimSpace(name) == "" {
 			name = userInfo.Login
 		}
+		name = strings.ReplaceAll(name, "@", "_")
 		var model = &createUserModel{
 			UID:      uid,
 			Zone:     "",

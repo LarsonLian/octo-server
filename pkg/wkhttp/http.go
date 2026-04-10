@@ -258,7 +258,7 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			})
 			return
 		}
-		uidAndNames := strings.Split(uidAndName, "@")
+		uidAndNames := strings.SplitN(uidAndName, "@", 3)
 		if len(uidAndNames) < 2 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"msg": "token有误！",

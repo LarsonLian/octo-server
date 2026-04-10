@@ -664,9 +664,16 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 			return
 		}
 		//修改用户信息
-		if key == "name" && value != nil && value.(string) == "" { // 修改名字
-			c.ResponseError(errors.New("名字不能为空！"))
-			return
+		if key == "name" {
+			nameStr := fmt.Sprintf("%s", value)
+			if nameStr == "" {
+				c.ResponseError(errors.New("名字不能为空！"))
+				return
+			}
+			if err := ValidateName(nameStr); err != nil {
+				c.ResponseError(err)
+				return
+			}
 		}
 
 		err = u.db.UpdateUsersWithField(key, fmt.Sprintf("%s", value), loginUID)
@@ -2998,6 +3005,9 @@ func (r registerReq) CheckRegister() error {
 	if strings.TrimSpace(r.Name) == "" {
 		return errors.New("用户名不能为空！")
 	}
+	if err := ValidateName(r.Name); err != nil {
+		return err
+	}
 	if strings.TrimSpace(r.Zone) == "" {
 		return errors.New("区号不能为空！")
 	}
@@ -3133,4 +3143,14 @@ func newLoginUserDetailResp(m *Model, token string, ctx *config.Context) *loginU
 			MuteOfApp:         m.MuteOfApp,
 		},
 	}
+}
+
+// ValidateName checks that a display name does not contain the @ character,
+// which is used as delimiter in token cache entries (uid@name@role).
+// Allowing @ in names would enable privilege escalation via role injection.
+func ValidateName(name string) error {
+	if strings.Contains(name, "@") {
+		return errors.New("名字不能包含@字符！")
+	}
+	return nil
 }

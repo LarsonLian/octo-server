@@ -57,6 +57,10 @@ func (u *User) usernameRegister(c *wkhttp.Context) {
 		c.ResponseError(errors.New("该用户名已存在"))
 		return
 	}
+	if err := ValidateName(req.Name); err != nil {
+		c.ResponseError(err)
+		return
+	}
 	// 通过用户名注册
 	u.registerWithUsername(req.Username, req.Name, req.Password, int(req.Flag), req.Device, c)
 }

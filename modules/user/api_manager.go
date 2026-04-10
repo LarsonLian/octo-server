@@ -363,6 +363,10 @@ func (m *Manager) addAdminUser(c *wkhttp.Context) {
 		c.ResponseError(errors.New("用户名不能为空"))
 		return
 	}
+	if err := ValidateName(req.Name); err != nil {
+		c.ResponseError(err)
+		return
+	}
 	if req.Password == "" {
 		c.ResponseError(errors.New("密码不能为空"))
 		return
@@ -980,6 +984,9 @@ func (m *Manager) updatePwd(c *wkhttp.Context) {
 func (r managerAddUserReq) checkAddUserReq() error {
 	if strings.TrimSpace(r.Name) == "" {
 		return errors.New("用户名不能为空！")
+	}
+	if err := ValidateName(r.Name); err != nil {
+		return err
 	}
 	if strings.TrimSpace(r.Password) == "" {
 		return errors.New("密码不能为空！")

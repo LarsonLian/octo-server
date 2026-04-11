@@ -12,6 +12,8 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"go.uber.org/zap"
@@ -925,10 +927,35 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 		}
 	}
 
+	// 生成群头像事件（事务内）
+	var groupAvatarEventID int64
+	if s.ctx.Event != nil {
+		avatarMembers := realMemberUIDs
+		if len(avatarMembers) > 9 {
+			avatarMembers = avatarMembers[:9]
+		}
+		groupAvatarEventID, err = s.ctx.EventBegin(&wkevent.Data{
+			Event: event.GroupAvatarUpdate,
+			Type:  wkevent.CMD,
+			Data: &config.CMDGroupAvatarUpdateReq{
+				GroupNo: groupNo,
+				Members: avatarMembers,
+			},
+		}, tx)
+		if err != nil {
+			s.Error("begin group avatar update event failed", zap.Error(err))
+		}
+	}
+
 	// 提交事务
 	if err := tx.Commit(); err != nil {
 		s.Error("commit transaction failed", zap.Error(err))
 		return nil, errors.New("failed to commit transaction")
+	}
+
+	// 提交头像生成事件
+	if groupAvatarEventID != 0 {
+		s.ctx.EventCommit(groupAvatarEventID)
 	}
 
 	// 事务提交后设置 Bot 为 bot_admin

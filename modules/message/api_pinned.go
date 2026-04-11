@@ -156,14 +156,14 @@ func (m *Message) pinnedMessage(c *wkhttp.Context) {
 	isPinned := 0
 	isSendSystemMsg := false
 	if pinnedMessage == nil {
-		err = m.pinnedDB.insert(&pinnedMessageModel{
+		err = m.pinnedDB.insertTx(&pinnedMessageModel{
 			MessageId:   req.MessageID,
 			ChannelID:   fakeChannelID,
 			ChannelType: req.ChannelType,
 			IsDeleted:   0,
 			MessageSeq:  req.MessageSeq,
 			Version:     time.Now().UnixMilli(),
-		})
+		}, tx)
 		if err != nil {
 			tx.Rollback()
 			m.Error("新增置顶消息错误", zap.Error(err))
@@ -181,7 +181,7 @@ func (m *Message) pinnedMessage(c *wkhttp.Context) {
 			isPinned = 0
 		}
 		pinnedMessage.Version = time.Now().UnixMilli()
-		err = m.pinnedDB.update(pinnedMessage)
+		err = m.pinnedDB.updateTx(pinnedMessage, tx)
 		if err != nil {
 			tx.Rollback()
 			m.Error("取消置顶消息错误", zap.Error(err))

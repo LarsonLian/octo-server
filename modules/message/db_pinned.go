@@ -34,6 +34,11 @@ func (d *pinnedDB) insert(m *pinnedMessageModel) error {
 	return err
 }
 
+func (d *pinnedDB) insertTx(m *pinnedMessageModel, tx *dbr.Tx) error {
+	_, err := tx.InsertInto("pinned_message").Columns(util.AttrToUnderscore(m)...).Record(m).Exec()
+	return err
+}
+
 func (d *pinnedDB) update(m *pinnedMessageModel) error {
 	_, err := d.session.Update("pinned_message").SetMap(map[string]interface{}{
 		"is_deleted": m.IsDeleted,

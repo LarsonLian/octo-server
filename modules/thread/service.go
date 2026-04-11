@@ -224,23 +224,19 @@ func (s *Service) CreateThread(req *CreateThreadReq) (*ThreadResp, error) {
 	}
 
 	// 在父群发送子区创建消息
-	s.sendThreadCreatedMessage(req.GroupNo, shortID, req.Name, req.CreatorUID, req.CreatorName, req.SourceMessagePayload)
+	s.sendThreadCreatedMessage(req.GroupNo, shortID, req.Name, req.CreatorUID, req.CreatorName, req.SourceMessageID, req.SourceMessagePayload)
 
 	resp := s.toThreadRespWithID(thread)
 	resp.MemberCount = 1 // 创建者
 	return resp, nil
 }
 
-// sendThreadCreatedMessage 发送子区创建消息到父群
-func (s *Service) sendThreadCreatedMessage(groupNo, shortID, name, creatorUID, creatorName string, sourcePayload json.RawMessage) {
-	channelID := BuildChannelID(groupNo, shortID)
-
-	// 构建参与者列表（创建时只有创建者）
+// buildThreadCreatedPayload 构建子区创建通知消息的 payload
+func buildThreadCreatedPayload(shortID, name, channelID, creatorUID, creatorName string, sourceMessageID *int64, sourcePayload json.RawMessage) map[string]interface{} {
 	participants := []map[string]string{
 		{"uid": creatorUID, "name": creatorName},
 	}
 
-	// 构建消息 payload
 	payload := map[string]interface{}{
 		"type":         ContentTypeThreadCreated,
 		"content":      fmt.Sprintf("%s 创建了子区「%s」", creatorName, name),
@@ -253,7 +249,10 @@ func (s *Service) sendThreadCreatedMessage(groupNo, shortID, name, creatorUID, c
 		"participants": participants,
 	}
 
-	// 消息统计
+	if sourceMessageID != nil {
+		payload["source_message_id"] = *sourceMessageID
+	}
+
 	var messageCount int64
 	if len(sourcePayload) > 0 {
 		messageCount = 1
@@ -266,7 +265,14 @@ func (s *Service) sendThreadCreatedMessage(groupNo, shortID, name, creatorUID, c
 	}
 	payload["message_count"] = messageCount
 
-	// 发送可见的通知消息到父群
+	return payload
+}
+
+// sendThreadCreatedMessage 发送子区创建消息到父群
+func (s *Service) sendThreadCreatedMessage(groupNo, shortID, name, creatorUID, creatorName string, sourceMessageID *int64, sourcePayload json.RawMessage) {
+	channelID := BuildChannelID(groupNo, shortID)
+	payload := buildThreadCreatedPayload(shortID, name, channelID, creatorUID, creatorName, sourceMessageID, sourcePayload)
+
 	err := s.ctx.SendMessage(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			NoPersist: 0,

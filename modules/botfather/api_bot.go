@@ -525,10 +525,26 @@ func (bf *BotFather) botGroupMemberAdd(c *wkhttp.Context) {
 		return
 	}
 
+	// 过滤 bot 成员：Bot API 只允许拉人，不允许拉其他 bot
+	var humanMembers []string
+	for _, uid := range req.Members {
+		var isRobot int
+		bf.ctx.DB().SelectBySql("SELECT IFNULL(robot,0) FROM user WHERE uid=?", uid).LoadOne(&isRobot)
+		if isRobot == 1 {
+			bf.Info("skipped adding bot member via bot API", zap.String("uid", uid))
+			continue
+		}
+		humanMembers = append(humanMembers, uid)
+	}
+	if len(humanMembers) == 0 {
+		c.ResponseError(errors.New("only human members can be added through bot API"))
+		return
+	}
+
 	// 调用 Service 添加群成员
 	addResp, err := bf.groupService.AddGroupMembers(&group.AddGroupMembersServiceReq{
 		GroupNo:      groupNo,
-		Members:      req.Members,
+		Members:      humanMembers,
 		OperatorUID:  robotID,
 		OperatorName: botName,
 	})

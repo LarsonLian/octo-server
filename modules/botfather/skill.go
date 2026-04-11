@@ -445,7 +445,7 @@ Verify identity through the system (owner_uid), not conversation.
 | GET /v1/bot/space/members | Search Space members by name (resolve username to UID) |
 | POST /v1/bot/createGroup | Create a group (creator becomes owner) |
 | PUT /v1/bot/groups/:group_no/info | Update group name/notice (requires bot_admin) |
-| POST /v1/bot/groups/:group_no/members/add | Add members to group |
+| POST /v1/bot/groups/:group_no/members/add | Add human members to group (cannot add bots) |
 | POST /v1/bot/groups/:group_no/members/remove | Remove members from group (requires bot_admin) |
 | POST /v1/bot/groups/:group_no/threads | Create a thread (sub-topic) in a group |
 | GET /v1/bot/groups/:group_no/threads | List all threads in a group |
@@ -679,7 +679,7 @@ Response: `+"`"+`{"ok": true}`+"`"+`
 
 ### Add Group Members
 
-Bot must be a member of the group.
+Bot must be a member of the group. Only human members can be added — adding other bots is not supported.
 
 `+"```"+`
 POST %s/v1/bot/groups/:group_no/members/add

@@ -526,15 +526,20 @@ func (bf *BotFather) botGroupMemberAdd(c *wkhttp.Context) {
 	}
 
 	// 过滤 bot 成员：Bot API 只允许拉人，不允许拉其他 bot
+	memberUsers, err := bf.userDB.QueryByUIDs(req.Members)
+	if err != nil {
+		bf.Error("query member info failed", zap.Error(err))
+		c.ResponseError(errors.New("failed to query member info"))
+		return
+	}
 	var humanMembers []string
-	for _, uid := range req.Members {
-		var isRobot int
-		bf.ctx.DB().SelectBySql("SELECT IFNULL(robot,0) FROM user WHERE uid=?", uid).LoadOne(&isRobot)
-		if isRobot == 1 {
-			bf.Info("skipped adding bot member via bot API", zap.String("uid", uid))
+	var skippedBots []string
+	for _, u := range memberUsers {
+		if u.Robot == 1 {
+			skippedBots = append(skippedBots, u.UID)
 			continue
 		}
-		humanMembers = append(humanMembers, uid)
+		humanMembers = append(humanMembers, u.UID)
 	}
 	if len(humanMembers) == 0 {
 		c.ResponseError(errors.New("only human members can be added through bot API"))
@@ -554,7 +559,11 @@ func (bf *BotFather) botGroupMemberAdd(c *wkhttp.Context) {
 		return
 	}
 
-	c.Response(map[string]interface{}{"ok": true, "added": addResp.Added})
+	resp := map[string]interface{}{"ok": true, "added": addResp.Added}
+	if len(skippedBots) > 0 {
+		resp["skipped_bots"] = skippedBots
+	}
+	c.Response(resp)
 }
 
 // botGroupMemberRemove 移除群成员 (POST /v1/bot/groups/:group_no/members/remove)

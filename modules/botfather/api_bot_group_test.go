@@ -741,3 +741,59 @@ func TestBotGroupMemberAdd_RejectMemberOutsideGroupSpace(t *testing.T) {
 	// 应该失败：成员不在 Space 内
 	assert.NotEqual(t, http.StatusOK, w.Code)
 }
+
+// =====================================================================
+// Bot 不能拉 Bot 进群
+// =====================================================================
+
+// TestBotGroupMemberAdd_RejectPureBotMembers 纯 bot 成员应被拒绝
+func TestBotGroupMemberAdd_RejectPureBotMembers(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_a", "Alice")
+
+	// 创建另一个 bot
+	otherBotID := "other_bot_add_test"
+	insertTestBot(t, ctx, otherBotID, testutil.UID)
+	insertTestBotUser(t, ctx, otherBotID)
+
+	groupNo := createGroupViaAPI(t, handler, botToken, []string{"user_a"})
+
+	// 尝试拉 bot 进群，应被拒绝
+	w := doRequest(handler, botReq("POST", fmt.Sprintf("/v1/bot/groups/%s/members/add", groupNo), botToken, map[string]interface{}{
+		"members": []string{otherBotID},
+	}))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "only human members")
+}
+
+// TestBotGroupMemberAdd_MixedHumanAndBot 混合传入时 bot 被过滤，人正常添加
+func TestBotGroupMemberAdd_MixedHumanAndBot(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_a", "Alice")
+	insertTestUser(t, ctx, "user_b", "Bob")
+
+	otherBotID := "other_bot_mixed_test"
+	insertTestBot(t, ctx, otherBotID, testutil.UID)
+	insertTestBotUser(t, ctx, otherBotID)
+
+	groupNo := createGroupViaAPI(t, handler, botToken, []string{"user_a"})
+
+	// 混合传入 human + bot
+	w := doRequest(handler, botReq("POST", fmt.Sprintf("/v1/bot/groups/%s/members/add", groupNo), botToken, map[string]interface{}{
+		"members": []string{"user_b", otherBotID},
+	}))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	result := jsonResult(t, w)
+	assert.Equal(t, float64(1), result["added"])
+	// bot 应出现在 skipped_bots 中
+	skipped := result["skipped_bots"]
+	assert.NotNil(t, skipped)
+}

@@ -559,6 +559,32 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 		return
 	}
 
+	// 校验 category_id
+	if req.CategoryID != "" {
+		if req.SpaceID == "" {
+			c.ResponseError(errors.New("使用群聊分组需要指定 space_id"))
+			return
+		}
+		cat, err := g.db.QueryCategoryByID(req.CategoryID)
+		if err != nil {
+			g.Error("查询群聊分组失败", zap.Error(err))
+			c.ResponseError(errors.New("查询群聊分组失败"))
+			return
+		}
+		if cat == nil || cat.Status != 1 {
+			c.ResponseError(errors.New("群聊分组不存在"))
+			return
+		}
+		if cat.UID != creator {
+			c.ResponseError(errors.New("无权限使用此分组"))
+			return
+		}
+		if cat.SpaceID != req.SpaceID {
+			c.ResponseError(errors.New("群聊分组和空间不匹配"))
+			return
+		}
+	}
+
 	count, err := g.db.querySameDayCreateCountWitUID(creator, util.Toyyyy_MM_dd(time.Now()))
 	if err != nil {
 		g.Error("查询用户当天建群数量失败！", zap.Error(err))
@@ -629,10 +655,11 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 
 	// 调用 Service 创建群
 	createResp, err := g.groupService.CreateGroup(&CreateGroupServiceReq{
-		Creator: creator,
-		Members: realUids,
-		Name:    req.Name,
-		SpaceID: req.SpaceID,
+		Creator:    creator,
+		Members:    realUids,
+		Name:       req.Name,
+		SpaceID:    req.SpaceID,
+		CategoryID: req.CategoryID,
 	})
 	if err != nil {
 		g.Error("创建群失败！", zap.Error(err))
@@ -3242,9 +3269,10 @@ func (r memberDetailResp) from(model *MemberDetailModel) memberDetailResp {
 }
 
 type groupReq struct {
-	Name    string   `json:"name"`     // 群名
-	Members []string `json:"members"`  // 成员uid
-	SpaceID string   `json:"space_id"` // Space ID（可选）
+	Name       string   `json:"name"`        // 群名
+	Members    []string `json:"members"`     // 成员uid
+	SpaceID    string   `json:"space_id"`    // Space ID（可选）
+	CategoryID string   `json:"category_id"` // 群聊分组 ID（可选，需配合 space_id 使用）
 }
 
 func (g groupReq) Check() error {

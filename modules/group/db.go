@@ -670,3 +670,17 @@ func (d *DB) QueryBotMemberUIDs(groupNo string) ([]string, error) {
 	_, err := d.session.Select("uid").From("group_member").Where("group_no=? and is_deleted=0 and robot=1", groupNo).Load(&uids)
 	return uids, err
 }
+
+type CategoryRow struct {
+	CategoryID string `db:"category_id"`
+	UID        string `db:"uid"`
+	SpaceID    string `db:"space_id"`
+	Status     int    `db:"status"`
+}
+
+func (d *DB) QueryCategoryByID(categoryID string) (*CategoryRow, error) {
+	var row *CategoryRow
+	_, err := d.session.Select("category_id", "uid", "space_id", "status").
+		From("group_category").Where("category_id=?", categoryID).Load(&row)
+	return row, err
+}

@@ -681,11 +681,12 @@ func GetGroupMdMaxSize() int {
 
 // CreateGroupServiceReq 创建群请求
 type CreateGroupServiceReq struct {
-	Creator string   // 创建者 UID
-	Members []string // 成员 UID 列表（不含创建者，Service 内部会自动加入）
-	Name    string   // 群名称（可为空，Service 会自动生成）
-	SpaceID string   // Space ID（可为空）
-	BotUID  string   // Bot UID（可为空；非空时自动加入群并设为 bot_admin）
+	Creator    string   // 创建者 UID
+	Members    []string // 成员 UID 列表（不含创建者，Service 内部会自动加入）
+	Name       string   // 群名称（可为空，Service 会自动生成）
+	SpaceID    string   // Space ID（可为空）
+	BotUID     string   // Bot UID（可为空；非空时自动加入群并设为 bot_admin）
+	CategoryID string   // 群聊分组 ID（可为空；非空时自动设置创建者的 group_setting）
 }
 
 // CreateGroupServiceResp 创建群响应
@@ -958,6 +959,33 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 		botAdminVersion, _ := s.ctx.GenSeq(common.GroupMemberSeqKey)
 		if err := s.db.UpdateBotAdmin(groupNo, req.BotUID, 1, botAdminVersion); err != nil {
 			s.Error("set bot_admin failed", zap.Error(err))
+		}
+	}
+
+	// 设置创建者的群聊分组（best-effort：失败不阻断建群，与 BotUID 设置同策略）
+	if req.CategoryID != "" {
+		setting, err := s.settingDB.QuerySetting(groupNo, req.Creator)
+		if err != nil {
+			s.Error("query group setting for category failed", zap.Error(err))
+		} else if setting == nil {
+			settingVersion, _ := s.ctx.GenSeq(common.GroupSettingSeqKey)
+			_, err = s.ctx.DB().InsertBySql(
+				"INSERT INTO group_setting (group_no, uid, category_id, category_sort, revoke_remind, screenshot, receipt, version) VALUES (?, ?, ?, 0, 1, 1, 1, ?)",
+				groupNo, req.Creator, req.CategoryID, settingVersion,
+			).Exec()
+			if err != nil {
+				s.Error("insert group setting with category failed", zap.Error(err))
+			}
+		} else {
+			settingVersion, _ := s.ctx.GenSeq(common.GroupSettingSeqKey)
+			_, err = s.ctx.DB().Update("group_setting").
+				Set("category_id", req.CategoryID).
+				Set("category_sort", 0).
+				Set("version", settingVersion).
+				Where("id=?", setting.Id).Exec()
+			if err != nil {
+				s.Error("update group setting category failed", zap.Error(err))
+			}
 		}
 	}
 

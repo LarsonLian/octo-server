@@ -44,6 +44,11 @@ func New(ctx *config.Context, cfg *VoiceConfig) *Voice {
 
 // Route registers voice API routes
 func (v *Voice) Route(r *wkhttp.WKHttp) {
+	// Load configurable prompts (only when VOICE_PROMPT_FILE is set)
+	if v.cfg.PromptFile != "" {
+		LoadPrompts(v.cfg.PromptFile, v.Log)
+	}
+
 	auth := r.Group("/v1/voice", v.ctx.AuthMiddleware(r))
 	{
 		auth.POST("/transcribe", v.transcribe)

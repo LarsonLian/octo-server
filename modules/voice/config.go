@@ -53,6 +53,8 @@ type VoiceConfig struct {
 	QwenUrl     string   // Qwen-specific API URL (optional, falls back to LiteLLMUrl)
 	QwenKey     string   // Qwen-specific API key (optional, falls back to LiteLLMKey)
 	QwenTimeout int      // Qwen per-model timeout (optional, falls back to Timeout)
+
+	PromptFile string // Path to voice_prompts.yaml (env: VOICE_PROMPT_FILE)
 }
 
 // NewVoiceConfigFromEnv reads voice config from environment variables
@@ -164,6 +166,10 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 
 	if v := os.Getenv("VOICE_LANGUAGE"); v != "" {
 		cfg.Language = v
+	}
+
+	if v := os.Getenv("VOICE_PROMPT_FILE"); v != "" {
+		cfg.PromptFile = v
 	}
 
 	// EditMode: explicit setting takes priority, otherwise auto-decide by engine

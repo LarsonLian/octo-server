@@ -219,7 +219,7 @@ func TestTranscribe_WithContextText(t *testing.T) {
 
 		// In edit mode, prompt uses modifyPromptTemplate
 		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "已有以下文本")
+		assert.Contains(t, prompt, "# 已有文本")
 		assert.Contains(t, prompt, "existing text here")
 
 		resp := chatCompletionResponse{
@@ -247,7 +247,7 @@ func TestTranscribe_WithChatContext(t *testing.T) {
 		prompt := req.Messages[0].Content[0].Text
 		assert.Contains(t, prompt, "词汇参考表")
 		assert.Contains(t, prompt, "Alice: 周五开会")
-		assert.Contains(t, prompt, "准确还原说话内容")
+		assert.Contains(t, prompt, "将音频中的人类语音转为文字")
 
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "transcribed with context"}}},
@@ -274,7 +274,7 @@ func TestTranscribe_WithChatContextAndContextText(t *testing.T) {
 		prompt := req.Messages[0].Content[0].Text
 		assert.Contains(t, prompt, "词汇参考表")
 		assert.Contains(t, prompt, "chat history here")
-		assert.Contains(t, prompt, "已有以下文本")
+		assert.Contains(t, prompt, "# 已有文本")
 		assert.Contains(t, prompt, "existing draft")
 
 		resp := chatCompletionResponse{
@@ -779,7 +779,7 @@ func TestTranscribeAppend_Gemini_NoContext(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&req)
 
 		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "准确还原说话内容")
+		assert.Contains(t, prompt, "将音频中的人类语音转为文字")
 		assert.NotContains(t, prompt, "辅助理解语境")
 
 		resp := chatCompletionResponse{
@@ -930,7 +930,7 @@ func TestTranscribeEdit_NoContext(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&req)
 
 		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "准确还原说话内容")
+		assert.Contains(t, prompt, "将音频中的人类语音转为文字")
 
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "transcribed"}}},

@@ -145,7 +145,7 @@ func TestTranscribeAPI_WithContextText(t *testing.T) {
 
 		// In edit mode, prompt uses modifyPromptTemplate
 		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "已有以下文本")
+		assert.Contains(t, prompt, "# 已有文本")
 		assert.Contains(t, prompt, "my existing content")
 
 		resp := chatCompletionResponse{

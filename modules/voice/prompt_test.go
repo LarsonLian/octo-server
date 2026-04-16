@@ -10,15 +10,15 @@ import (
 func TestBuildPrompt_NoContext(t *testing.T) {
 	prompt := buildPrompt("", "")
 	assert.Equal(t, transcribePrompt, prompt)
-	assert.Contains(t, prompt, "准确还原说话内容")
-	assert.NotContains(t, prompt, "已有以下文本")
+	assert.Contains(t, prompt, "将音频中的人类语音转为文字")
+	assert.NotContains(t, prompt, "# 已有文本")
 }
 
 func TestBuildPrompt_WithContext(t *testing.T) {
 	contextText := "Hello, this is existing text."
 	prompt := buildPrompt(contextText, "")
 
-	assert.Contains(t, prompt, "已有以下文本")
+	assert.Contains(t, prompt, "# 已有文本")
 	assert.Contains(t, prompt, contextText)
 	assert.Contains(t, prompt, "编辑指令")
 	assert.NotEqual(t, transcribePrompt, prompt)
@@ -40,8 +40,8 @@ func TestBuildPrompt_WithChatContext_TranscribeMode(t *testing.T) {
 
 	assert.Contains(t, prompt, "词汇参考表")
 	assert.Contains(t, prompt, chatCtx)
-	assert.Contains(t, prompt, "准确还原说话内容")
-	assert.NotContains(t, prompt, "已有以下文本")
+	assert.Contains(t, prompt, "将音频中的人类语音转为文字")
+	assert.NotContains(t, prompt, "# 已有文本")
 }
 
 func TestBuildPrompt_WithChatContext_ModifyMode(t *testing.T) {
@@ -51,13 +51,13 @@ func TestBuildPrompt_WithChatContext_ModifyMode(t *testing.T) {
 
 	assert.Contains(t, prompt, "词汇参考表")
 	assert.Contains(t, prompt, chatCtx)
-	assert.Contains(t, prompt, "已有以下文本")
+	assert.Contains(t, prompt, "# 已有文本")
 	assert.Contains(t, prompt, contextText)
 	assert.Contains(t, prompt, "编辑指令")
 
 	// Chat context should appear AFTER the main prompt
 	chatCtxIdx := strings.Index(prompt, chatCtx)
-	mainPromptIdx := strings.Index(prompt, "已有以下文本")
+	mainPromptIdx := strings.Index(prompt, "# 已有文本")
 	assert.True(t, chatCtxIdx > mainPromptIdx, "chat context should follow the main prompt")
 }
 
@@ -78,15 +78,15 @@ func TestBuildAppendPrompt_WithContextText(t *testing.T) {
 	prompt := buildAppendPrompt("已有的文本内容", "")
 	assert.Contains(t, prompt, "已有的文本内容")
 	assert.Contains(t, prompt, "辅助理解语境和专有名词纠错")
-	assert.Contains(t, prompt, "准确还原说话内容") // transcribePrompt is appended
-	assert.NotContains(t, prompt, "编辑指令")       // no edit instructions
+	assert.Contains(t, prompt, "将音频中的人类语音转为文字") // transcribePrompt is appended
+	assert.NotContains(t, prompt, "编辑指令")               // no edit instructions
 }
 
 func TestBuildAppendPrompt_WithChatContext(t *testing.T) {
 	prompt := buildAppendPrompt("", "Alice: 聊天内容")
 	assert.Contains(t, prompt, "词汇参考表")
 	assert.Contains(t, prompt, "Alice: 聊天内容")
-	assert.Contains(t, prompt, "准确还原说话内容")
+	assert.Contains(t, prompt, "将音频中的人类语音转为文字")
 }
 
 func TestBuildAppendPrompt_WithBothContexts(t *testing.T) {
@@ -117,7 +117,7 @@ func TestBuildPrompt_ChatContextPosition(t *testing.T) {
 	prompt := buildPrompt("", chatCtx)
 
 	// chatContext must appear AFTER transcribePrompt
-	transcribeIdx := strings.Index(prompt, "你是一个严格的语音转写器")
+	transcribeIdx := strings.Index(prompt, "你是语音转写器")
 	chatCtxIdx := strings.Index(prompt, chatCtx)
 	assert.True(t, chatCtxIdx > transcribeIdx, "chatContext should appear after transcribePrompt")
 }
@@ -127,7 +127,7 @@ func TestBuildAppendPrompt_ChatContextPosition(t *testing.T) {
 	prompt := buildAppendPrompt("", chatCtx)
 
 	// chatContext must appear AFTER transcribePrompt
-	transcribeIdx := strings.Index(prompt, "你是一个严格的语音转写器")
+	transcribeIdx := strings.Index(prompt, "你是语音转写器")
 	chatCtxIdx := strings.Index(prompt, chatCtx)
 	assert.True(t, chatCtxIdx > transcribeIdx, "chatContext should appear after transcribePrompt in append mode")
 }
@@ -137,8 +137,8 @@ func TestBuildAppendPrompt_ChatContextAfterTranscribePrompt(t *testing.T) {
 	chatCtx := "Alice: 专有名词XYZ"
 	prompt := buildAppendPrompt(contextText, chatCtx)
 
-	// The appendContextPromptTemplate embeds transcribePrompt which starts with "你是一个严格的语音转写器"
-	transcribeIdx := strings.Index(prompt, "你是一个严格的语音转写器")
+	// The appendContextPromptTemplate embeds transcribePrompt which starts with "你是语音转写器"
+	transcribeIdx := strings.Index(prompt, "你是语音转写器")
 	assert.True(t, transcribeIdx >= 0, "prompt should contain the transcribe portion")
 
 	chatCtxIdx := strings.Index(prompt, chatCtx)
@@ -155,7 +155,7 @@ func TestBuildPrompt_NoChatContext(t *testing.T) {
 
 	assert.NotContains(t, prompt, "词汇参考表")
 	assert.NotContains(t, prompt, "⚠️")
-	assert.Contains(t, prompt, "已有以下文本")
+	assert.Contains(t, prompt, "# 已有文本")
 }
 
 func TestBuildPrompt_WithContextText_AndChatContext(t *testing.T) {
@@ -166,7 +166,7 @@ func TestBuildPrompt_WithContextText_AndChatContext(t *testing.T) {
 	// Both contextText and chatContext present
 	assert.Contains(t, prompt, contextText)
 	assert.Contains(t, prompt, chatCtx)
-	assert.Contains(t, prompt, "已有以下文本")
+	assert.Contains(t, prompt, "# 已有文本")
 	assert.Contains(t, prompt, "词汇参考表")
 
 	// chatContext must be at the end, after everything else

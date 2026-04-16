@@ -962,6 +962,67 @@ func TestCategory_ListNoGroupsNoDefault(t *testing.T) {
 	assert.Nil(t, defaultCat)
 }
 
+func TestCategory_MoveGroupToDefaultCategory(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-movedefault-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	route := s.GetRoute()
+
+	seedGroup(t, f, "group-md-001", spaceID)
+	seedGroup(t, f, "group-md-002", spaceID)
+
+	// list to trigger default category creation
+	wl := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+	cats := parseJSONArray(t, wl)
+	assert.Equal(t, 1, len(cats))
+	defaultCatID := cats[0]["category_id"].(string)
+
+	// --- Phase 1: move one group into default, one stays uncategorized ---
+	wm := doRequest(t, route, "PUT", "/v1/groups/group-md-001/category", map[string]string{
+		"category_id": defaultCatID,
+	})
+	assert.Equal(t, http.StatusOK, wm.Code)
+
+	wl2 := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl2.Code)
+	cats2 := parseJSONArray(t, wl2)
+	assert.Equal(t, 1, len(cats2))
+
+	groups2 := cats2[0]["groups"].([]interface{})
+	assert.Equal(t, 2, len(groups2), "phase 1: default category should merge explicit + uncategorized")
+
+	// --- Phase 2: move all groups into default ---
+	wm2 := doRequest(t, route, "PUT", "/v1/groups/group-md-002/category", map[string]string{
+		"category_id": defaultCatID,
+	})
+	assert.Equal(t, http.StatusOK, wm2.Code)
+
+	wl3 := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl3.Code)
+	cats3 := parseJSONArray(t, wl3)
+	assert.Equal(t, 1, len(cats3))
+
+	groups3 := cats3[0]["groups"].([]interface{})
+	assert.Equal(t, 2, len(groups3), "phase 2: all groups explicitly in default should still appear")
+
+	// --- Phase 3: create a new group without category after all moved ---
+	seedGroup(t, f, "group-md-003", spaceID)
+
+	wl4 := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl4.Code)
+	cats4 := parseJSONArray(t, wl4)
+	assert.Equal(t, 1, len(cats4))
+
+	groups4 := cats4[0]["groups"].([]interface{})
+	assert.Equal(t, 3, len(groups4), "phase 3: new uncategorized group should also appear alongside explicit ones")
+}
+
 // ---------- Edge Cases ----------
 
 func TestCategory_SortCountMismatch(t *testing.T) {

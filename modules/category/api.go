@@ -208,12 +208,16 @@ func (c *Category) list(ctx *wkhttp.Context) {
 			if uncategorized == nil {
 				uncategorized = make([]groupInCategoryResp, 0)
 			}
+			explicit := categoryGroupMap[cat.CategoryID]
+			merged := make([]groupInCategoryResp, 0, len(uncategorized)+len(explicit))
+			merged = append(merged, uncategorized...)
+			merged = append(merged, explicit...)
 			result = append(result, categoryResp{
 				CategoryID: &catID,
 				Name:       cat.Name,
 				Sort:       cat.Sort,
 				IsDefault:  true,
-				Groups:     uncategorized,
+				Groups:     merged,
 			})
 		} else {
 			catGroups := categoryGroupMap[cat.CategoryID]

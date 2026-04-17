@@ -138,10 +138,13 @@ type UpdateBotReq struct {
 
 // UserBotResp 用户Bot列表项
 type UserBotResp struct {
-	RobotID     string `json:"robot_id"`
-	Username    string `json:"username"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	BotToken    string `json:"bot_token"`
-	CreatedAt   string `json:"created_at"`
+	RobotID       string `json:"robot_id"`
+	Username      string `json:"username"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	BotToken      string `json:"bot_token"`
+	CreatedAt     string `json:"created_at"`
+	AgentPlatform string `json:"agent_platform,omitempty"`
+	AgentVersion  string `json:"agent_version,omitempty"`
+	PluginVersion string `json:"plugin_version,omitempty"`
 }

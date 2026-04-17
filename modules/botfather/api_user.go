@@ -323,11 +323,14 @@ func (bf *BotFather) listUserBots(c *wkhttp.Context) {
 			name = userResp.Name
 		}
 		list = append(list, &UserBotResp{
-			RobotID:     bot.RobotID,
-			Username:    bot.Username,
-			Name:        name,
-			Description: bot.Description,
-			BotToken:    bot.BotToken,
+			RobotID:       bot.RobotID,
+			Username:      bot.Username,
+			Name:          name,
+			Description:   bot.Description,
+			BotToken:      bot.BotToken,
+			AgentPlatform: bot.AgentPlatform,
+			AgentVersion:  bot.AgentVersion,
+			PluginVersion: bot.PluginVersion,
 		})
 	}
 	c.Response(list)

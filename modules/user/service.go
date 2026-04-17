@@ -234,13 +234,16 @@ func (s *Service) GetUserDetail(uid string, loginUID string) (*UserDetailResp, e
 	// 为机器人用户填充bot_commands + 详情
 	if model.Robot == 1 {
 		var botDetails []struct {
-			BotCommands string `db:"bot_commands"`
-			Description string `db:"description"`
-			CreatorUID  string `db:"creator_uid"`
-			AutoApprove int    `db:"auto_approve"`
+			BotCommands   string `db:"bot_commands"`
+			Description   string `db:"description"`
+			CreatorUID    string `db:"creator_uid"`
+			AutoApprove   int    `db:"auto_approve"`
+			AgentPlatform string `db:"agent_platform"`
+			AgentVersion  string `db:"agent_version"`
+			PluginVersion string `db:"plugin_version"`
 		}
 		_, err = s.ctx.DB().SelectBySql(
-			"SELECT IFNULL(bot_commands,'') as bot_commands, IFNULL(description,'') as description, IFNULL(creator_uid,'') as creator_uid, IFNULL(auto_approve,0) as auto_approve FROM robot WHERE robot_id = ? AND status=1", uid,
+			"SELECT IFNULL(bot_commands,'') as bot_commands, IFNULL(description,'') as description, IFNULL(creator_uid,'') as creator_uid, IFNULL(auto_approve,0) as auto_approve, IFNULL(agent_platform,'') as agent_platform, IFNULL(agent_version,'') as agent_version, IFNULL(plugin_version,'') as plugin_version FROM robot WHERE robot_id = ? AND status=1", uid,
 		).Load(&botDetails)
 		if err != nil {
 			s.Error("查询机器人详情失败", zap.Error(err))
@@ -251,6 +254,9 @@ func (s *Service) GetUserDetail(uid string, loginUID string) (*UserDetailResp, e
 			resp.BotDescription = botDetails[0].Description
 			resp.BotCreatorUID = botDetails[0].CreatorUID
 			resp.BotAutoApprove = botDetails[0].AutoApprove
+			resp.BotAgentPlatform = botDetails[0].AgentPlatform
+			resp.BotAgentVersion = botDetails[0].AgentVersion
+			resp.BotPluginVersion = botDetails[0].PluginVersion
 			// Bot 创建者可上传 Bot 头像，对其展示上传入口
 			if botDetails[0].CreatorUID == loginUID {
 				resp.IsUploadAvatar = 1
@@ -418,36 +424,48 @@ func (s *Service) GetUserDetails(uids []string, loginUID string) ([]*UserDetailR
 	}
 	if len(robotUIDs) > 0 {
 		var botDetails []struct {
-			RobotID     string `db:"robot_id"`
-			BotCommands string `db:"bot_commands"`
-			Description string `db:"description"`
-			CreatorUID  string `db:"creator_uid"`
-			AutoApprove int    `db:"auto_approve"`
+			RobotID       string `db:"robot_id"`
+			BotCommands   string `db:"bot_commands"`
+			Description   string `db:"description"`
+			CreatorUID    string `db:"creator_uid"`
+			AutoApprove   int    `db:"auto_approve"`
+			AgentPlatform string `db:"agent_platform"`
+			AgentVersion  string `db:"agent_version"`
+			PluginVersion string `db:"plugin_version"`
 		}
 		_, err = s.ctx.DB().SelectBySql(
-			"SELECT robot_id, IFNULL(bot_commands,'') as bot_commands, IFNULL(description,'') as description, IFNULL(creator_uid,'') as creator_uid, IFNULL(auto_approve,0) as auto_approve FROM robot WHERE robot_id in ? AND status=1",
+			"SELECT robot_id, IFNULL(bot_commands,'') as bot_commands, IFNULL(description,'') as description, IFNULL(creator_uid,'') as creator_uid, IFNULL(auto_approve,0) as auto_approve, IFNULL(agent_platform,'') as agent_platform, IFNULL(agent_version,'') as agent_version, IFNULL(plugin_version,'') as plugin_version FROM robot WHERE robot_id in ? AND status=1",
 			robotUIDs,
 		).Load(&botDetails)
 		if err != nil {
 			s.Error("查询机器人详情失败", zap.Error(err))
 		} else {
 			botMap := make(map[string]*struct {
-				BotCommands string
-				Description string
-				CreatorUID  string
-				AutoApprove int
+				BotCommands   string
+				Description   string
+				CreatorUID    string
+				AutoApprove   int
+				AgentPlatform string
+				AgentVersion  string
+				PluginVersion string
 			}, len(botDetails))
 			for i := range botDetails {
 				botMap[botDetails[i].RobotID] = &struct {
-					BotCommands string
-					Description string
-					CreatorUID  string
-					AutoApprove int
+					BotCommands   string
+					Description   string
+					CreatorUID    string
+					AutoApprove   int
+					AgentPlatform string
+					AgentVersion  string
+					PluginVersion string
 				}{
-					BotCommands: botDetails[i].BotCommands,
-					Description: botDetails[i].Description,
-					CreatorUID:  botDetails[i].CreatorUID,
-					AutoApprove: botDetails[i].AutoApprove,
+					BotCommands:   botDetails[i].BotCommands,
+					Description:   botDetails[i].Description,
+					CreatorUID:    botDetails[i].CreatorUID,
+					AutoApprove:   botDetails[i].AutoApprove,
+					AgentPlatform: botDetails[i].AgentPlatform,
+					AgentVersion:  botDetails[i].AgentVersion,
+					PluginVersion: botDetails[i].PluginVersion,
 				}
 			}
 			// 批量查创建者昵称
@@ -478,6 +496,9 @@ func (s *Service) GetUserDetails(uids []string, loginUID string) ([]*UserDetailR
 						resp.BotCreatorUID = d.CreatorUID
 						resp.BotCreatorName = creatorNameMap[d.CreatorUID]
 						resp.BotAutoApprove = d.AutoApprove
+						resp.BotAgentPlatform = d.AgentPlatform
+						resp.BotAgentVersion = d.AgentVersion
+						resp.BotPluginVersion = d.PluginVersion
 						// Bot 创建者可上传 Bot 头像，对其展示上传入口
 						if d.CreatorUID == loginUID {
 							resp.IsUploadAvatar = 1
@@ -1033,6 +1054,9 @@ type UserDetailResp struct {
 	BotCreatorUID       string            `json:"bot_creator_uid,omitempty"` // Bot 创建者 UID
 	BotCreatorName      string            `json:"bot_creator_name,omitempty"` // Bot 创建者昵称
 	BotAutoApprove      int               `json:"bot_auto_approve,omitempty"` // 是否自动通过好友 0:否 1:是
+	BotAgentPlatform    string            `json:"bot_agent_platform,omitempty"` // Agent 平台名称
+	BotAgentVersion     string            `json:"bot_agent_version,omitempty"`  // Agent 平台版本号
+	BotPluginVersion    string            `json:"bot_plugin_version,omitempty"` // DMWork 插件版本号
 	IsDestroy           int               `json:"is_destroy"`             // 是否注销0.否1.是
 	Flame               int               `json:"flame"`                  // 是否开启阅后即焚
 	FlameSecond         int               `json:"flame_second"`           // 阅后即焚秒数

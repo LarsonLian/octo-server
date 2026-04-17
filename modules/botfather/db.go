@@ -32,8 +32,11 @@ type robotModel struct {
 	BotToken     string
 	IMTokenCache string
 	BotCommands  string
-	AutoApprove  int // 0=需要审批 1=自动通过
-	AccessMode   int // 0=需要审批 1=自动通过 2=禁止申请
+	AutoApprove   int    // 0=需要审批 1=自动通过
+	AccessMode    int    // 0=需要审批 1=自动通过 2=禁止申请
+	AgentPlatform string // AI Agent 平台名称（如 OpenClaw）
+	AgentVersion  string // Agent 平台版本号
+	PluginVersion string // DMWork 插件版本号
 	db.BaseModel
 }
 
@@ -105,6 +108,16 @@ func (d *botfatherDB) updateRobotBotToken(robotID string, newToken string) error
 func (d *botfatherDB) updateRobotDescription(robotID string, description string) error {
 	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
 		"description": description,
+	}).Where("robot_id=?", robotID).Exec()
+	return err
+}
+
+// updateRobotAgentInfo 更新机器人的 Agent 运行时信息
+func (d *botfatherDB) updateRobotAgentInfo(robotID, agentPlatform, agentVersion, pluginVersion string) error {
+	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
+		"agent_platform": agentPlatform,
+		"agent_version":  agentVersion,
+		"plugin_version": pluginVersion,
 	}).Where("robot_id=?", robotID).Exec()
 	return err
 }

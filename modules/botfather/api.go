@@ -605,6 +605,19 @@ func (bf *BotFather) register(c *wkhttp.Context) {
 		bf.db.updateRobotIMTokenCache(robot.RobotID, imToken)
 	}
 
+	// 可选解析版本信息（兼容旧客户端空 body）
+	var req BotRegisterReq
+	_ = c.ShouldBindJSON(&req) // 忽略解析错误
+	if req.AgentPlatform != "" || req.AgentVersion != "" || req.PluginVersion != "" {
+		if robot.AgentPlatform != req.AgentPlatform ||
+			robot.AgentVersion != req.AgentVersion ||
+			robot.PluginVersion != req.PluginVersion {
+			if updateErr := bf.db.updateRobotAgentInfo(robot.RobotID, req.AgentPlatform, req.AgentVersion, req.PluginVersion); updateErr != nil {
+				bf.Warn("更新Agent信息失败", zap.Error(updateErr), zap.String("robotID", robot.RobotID))
+			}
+		}
+	}
+
 	cfg := bf.ctx.GetConfig()
 	apiURL := cfg.External.BaseURL
 	if strings.TrimSpace(apiURL) == "" {

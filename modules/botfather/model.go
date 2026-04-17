@@ -10,6 +10,13 @@ type BotRegisterResp struct {
 	OwnerChannelID string `json:"owner_channel_id"`
 }
 
+// BotRegisterReq Bot自注册请求（可选字段，兼容旧客户端空 body）
+type BotRegisterReq struct {
+	AgentPlatform string `json:"agent_platform"` // AI Agent 平台名称
+	AgentVersion  string `json:"agent_version"`  // Agent 平台版本号
+	PluginVersion string `json:"plugin_version"` // DMWork 插件版本号
+}
+
 // BotSendMessageReq Bot发送消息请求
 type BotSendMessageReq struct {
 	ChannelID   string                 `json:"channel_id"`

@@ -488,23 +488,7 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 	}
 
 	apiKeyFormatted := "`" + apiKey + "`"
-	h.reply(fromUID, fmt.Sprintf(`🚀 **Quickstart**
-
-📋 把下面内容发给你当前正在聊天的 OpenClaw 模型：
-
----
-
-[DMWORK QUICKSTART]
-
-User API Key: %s
-API Server: %s
-
-按 %s/v1/bot/setup-quickstart.md 操作
-
----
-
-💡 User API Key 可反复使用，用于管理你的所有 Bot%s
-🔑 你的 API Key: %s`,
+	h.reply(fromUID, fmt.Sprintf("🚀 **Quickstart**\n\n📋 把下面内容发给你当前正在聊天的 OpenClaw 模型：\n\n---\n\n[DMWORK QUICKSTART]\n\nUser API Key: %s  \nAPI Server: %s\n\n按 %s/v1/bot/setup-quickstart.md 操作\n\n---\n\n💡 User API Key 可反复使用，用于管理你的所有 Bot%s  \n🔑 你的 API Key: %s",
 		apiKey, apiURL,
 		apiURL,
 		spaceInfo, apiKeyFormatted))
@@ -1103,26 +1087,7 @@ func (h *commandHandler) sendCreatedPrompt(toUID string, name string, bot *robot
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	msg := fmt.Sprintf(`✅ 机器人「**%s**」创建成功！
-
-**Bot Name:** %s
-**Bot Token:** %s
-**API Server:** %s
-
-📋 把下面内容发给你当前正在聊天的 OpenClaw 模型：
-
----
-
-[DMWORK NEWBOT SETUP]
-
-Bot Name: %s
-Bot Token: %s
-API Server: %s
-Account ID: %s
-
-按 %s/v1/bot/setup-newbot.md 操作
-
----`,
+	msg := fmt.Sprintf("✅ 机器人「**%s**」创建成功！\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n📋 把下面内容发给你当前正在聊天的 OpenClaw 模型：\n\n---\n\n[DMWORK NEWBOT SETUP]\n\nBot Name: %s  \nBot Token: %s  \nAPI Server: %s  \nAccount ID: %s\n\n按 %s/v1/bot/setup-newbot.md 操作\n\n---",
 		name, name, bot.BotToken, apiURL,
 		name, bot.BotToken, apiURL, bot.RobotID,
 		apiURL)

@@ -22,8 +22,3 @@ func defaultCategoryName() string {
 	})
 	return _defaultCategoryName
 }
-
-func resetDefaultCategoryName() {
-	_defaultCategoryNameOnce = sync.Once{}
-	_defaultCategoryName = ""
-}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -15,6 +16,11 @@ import (
 )
 
 // ---------- helpers ----------
+
+func resetDefaultCategoryName() {
+	_defaultCategoryNameOnce = sync.Once{}
+	_defaultCategoryName = ""
+}
 
 // seedSpaceAndMember inserts a space and makes testutil.UID a member with given role.
 func seedSpaceAndMember(t *testing.T, f *Category, spaceID string, role int) {
@@ -907,7 +913,7 @@ func TestCategory_SortWithDefault(t *testing.T) {
 	cats2 := parseJSONArray(t, wl2)
 
 	assert.Equal(t, 3, len(cats2))
-	assert.Equal(t, defaultCategoryName(), cats2[0]["name"])
+	assert.Equal(t, defaultCategoryNameFallback, cats2[0]["name"])
 	assert.Equal(t, "B", cats2[1]["name"])
 	assert.Equal(t, "A", cats2[2]["name"])
 }
@@ -1063,7 +1069,7 @@ func TestCategory_InsertDefaultCategoryIdempotent(t *testing.T) {
 		CategoryID: "default-uuid-001",
 		SpaceID:    spaceID,
 		UID:        testutil.UID,
-		Name:       "未分类",
+		Name:       defaultCategoryNameFallback,
 		Sort:       0,
 	}
 	err = f.db.insertDefaultCategory(m1)
@@ -1073,7 +1079,7 @@ func TestCategory_InsertDefaultCategoryIdempotent(t *testing.T) {
 		CategoryID: "default-uuid-002",
 		SpaceID:    spaceID,
 		UID:        testutil.UID,
-		Name:       "未分类",
+		Name:       defaultCategoryNameFallback,
 		Sort:       0,
 	}
 	err = f.db.insertDefaultCategory(m2)
@@ -1103,7 +1109,7 @@ func TestCategory_UniqueIndexPreventsDefaultDuplicate(t *testing.T) {
 		CategoryID: "uidx-default-001",
 		SpaceID:    spaceID,
 		UID:        testutil.UID,
-		Name:       "未分类",
+		Name:       defaultCategoryNameFallback,
 		Sort:       0,
 		Status:     1,
 		IsDefault:  intPtr(1),
@@ -1115,7 +1121,7 @@ func TestCategory_UniqueIndexPreventsDefaultDuplicate(t *testing.T) {
 		CategoryID: "uidx-default-002",
 		SpaceID:    spaceID,
 		UID:        testutil.UID,
-		Name:       "未分类",
+		Name:       defaultCategoryNameFallback,
 		Sort:       0,
 		Status:     1,
 		IsDefault:  intPtr(1),

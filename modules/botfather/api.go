@@ -98,7 +98,8 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 
 	// 文档端点（无需认证）
 	r.GET("/v1/bot/skill.md", bf.skillMD)
-	r.GET("/v1/bot/cli-guide.md", bf.cliGuideMD)
+	r.GET("/v1/bot/cli-guide.md", bf.cliGuideMD) // 保留旧路径兼容
+	r.GET("/v1/bot/setup-install.md", bf.cliGuideMD)
 	r.GET("/v1/bot/setup-newbot.md", bf.setupNewbotMD)
 	r.GET("/v1/bot/setup-quickstart.md", bf.setupQuickstartMD)
 

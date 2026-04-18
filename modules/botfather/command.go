@@ -1076,13 +1076,9 @@ func (h *commandHandler) sendConnectPrompt(toUID string, bot *robotModel) {
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	prompt := fmt.Sprintf("📋 机器人「**%s**」的连接信息：\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n**安装插件并配置 bot：**\n"+
-		"```\nnpx -y openclaw-channel-dmwork install --bot-token %s --api-url %s --account-id %s\n```\n\n"+
-		"**插件使用指南：** %s/v1/bot/cli-guide.md  \n**Bot API 文档：** %s/v1/bot/skill.md\n\n"+
-		"⚙️ 群聊默认只有 @机器人 时才回复（可在配置中修改）  \n🔌 断开连接请发送 /disconnect",
+	prompt := fmt.Sprintf("📋 机器人「**%s**」的连接信息：\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n📋 把下面命令发给 OpenClaw 模型执行（需先执行 /install 安装插件）：\n\n```\nnpx -y openclaw-channel-dmwork bind --bot-token %s --api-url %s --account-id %s --agent <你的agent标识>\n```\n\nagent 标识可通过 /status 查看  \n🔌 断开连接请发送 /disconnect",
 		bot.RobotID, bot.RobotID, bot.BotToken, apiURL,
-		bot.BotToken, apiURL, bot.RobotID,
-		apiURL, apiURL)
+		bot.BotToken, apiURL, bot.RobotID)
 
 	h.reply(toUID, prompt)
 }

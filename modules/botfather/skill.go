@@ -1163,135 +1163,84 @@ npx -y openclaw-channel-dmwork doctor --account-id <robot_id>
 func generateSetupNewbotMD(apiURL string) string {
 	return fmt.Sprintf(`---
 name: dmwork-setup-newbot
-description: 收到 [DMWORK NEWBOT SETUP] 消息时，按此流程安装插件、配置 bot、绑定 agent、验证联通
+description: 收到 BotFather /newbot 创建的 bot 信息后，执行 bind 命令完成配置和绑定。
 ---
 
-# DMWork Newbot 设置流程
+# DMWork Newbot 绑定流程
 
-收到包含 [DMWORK NEWBOT SETUP] 的消息时，按以下步骤操作。
-消息中包含 Bot Name、Bot Token、API Server、Account ID 四个参数。
+收到 BotFather 的 bot 信息后（Bot Token、API Server、Account ID），执行以下命令：
 
-## 步骤
-
-1. **安装/更新插件**
-   阅读 %s/v1/bot/cli-guide.md 完成插件安装和更新检查。
-
-2. **配置 bot**（install 是幂等的，已安装时跳过安装、继续配置账号）：
 `+"```"+`
-npx -y openclaw-channel-dmwork install --bot-token <Bot Token> --api-url <API Server> --account-id <Account ID>
+npx -y openclaw-channel-dmwork bind --bot-token <Bot Token> --api-url <API Server> --account-id <Account ID> --agent <agent标识>
 `+"```"+`
 
-3. **获取当前 agent 标识**
-   执行 /status，从输出中提取 agent 标识（用于 openclaw agents bind 的第一个参数）。
-   **如果无法解析，停止并询问用户 agent 名称。**
+agent 标识可通过 /status 查看。
 
-4. **绑定 agent 到 bot**
-`+"```"+`
-openclaw agents bind <agent标识> dmwork <Account ID>
-`+"```"+`
+## 前提条件
 
-5. **重启 gateway**
+DMWork 插件必须已安装。未安装请先执行：
 `+"```"+`
-openclaw gateway restart
+npx -y openclaw-channel-dmwork install
 `+"```"+`
 
-6. **验证**
-`+"```"+`
-npx -y openclaw-channel-dmwork doctor --account-id <Account ID>
-`+"```"+`
+## bind 命令会做什么
 
-7. **联通确认**
-   调用 `+"`"+`POST <apiUrl>/v1/bot/register`+"`"+`（Authorization: Bearer <Bot Token>），从返回的 `+"`"+`owner_uid`+"`"+` 获取创建者 UID。
-   然后发私聊：`+"`"+`POST <apiUrl>/v1/bot/sendMessage`+"`"+`，body: `+"`"+`{"channel_id": "<owner_uid>", "channel_type": 1, "payload": {"type": 1, "content": "你好！我是 <Bot Name>，已成功上线 👋"}}`+"`"+`
-   如果失败，告诉用户在 DMWork 中给 bot 发消息测试。
+1. 检查插件是否已安装（未装则报错）
+2. 写入 bot 配置到 openclaw.json
+3. 设置会话隔离（session.dmScope）
+4. 添加 agent → bot 绑定
+5. 等待 DMWork channel 热重载
+6. 给 bot 创建者发上线通知
 
-8. **记住 Bot API 文档**
-   阅读 %s/v1/bot/skill.md，后续需要操作 DMWork 时参考该文档。
-`, apiURL, apiURL)
+不需要手动重启 gateway。
+
+完成后请在 DMWork 中给 bot 发一条消息验证联通。
+
+## Bot API 文档
+
+%s/v1/bot/skill.md
+`, apiURL)
 }
 
 func generateSetupQuickstartMD(apiURL string) string {
 	return fmt.Sprintf(`---
 name: dmwork-setup-quickstart
-description: 收到 [DMWORK QUICKSTART] 消息时，按此流程安装插件、为所有 agent 创建 bot、配置绑定、验证联通
+description: 收到 BotFather /quickstart 的 API Key 后，执行 quickstart 命令为所有 agent 批量创建并绑定 bot。
 ---
 
-# DMWork Quickstart 设置流程
+# DMWork Quickstart 流程
 
-收到包含 [DMWORK QUICKSTART] 的消息时，按以下步骤操作。
-消息中包含 User API Key 和 API Server 两个参数。
+收到 BotFather 的 User API Key 和 API Server 后，执行以下命令：
 
-目标：为 OpenClaw 的**所有 agent** 各创建一个 DMWork bot，并完成配置和绑定。
-
-## 步骤
-
-1. **安装/更新插件**
-   阅读 %s/v1/bot/cli-guide.md 完成插件安装和更新检查。
-
-2. **获取所有 agent 列表**
 `+"```"+`
-openclaw agents list --json
-`+"```"+`
-   从输出中提取所有 agent 的标识和名称。如果命令失败或返回为空，询问用户提供 agent 信息。
-
-3. **为每个 agent 创建 bot**
-   对列表中的每个 agent，调用：
-`+"```"+`
-POST %s/v1/user/bots
-Header: Authorization: Bearer <User API Key>
-Body: {"username": "<agent标识规范化>", "name": "<agent显示名>"}
-`+"```"+`
-   - username 规则：只允许小写字母、数字、下划线，长度 1-20
-   - 如果 username 冲突（409），依次尝试追加 1、2、3 后缀，最多重试 3 次
-   - 仍失败则询问用户手动指定 username
-   - 记录每个 agent 对应的 bot_token 和 robot_id
-
-4. **配置所有 bot**
-   对每个创建成功的 bot：
-`+"```"+`
-openclaw config set channels.dmwork.accounts.<robot_id>.botToken <bot_token>
-openclaw config set channels.dmwork.accounts.<robot_id>.apiUrl <API Server>
-`+"```"+`
-   设置会话隔离（多 bot 必须）：
-`+"```"+`
-openclaw config set session.dmScope per-account-channel-peer
+npx -y openclaw-channel-dmwork quickstart --api-key <User API Key> --api-url <API Server>
 `+"```"+`
 
-5. **绑定所有 agent 到对应 bot**
-   对每个 agent-bot 对：
+## 前提条件
+
+DMWork 插件必须已安装。未安装请先执行：
 `+"```"+`
-openclaw agents bind <agent标识> dmwork <robot_id>
+npx -y openclaw-channel-dmwork install
 `+"```"+`
 
-6. **重启 gateway（只需一次）**
-`+"```"+`
-openclaw gateway restart
-`+"```"+`
+## quickstart 命令会做什么
 
-7. **验证**
-`+"```"+`
-npx -y openclaw-channel-dmwork doctor
-`+"```"+`
-   检查所有 bot 是否都显示 PASS。
+1. 检查插件是否已安装（未装则报错）
+2. 获取 OpenClaw 的所有 agent 列表
+3. 为每个 agent 创建一个 DMWork bot
+4. 一次性写入所有 bot 配置和绑定
+5. 设置会话隔离（session.dmScope）
+6. 等待 DMWork channel 热重载
+7. 给 bot 创建者发上线通知
+8. 输出结果清单
 
-8. **联通确认**
-   对每个 bot，调用 register 获取 owner_uid 后发私聊：
-`+"```"+`
-POST %s/v1/bot/register
-Authorization: Bearer <bot_token>
-`+"```"+`
-   从返回的 owner_uid，发送消息：
-`+"```"+`
-POST %s/v1/bot/sendMessage
-Authorization: Bearer <bot_token>
-Body: {"channel_id": "<owner_uid>", "channel_type": 1, "payload": {"type": 1, "content": "你好！我是 <bot名称>，已上线 👋"}}
-`+"```"+`
-   如果失败，告诉用户在 DMWork 中给 bot 发消息测试。
+不需要手动重启 gateway。
+quickstart 是一次性初始化工具，面向首次接入 DMWork 的用户。
 
-9. **输出结果**
-   向用户汇报创建结果清单，包含每个 agent 对应的 bot 和状态。
+完成后请在 DMWork 中给 bot 发一条消息验证联通。
 
-10. **记住 Bot API 文档**
-   阅读 %s/v1/bot/skill.md，后续需要操作 DMWork 时参考该文档。
-`, apiURL, apiURL, apiURL, apiURL, apiURL)
+## Bot API 文档
+
+%s/v1/bot/skill.md
+`, apiURL)
 }

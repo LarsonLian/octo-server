@@ -182,7 +182,7 @@ func (c *Category) list(ctx *wkhttp.Context) {
 				CategoryID: util.GenerUUID(),
 				SpaceID:    spaceID,
 				UID:        loginUID,
-				Name:       defaultCategoryName(),
+				Name:       defaultCategoryNamePlaceholder,
 				Sort:       maxSort + 1,
 				IsDefault:  intPtr(1),
 			}
@@ -217,9 +217,13 @@ func (c *Category) list(ctx *wkhttp.Context) {
 			merged := make([]groupInCategoryResp, 0, len(uncategorized)+len(explicit))
 			merged = append(merged, uncategorized...)
 			merged = append(merged, explicit...)
+			displayName := cat.Name
+			if displayName == defaultCategoryNamePlaceholder {
+				displayName = defaultCategoryName()
+			}
 			result = append(result, categoryResp{
 				CategoryID: &catID,
-				Name:       cat.Name,
+				Name:       displayName,
 				Sort:       cat.Sort,
 				IsDefault:  true,
 				Groups:     merged,

@@ -735,11 +735,12 @@ func TestCategory_ListAutoCreatesDefault(t *testing.T) {
 	groups := cats[0]["groups"].([]interface{})
 	assert.Equal(t, 1, len(groups))
 
-	// verify DB row has is_default=1
+	// verify DB row has is_default=1 and stores placeholder (not display name)
 	defaultCat, err := f.db.queryDefaultCategory(testutil.UID, spaceID)
 	assert.NoError(t, err)
 	assert.NotNil(t, defaultCat)
 	assert.Equal(t, intPtr(1), defaultCat.IsDefault)
+	assert.Equal(t, defaultCategoryNamePlaceholder, defaultCat.Name)
 }
 
 func TestCategory_ListDefaultIdempotent(t *testing.T) {
@@ -1069,7 +1070,7 @@ func TestCategory_InsertDefaultCategoryIdempotent(t *testing.T) {
 		CategoryID: "default-uuid-001",
 		SpaceID:    spaceID,
 		UID:        testutil.UID,
-		Name:       defaultCategoryNameFallback,
+		Name:       defaultCategoryNamePlaceholder,
 		Sort:       0,
 	}
 	err = f.db.insertDefaultCategory(m1)
@@ -1079,7 +1080,7 @@ func TestCategory_InsertDefaultCategoryIdempotent(t *testing.T) {
 		CategoryID: "default-uuid-002",
 		SpaceID:    spaceID,
 		UID:        testutil.UID,
-		Name:       defaultCategoryNameFallback,
+		Name:       defaultCategoryNamePlaceholder,
 		Sort:       0,
 	}
 	err = f.db.insertDefaultCategory(m2)
@@ -1109,7 +1110,7 @@ func TestCategory_UniqueIndexPreventsDefaultDuplicate(t *testing.T) {
 		CategoryID: "uidx-default-001",
 		SpaceID:    spaceID,
 		UID:        testutil.UID,
-		Name:       defaultCategoryNameFallback,
+		Name:       defaultCategoryNamePlaceholder,
 		Sort:       0,
 		Status:     1,
 		IsDefault:  intPtr(1),
@@ -1121,7 +1122,7 @@ func TestCategory_UniqueIndexPreventsDefaultDuplicate(t *testing.T) {
 		CategoryID: "uidx-default-002",
 		SpaceID:    spaceID,
 		UID:        testutil.UID,
-		Name:       defaultCategoryNameFallback,
+		Name:       defaultCategoryNamePlaceholder,
 		Sort:       0,
 		Status:     1,
 		IsDefault:  intPtr(1),

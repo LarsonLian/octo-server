@@ -5,7 +5,10 @@ import (
 	"sync"
 )
 
-const defaultCategoryNameFallback = "默认分组"
+const (
+	defaultCategoryNamePlaceholder = "__default__"
+	defaultCategoryNameFallback    = "默认分组"
+)
 
 var (
 	_defaultCategoryName     string

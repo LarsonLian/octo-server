@@ -34,6 +34,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// maxSyncPayloadSize 同步接口返回的单条消息 payload 最大字节数，超过则截断为占位。
+// 避免超大 payload 导致前端 SDK 递归解码栈溢出 (issue #1097)。
+const maxSyncPayloadSize = 10 * 1024
+
 // Message 消息相关API
 type Message struct {
 	ctx *config.Context
@@ -2262,6 +2266,15 @@ func (m *MsgSyncResp) from(msgResp *config.MessageResp, loginUID string, message
 		m.SignalPayload = base64.StdEncoding.EncodeToString(msgResp.Payload)
 		payloadMap = map[string]interface{}{
 			"type": common.SignalError.Int(),
+		}
+	} else if len(msgResp.Payload) > maxSyncPayloadSize {
+		log.Warn("消息 payload 超过大小阈值，已截断",
+			zap.Int64("message_id", msgResp.MessageID),
+			zap.String("channel_id", msgResp.ChannelID),
+			zap.Int("payload_size", len(msgResp.Payload)))
+		payloadMap = map[string]interface{}{
+			"type":    common.ContentError.Int(),
+			"content": "[消息过大]",
 		}
 	} else {
 		err := util.ReadJsonByByte(msgResp.Payload, &payloadMap)

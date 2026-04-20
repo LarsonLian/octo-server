@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -329,10 +330,7 @@ func (f *File) getFile(c *wkhttp.Context) {
 	}
 	filename := c.Query("filename")
 	if filename == "" {
-		paths := strings.Split(ph, "/")
-		if len(paths) > 0 {
-			filename = paths[len(paths)-1]
-		}
+		filename = pkgutil.ExtractFilenameFromPath(ph)
 	}
 	// 清洗文件名，防止 CRLF 注入和路径穿越
 	filename = sanitizeFilename(filename)

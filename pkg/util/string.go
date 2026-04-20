@@ -17,6 +17,19 @@ func GenerUUID() string {
 	return strings.Replace(NewV4().String(), "-", "", -1)
 }
 
+// IsHexString reports whether s is a non-empty string of hex digits [0-9a-fA-F].
+func IsHexString(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 func isUpper(b byte) bool {
 	return 'A' <= b && b <= 'Z'
 }

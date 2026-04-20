@@ -29,6 +29,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis"
@@ -1185,10 +1186,7 @@ func (rb *Robot) proxyFile(c *wkhttp.Context) {
 
 	filename := c.Query("filename")
 	if filename == "" {
-		parts := strings.Split(ph, "/")
-		if len(parts) > 0 {
-			filename = parts[len(parts)-1]
-		}
+		filename = pkgutil.ExtractFilenameFromPath(ph)
 	}
 
 	downloadURL, err := rb.fileService.DownloadURL(ph, filename)
@@ -1286,7 +1284,7 @@ func (rb *Robot) botUploadCredentials(c *wkhttp.Context) {
 	}
 
 	prefix := strings.TrimSpace(cosConfig.Prefix)
-	objectPath := fmt.Sprintf("chat/%d/%s_%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
+	objectPath := fmt.Sprintf("chat/%d/%s/%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
 	var key string
 	if prefix != "" {
 		key = path.Join(prefix, objectPath)
@@ -1359,7 +1357,7 @@ func (rb *Robot) botUploadPresigned(c *wkhttp.Context) {
 		return
 	}
 
-	objectPath := fmt.Sprintf("chat/%d/%s_%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
+	objectPath := fmt.Sprintf("chat/%d/%s/%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
 	contentType := mime.TypeByExtension(ext)
 	if contentType == "" {
 		contentType = "application/octet-stream"

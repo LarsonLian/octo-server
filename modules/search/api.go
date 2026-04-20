@@ -361,33 +361,33 @@ func (s *Search) global(c *wkhttp.Context) {
 				payloadMap = map[string]interface{}{
 					"type": common.SignalError.Int(),
 				}
+			} else if len(msg.Payload) > message.MaxSyncPayloadSize {
+				log.Warn("搜索结果消息 payload 超过大小阈值，已截断",
+					zap.Int64("message_id", msg.MessageID),
+					zap.String("channel_id", msg.ChannelID),
+					zap.Int("payload_size", len(msg.Payload)))
+				payloadMap = message.TruncatedPayload(msg.Payload)
 			} else {
 				err := util.ReadJsonByByte(msg.Payload, &payloadMap)
 				if err != nil {
 					log.Warn("负荷数据不是json格式！", zap.Error(err), zap.String("payload", string(msg.Payload)))
 				}
-				if len(payloadMap) > 0 {
-					visibles := payloadMap["visibles"]
-					if visibles != nil {
-						visiblesArray, ok := visibles.([]interface{})
-						if !ok {
-							visiblesArray = nil
-						}
-						if len(visiblesArray) > 0 {
-							isDeleted = 1
-							for _, limitUID := range visiblesArray {
-								if limitUID == loginUID {
-									isDeleted = 0
-								}
-							}
-						}
-					}
-				} else {
+				if len(payloadMap) == 0 {
 					payloadMap = map[string]interface{}{
 						"type": common.ContentError.Int(),
 					}
 				}
 			}
+
+			if visiblesArray, ok := payloadMap["visibles"].([]interface{}); ok && len(visiblesArray) > 0 {
+				isDeleted = 1
+				for _, limitUID := range visiblesArray {
+					if limitUID == loginUID {
+						isDeleted = 0
+					}
+				}
+			}
+			message.CoerceTextPayloadContent(payloadMap)
 			if isDeleted == 1 {
 				continue
 			}

@@ -34,9 +34,34 @@ import (
 	"go.uber.org/zap"
 )
 
-// maxSyncPayloadSize 同步接口返回的单条消息 payload 最大字节数，超过则截断为占位。
+// maxSyncPayloadSize 同步接口返回的单条消息 payload 最大字节数，超过则截断。
 // 避免超大 payload 导致前端 SDK 递归解码栈溢出 (issue #1097)。
-const maxSyncPayloadSize = 10 * 1024
+const (
+	maxSyncPayloadSize        = 10 * 1024
+	truncatedContentHeadBytes = 1024
+	truncatedContentSuffix    = "...[消息过大]"
+)
+
+// truncatedPayload 在 payload 字节长度超过阈值时，尽量保留原有 type 等元信息，
+// 只对 content 字段做前缀截取 + 占位后缀；解析失败则回退为整体占位。
+func truncatedPayload(raw []byte) map[string]interface{} {
+	var m map[string]interface{}
+	if err := util.ReadJsonByByte(raw, &m); err != nil || len(m) == 0 {
+		return map[string]interface{}{
+			"type":    common.ContentError.Int(),
+			"content": truncatedContentSuffix,
+		}
+	}
+	switch v := m["content"].(type) {
+	case string:
+		if len(v) > truncatedContentHeadBytes {
+			m["content"] = v[:truncatedContentHeadBytes] + truncatedContentSuffix
+		}
+	default:
+		m["content"] = truncatedContentSuffix
+	}
+	return m
+}
 
 // Message 消息相关API
 type Message struct {
@@ -2272,10 +2297,7 @@ func (m *MsgSyncResp) from(msgResp *config.MessageResp, loginUID string, message
 			zap.Int64("message_id", msgResp.MessageID),
 			zap.String("channel_id", msgResp.ChannelID),
 			zap.Int("payload_size", len(msgResp.Payload)))
-		payloadMap = map[string]interface{}{
-			"type":    common.ContentError.Int(),
-			"content": "[消息过大]",
-		}
+		payloadMap = truncatedPayload(msgResp.Payload)
 	} else {
 		err := util.ReadJsonByByte(msgResp.Payload, &payloadMap)
 		if err != nil {

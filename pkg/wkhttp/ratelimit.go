@@ -173,7 +173,7 @@ func RateLimitMiddleware(ctx context.Context, rps float64, burst int, excludePat
 //
 // 同类端点（如所有登录端点）应共享同一个中间件实例，使同一 IP 的总配额受控，防攻击者跨端点分散：
 //
-//	loginLimit := wkhttp.StrictIPRateLimitMiddleware(ctx, 10.0/60, 20)
+//	loginLimit := wkhttp.StrictIPRateLimitMiddleware(ctx, 10.0/60, 5)
 //	v.POST("/user/login", loginLimit, u.login)
 //	v.POST("/user/usernamelogin", loginLimit, u.usernameLogin)
 //

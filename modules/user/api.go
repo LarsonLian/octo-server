@@ -134,7 +134,7 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	loginLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, 10.0/60, 5)   // 10 req/min, burst 5
 	registerLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, 5.0/60, 3) // 5 req/min, burst 3
 	smsLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, 5.0/60, 3)      // 5 req/min, burst 3
-	searchLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, 30.0/60, 60) // 30 req/min, burst 60
+	searchLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, 30.0/60, 15) // 30 req/min, burst 15
 
 	auth := r.Group("/v1", u.ctx.AuthMiddleware(r))
 	{

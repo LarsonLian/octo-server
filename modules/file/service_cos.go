@@ -126,8 +126,7 @@ func (sc *ServiceCOS) GetFile(ph string) (io.ReadCloser, string, error) {
 }
 
 // PresignedPutURL 生成预签名 PUT URL，用于客户端直传 COS。
-// 如果配置了 BucketURL（自定义域名），会将预签名 URL 的 Host 替换为自定义域名，
-// 避免客户端网络屏蔽云厂商域名。
+// 上传和下载都使用 BucketURL 配置的域名，配置源站域名即可支持 PUT。
 func (sc *ServiceCOS) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (uploadURL string, downloadURL string, err error) {
 	cosConfig := sc.ctx.GetConfig().COS
 	client, err := sc.getClient()
@@ -152,6 +151,7 @@ func (sc *ServiceCOS) PresignedPutURL(objectPath string, contentType string, con
 		return "", "", fmt.Errorf("生成预签名URL失败: %w", err)
 	}
 
+	// 上传和下载统一使用 BucketURL 配置的域名
 	if customBase := strings.TrimSpace(cosConfig.BucketURL); customBase != "" {
 		parsed, parseErr := url.Parse(strings.TrimRight(customBase, "/"))
 		if parseErr == nil {

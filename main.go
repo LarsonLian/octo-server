@@ -123,6 +123,12 @@ func runAPI(ctx *config.Context) {
 		MaxRetries: 1,
 	})
 	s.GetRoute().UseGin(wkhttp.RateLimitMiddleware(context.Background(), rlRedis, rps, burst, "/v1/ping"))
+	// CORS 白名单覆盖：dmwork-lib 的 server.New 默认注入 "*" + Credentials:true，
+	// 本中间件在其后执行，按 DM_CORS_ALLOWED_ORIGINS 重写/剥离 Allow-Origin/Credentials。
+	// 未配置时等价于禁用跨域（剥离所有 CORS 响应头），仅允许同源调用。
+	s.GetRoute().UseGin(wkhttp.SecureCORSOverrideMiddleware(
+		wkhttp.ParseAllowedOrigins(os.Getenv("DM_CORS_ALLOWED_ORIGINS")),
+	))
 	// 模块安装
 	err := module.Setup(ctx)
 	if err != nil {

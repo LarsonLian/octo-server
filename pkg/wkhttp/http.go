@@ -313,22 +313,34 @@ func (r *RouterGroup) PUT(relativePath string, handlers ...HandlerFunc) {
 	r.RouterGroup.PUT(relativePath, r.L.handlersToGinHandleFuncs(handlers)...)
 }
 
-// CORSMiddleware 跨域
-func CORSMiddleware() HandlerFunc {
-
+// CORSMiddleware 跨域。按白名单匹配 Origin：
+//   - 无 Origin：不写任何 CORS 头。
+//   - 命中白名单：反射该 Origin，Allow-Credentials: true，附加 Vary: Origin。
+//   - 未命中：不写 Allow-Origin/Credentials，但仍响应 Allow-Headers/Methods 供预检参考。
+//
+// 历史上本函数将请求 Origin 直接反射（见 issue #135/#1015），
+// 已被替换为白名单实现，禁止在未评审的情况下改回反射语义。
+//
+// Deprecated: 本仓库运行时的 CORS 由 dmwork-lib 的 server.New 注入，
+// 实际覆盖逻辑走 SecureCORSOverrideMiddleware。本函数保留仅为：
+// 1) 历史 API 兼容；2) 防止 lib 未来同步本仓库代码时拉回反射版。
+// 新代码请直接使用 SecureCORSOverrideMiddleware。
+func CORSMiddleware(allowedOrigins ...string) HandlerFunc {
 	return func(c *Context) {
-		origin := c.Request.Header.Get("Origin")
+		origin := c.Request.Header.Get(headerOrigin)
+		h := c.Writer.Header()
 		if origin != "" {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
-		} else {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+			addVaryOrigin(h)
+			if IsOriginAllowed(origin, allowedOrigins) {
+				h.Set(headerACAO, origin)
+				h.Set(headerACAC, "true")
+			}
 		}
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, token, accept, origin, Cache-Control, X-Requested-With, appid, noncestr, sign, timestamp")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT,DELETE,PATCH")
+		h.Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, token, accept, origin, Cache-Control, X-Requested-With, appid, noncestr, sign, timestamp")
+		h.Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT,DELETE,PATCH")
 
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
 

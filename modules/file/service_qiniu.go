@@ -54,6 +54,11 @@ func (s *ServiceQiniu) UploadFile(filePath string, contentType string, contentDi
 		Params: map[string]string{},
 	}
 
+	if contentDisposition != "" {
+		s.Warn("七牛云存储不支持在上传时设置 Content-Disposition 元数据，该值将被忽略",
+			zap.String("contentDisposition", contentDisposition))
+	}
+
 	data := bytes.NewBuffer(make([]byte, 0))
 	err := copyFileWriter(data)
 	if err != nil {

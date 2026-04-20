@@ -230,18 +230,45 @@ func TestBuildContentDisposition(t *testing.T) {
 		want     string
 	}{
 		{"empty filename", "", ""},
-		{"ascii filename", "report.pdf", `attachment; filename="report.pdf"`},
-		{"ascii with spaces", "my file.pdf", `attachment; filename="my file.pdf"`},
-		{"chinese filename", "报告.pdf", "attachment; filename*=UTF-8''" + url.PathEscape("报告.pdf")},
-		{"japanese filename", "テスト.png", "attachment; filename*=UTF-8''" + url.PathEscape("テスト.png")},
-		{"mixed ascii and unicode", "report-报告.pdf", "attachment; filename*=UTF-8''" + url.PathEscape("report-报告.pdf")},
-		{"emoji filename", "photo\U0001F600.jpg", "attachment; filename*=UTF-8''" + url.PathEscape("photo\U0001F600.jpg")},
+		{"ascii filename", "report.pdf",
+			`attachment; filename="report.pdf"; filename*=UTF-8''report.pdf`},
+		{"ascii with spaces", "my file.pdf",
+			`attachment; filename="my file.pdf"; filename*=UTF-8''my%20file.pdf`},
+		{"chinese filename", "报告.pdf",
+			`attachment; filename="__.pdf"; filename*=UTF-8''` + url.PathEscape("报告.pdf")},
+		{"japanese filename", "テスト.png",
+			`attachment; filename="___.png"; filename*=UTF-8''` + url.PathEscape("テスト.png")},
+		{"mixed ascii and unicode", "report-报告.pdf",
+			`attachment; filename="report-__.pdf"; filename*=UTF-8''` + url.PathEscape("report-报告.pdf")},
+		{"emoji filename", "photo\U0001F600.jpg",
+			`attachment; filename="photo_.jpg"; filename*=UTF-8''` + url.PathEscape("photo\U0001F600.jpg")},
+		{"ascii with backslash", `report\2024.pdf`,
+			`attachment; filename="report\\2024.pdf"; filename*=UTF-8''report%5C2024.pdf`},
+		{"ascii with semicolon", "report;final.pdf",
+			`attachment; filename="report;final.pdf"; filename*=UTF-8''report%3Bfinal.pdf`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := buildContentDisposition(tt.filename)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBuildContentDisposition_AlwaysHasBothFilenameParams(t *testing.T) {
+	filenames := []string{
+		"simple.txt",
+		"with spaces.pdf",
+		`back\slash.doc`,
+		"报告.pdf",
+		"mixed-混合.png",
+	}
+	for _, fn := range filenames {
+		t.Run(fn, func(t *testing.T) {
+			got := buildContentDisposition(fn)
+			assert.Contains(t, got, "filename=")
+			assert.Contains(t, got, "filename*=UTF-8''")
 		})
 	}
 }
@@ -289,9 +316,16 @@ func TestGetUploadCredentials_ObjectKeyWithFilename(t *testing.T) {
 			wantContentDisp:    false,
 		},
 		{
-			name:        "no filename and no path with sticker type",
-			queryParams: "type=sticker&filename=sticker.gif",
-			wantStatus:  http.StatusOK,
+			name:            "sticker type with filename",
+			queryParams:     "type=sticker&filename=sticker.gif",
+			wantStatus:      http.StatusOK,
+			wantContentDisp: true,
+		},
+		{
+			name:            "path and filename both provided uses path for key and filename for disposition",
+			queryParams:     "type=chat&path=/custom/abc123.jpg&filename=photo.jpg",
+			wantStatus:      http.StatusOK,
+			wantKeyContains: "chat",
 			wantContentDisp: true,
 		},
 	}

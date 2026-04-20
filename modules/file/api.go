@@ -411,6 +411,9 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		contentType = "application/octet-stream"
 	}
 
+	// When both path and filename are provided, path determines the objectKey
+	// while filename is used for Content-Disposition (friendly download name).
+	// This allows custom storage paths with user-friendly download filenames.
 	var objectKey string
 	if uploadPath != "" {
 		sanitized, err := sanitizePath(uploadPath)
@@ -454,17 +457,32 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 	c.Response(resp)
 }
 
-// buildContentDisposition 根据文件名构造 Content-Disposition 头。
-// 对于纯 ASCII 文件名使用 filename="..."，
-// 对于包含非 ASCII 字符的文件名使用 RFC 5987 编码 filename*=UTF-8''...。
+// buildContentDisposition 根据文件名构造 RFC 6266 兼容的 Content-Disposition 头。
+// 始终同时提供 filename（ASCII 回退）和 filename*（RFC 5987 编码），
+// 以确保新旧客户端都能正确解析下载文件名。
 func buildContentDisposition(filename string) string {
 	if filename == "" {
 		return ""
 	}
+	encoded := url.PathEscape(filename)
 	if isASCII(filename) {
-		return fmt.Sprintf("attachment; filename=\"%s\"", filename)
+		// ASCII 文件名：转义反斜杠和双引号以确保安全
+		safe := strings.ReplaceAll(filename, `\`, `\\`)
+		safe = strings.ReplaceAll(safe, `"`, `\"`)
+		return fmt.Sprintf("attachment; filename=\"%s\"; filename*=UTF-8''%s", safe, encoded)
 	}
-	return fmt.Sprintf("attachment; filename*=UTF-8''%s", url.PathEscape(filename))
+	// 非 ASCII 文件名：filename 使用下划线替换非 ASCII 字符作为回退
+	var asciiFallback strings.Builder
+	for _, r := range filename {
+		if r > 127 {
+			asciiFallback.WriteRune('_')
+		} else {
+			asciiFallback.WriteRune(r)
+		}
+	}
+	safe := strings.ReplaceAll(asciiFallback.String(), `\`, `\\`)
+	safe = strings.ReplaceAll(safe, `"`, `\"`)
+	return fmt.Sprintf("attachment; filename=\"%s\"; filename*=UTF-8''%s", safe, encoded)
 }
 
 // isASCII 检查字符串是否全部为 ASCII 字符

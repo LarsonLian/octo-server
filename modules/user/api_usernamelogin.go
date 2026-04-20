@@ -101,14 +101,15 @@ func (u *User) usernameLogin(c *wkhttp.Context) {
 	}
 	if userInfo == nil {
 		u.loginGuard.RecordFailureLogged(req.Username)
-		c.ResponseError(errors.New("该用户名不存在"))
+		// 统一错误消息，避免枚举账号
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 
 	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 	if !matched {
 		u.loginGuard.RecordFailureLogged(req.Username)
-		c.ResponseError(errors.New("密码不正确！"))
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 	u.loginGuard.ResetLogged(req.Username)

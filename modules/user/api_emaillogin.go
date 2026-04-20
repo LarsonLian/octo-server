@@ -233,8 +233,11 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 		return
 	}
 	if userInfo == nil {
+		// 密码登录路径统一返回通用错误消息避免枚举；验证码登录路径不涉及密码，保留原提示。
 		if req.Password != "" {
 			u.loginGuard.RecordFailureLogged(req.Email)
+			c.ResponseError(errors.New("邮箱或密码错误"))
+			return
 		}
 		c.ResponseError(errors.New("该邮箱未注册"))
 		return
@@ -255,7 +258,7 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 		matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 		if !matched {
 			u.loginGuard.RecordFailureLogged(req.Email)
-			c.ResponseError(errors.New("密码不正确！"))
+			c.ResponseError(errors.New("邮箱或密码错误"))
 			return
 		}
 		u.loginGuard.ResetLogged(req.Email)

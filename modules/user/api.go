@@ -1053,7 +1053,8 @@ func (u *User) login(c *wkhttp.Context) {
 	}
 	if userInfo == nil || userInfo.IsDestroy == 1 {
 		u.loginGuard.RecordFailureLogged(req.Username)
-		c.ResponseError(errors.New("用户不存在"))
+		// 统一错误消息，避免攻击者通过响应差异枚举有效账号
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 	if userInfo.Password == "" {
@@ -1063,7 +1064,7 @@ func (u *User) login(c *wkhttp.Context) {
 	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 	if !matched {
 		u.loginGuard.RecordFailureLogged(req.Username)
-		c.ResponseError(errors.New("密码不正确！"))
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 	u.loginGuard.ResetLogged(req.Username)

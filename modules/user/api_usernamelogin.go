@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	event "github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	event "github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
@@ -80,6 +80,11 @@ func (u *User) usernameLogin(c *wkhttp.Context) {
 		c.ResponseError(errors.New("用户名必须在8-22位"))
 		return
 	}
+	if err := u.loginGuard.Check(req.Username); err != nil {
+		u.Warn("登录被临时锁定", zap.String("username", req.Username), zap.Error(err))
+		c.ResponseError(err)
+		return
+	}
 	loginSpan := u.ctx.Tracer().StartSpan(
 		"login",
 		opentracing.ChildOf(c.GetSpanContext()),
@@ -95,15 +100,19 @@ func (u *User) usernameLogin(c *wkhttp.Context) {
 		return
 	}
 	if userInfo == nil {
-		c.ResponseError(errors.New("该用户名不存在"))
+		u.loginGuard.RecordFailureLogged(req.Username)
+		// 统一错误消息，避免枚举账号
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 
 	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 	if !matched {
-		c.ResponseError(errors.New("密码不正确！"))
+		u.loginGuard.RecordFailureLogged(req.Username)
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
+	u.loginGuard.ResetLogged(req.Username)
 	// 自动将旧 MD5 密码迁移到 bcrypt
 	if needsMigration {
 		if newHash, hashErr := HashPassword(req.Password); hashErr == nil {

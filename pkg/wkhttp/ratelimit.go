@@ -239,6 +239,52 @@ func RateLimitMiddleware(ctx context.Context, client *rd.Client, rps float64, bu
 	}
 }
 
+// StrictIPRateLimitMiddleware 端点级 per-IP 严格限流，挂在敏感端点（登录/注册/SMS/搜索）作为额外防护。
+//
+// 与全局 RateLimitMiddleware 区别：
+//   - 全局：DDoS 底线，宽松阈值（数百 req/s），挂全局 UseGin
+//   - 严格：暴力破解/枚举防御，紧阈值（数 req/min），挂在端点级 RouterGroup
+//
+// 同类端点（如所有登录端点）应共享同一个中间件实例，使同一 IP 的总配额受控，防攻击者跨端点分散：
+//
+//	loginLimit := wkhttp.StrictIPRateLimitMiddleware(ctx, rds, "login", 10.0/60, 5)
+//	v.POST("/user/login", loginLimit, u.login)
+//	v.POST("/user/usernamelogin", loginLimit, u.usernameLogin)
+//
+// tag 区分不同端点组的 Redis keyspace。同一 tag 的多处调用共享配额（等同"同组"），
+// 不同 tag 互相隔离。必须是稳定字符串（如 "login"、"register"），不要用随机值
+// 或与请求相关的数据，否则滚动部署后会重置配额。
+//
+// fail-closed（IP 缺失）：归入同一全局桶，与全局 RateLimitMiddleware 行为一致。
+// fail-open（Redis 故障）：Redis 调用失败时放行 + 告警，与其余中间件保持一致。
+func StrictIPRateLimitMiddleware(ctx context.Context, client *rd.Client, tag string, rps float64, burst int) libwkhttp.HandlerFunc {
+	kl := newKeyedLimiter(client, "ratelimit:strict:"+tag+":", rps, burst)
+	var unknownIPWarnOnce sync.Once
+
+	return func(c *libwkhttp.Context) {
+		ip := getClientIP(c.Request)
+		if ip == "" {
+			unknownIPWarnOnce.Do(func() {
+				log.Warn("strict rate limit: client IP unavailable, falling back to shared bucket; check reverse proxy / XFF configuration")
+			})
+			ip = unknownIPKey
+		}
+
+		allowed, remaining, retryAfter, _ := kl.allow(c.Request.Context(), ip)
+		setRateLimitHeaders(c.Writer.Header(), burst, remaining, rps, allowed, retryAfter)
+
+		if !allowed {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"msg":    "请求过于频繁，请稍后再试",
+				"status": http.StatusTooManyRequests,
+			})
+			return
+		}
+
+		c.Next()
+	}
+}
+
 // UIDRateLimitMiddleware 按登录用户 uid 限流。
 //
 // ⚠️ 挂载要求：必须挂在 AuthMiddleware 之后，且只用于认证路由组。

@@ -2,6 +2,8 @@ package file
 
 import (
 	"bytes"
+	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -151,6 +153,71 @@ var blockedExtensions = map[string]bool{
 	".apk": true, ".ipa": true,
 	".php": true, ".jsp": true, ".asp": true, ".aspx": true,
 	".cgi": true, ".py": true, ".rb": true, ".pl": true,
+}
+
+func init() {
+	loadExtensionsFromEnv()
+}
+
+// loadExtensionsFromEnv 读取环境变量，追加扩展名到白名单/黑名单。
+// 仅在 init() 中调用，不可在运行时重复调用（map 无并发写保护）。
+// DM_FILE_EXTRA_ALLOWED: 逗号分隔的额外允许扩展名，如 ".svg,.heic" 或 "svg,heic"
+// DM_FILE_EXTRA_BLOCKED: 逗号分隔的额外禁止扩展名，如 ".xyz,.abc"
+// 注：init() 阶段 zap logger 尚未初始化，此处使用 stdlib log。
+func loadExtensionsFromEnv() {
+	normalizeExt := func(raw string) string {
+		ext := strings.ToLower(strings.TrimSpace(raw))
+		if ext == "" || ext == "." || ext == ".." {
+			return ""
+		}
+		if strings.ContainsAny(ext, `/\`) {
+			return ""
+		}
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		// 过滤 "..exe" 这类多连续点号的畸形输入：补全后仍含 ".." 则无效
+		if strings.Contains(ext, "..") {
+			return ""
+		}
+		return ext
+	}
+
+	var addedAllowed, addedBlocked []string
+
+	if val := os.Getenv("DM_FILE_EXTRA_ALLOWED"); val != "" {
+		for _, raw := range strings.Split(val, ",") {
+			ext := normalizeExt(raw)
+			if ext == "" {
+				continue
+			}
+			if blockedExtensions[ext] {
+				log.Printf("[file] DM_FILE_EXTRA_ALLOWED: %q 已在黑名单中，将被忽略", ext)
+				continue
+			}
+			allowedExtensions[ext] = true
+			addedAllowed = append(addedAllowed, ext)
+		}
+	}
+	if val := os.Getenv("DM_FILE_EXTRA_BLOCKED"); val != "" {
+		for _, raw := range strings.Split(val, ",") {
+			ext := normalizeExt(raw)
+			if ext == "" {
+				continue
+			}
+			blockedExtensions[ext] = true
+			addedBlocked = append(addedBlocked, ext)
+			// 若同一扩展名也出现在 EXTRA_ALLOWED 中，从白名单清除保持状态一致
+			delete(allowedExtensions, ext)
+		}
+	}
+
+	if len(addedAllowed) > 0 {
+		log.Printf("[file] DM_FILE_EXTRA_ALLOWED 已加载: %v", addedAllowed)
+	}
+	if len(addedBlocked) > 0 {
+		log.Printf("[file] DM_FILE_EXTRA_BLOCKED 已加载: %v", addedBlocked)
+	}
 }
 
 // IsAllowedExtension 检查文件扩展名是否允许上传

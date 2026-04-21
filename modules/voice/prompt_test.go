@@ -27,6 +27,7 @@ func TestBuildSystemMessage_ContainsAllRules(t *testing.T) {
 	assert.Contains(t, msg, "编辑指令识别")
 	assert.Contains(t, msg, "追加新内容")
 	assert.Contains(t, msg, "词汇参考表使用规则")
+	assert.Contains(t, msg, "@提及识别")
 	assert.Contains(t, msg, "输出格式")
 }
 
@@ -35,6 +36,33 @@ func TestBuildSystemMessage_ContainsExamples(t *testing.T) {
 	assert.Contains(t, msg, "大背头")
 	assert.Contains(t, msg, "托马斯")
 	assert.Contains(t, msg, "嗯，好的，我知道了")
+}
+
+func TestBuildSystemMessage_ContainsMentionRule(t *testing.T) {
+	msg := buildSystemMessage()
+	assert.Contains(t, msg, "@提及识别")
+	assert.Contains(t, msg, "艾特")
+	assert.Contains(t, msg, "@张三")
+	assert.Contains(t, msg, "@Bob")
+}
+
+func TestBuildSystemMessage_MentionRuleOrder(t *testing.T) {
+	msg := buildSystemMessage()
+	vocabIdx := strings.Index(msg, "词汇参考表使用规则")
+	mentionIdx := strings.Index(msg, "@提及识别")
+	outputIdx := strings.Index(msg, "输出格式")
+	assert.True(t, vocabIdx < mentionIdx, "@提及识别 should be after 词汇参考表使用规则")
+	assert.True(t, mentionIdx < outputIdx, "@提及识别 should be before 输出格式")
+}
+
+func TestBuildUserMessage_WithMemberContext_MentionRuleAvailable(t *testing.T) {
+	merged := BuildVocabularyReference("", "张三\n李四\nBob", "")
+	userMsg := buildUserMessage("edit", "", merged)
+	sysMsg := buildSystemMessage()
+
+	assert.Contains(t, sysMsg, "@提及识别")
+	assert.Contains(t, userMsg, "<member_vocabulary>")
+	assert.Contains(t, userMsg, "张三")
 }
 
 // --- buildUserMessage: default/transcribe mode ---

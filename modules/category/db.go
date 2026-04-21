@@ -32,6 +32,25 @@ func (d *categoryDB) queryCategoriesByUIDAndSpaceID(uid, spaceID string) ([]*Cat
 	return models, err
 }
 
+func (d *categoryDB) queryDefaultCategory(uid, spaceID string) (*CategoryModel, error) {
+	var model *CategoryModel
+	_, err := d.session.Select("*").From("group_category").
+		Where("uid=? and space_id=? and is_default=1 and status=1", uid, spaceID).
+		Limit(1).
+		Load(&model)
+	return model, err
+}
+
+func (d *categoryDB) insertDefaultCategory(m *CategoryModel) error {
+	m.IsDefault = intPtr(1)
+	m.Status = 1
+	_, err := d.session.InsertBySql(
+		"INSERT IGNORE INTO group_category (category_id, space_id, uid, name, sort, status, is_default) VALUES (?, ?, ?, ?, ?, 1, 1)",
+		m.CategoryID, m.SpaceID, m.UID, m.Name, m.Sort,
+	).Exec()
+	return err
+}
+
 func (d *categoryDB) queryCategoryByID(categoryID string) (*CategoryModel, error) {
 	var model *CategoryModel
 	_, err := d.session.Select("*").From("group_category").
@@ -43,7 +62,7 @@ func (d *categoryDB) queryCategoryByID(categoryID string) (*CategoryModel, error
 func (d *categoryDB) countCategoriesByUIDAndSpaceID(uid, spaceID string) (int, error) {
 	var count int
 	_, err := d.session.Select("count(*)").From("group_category").
-		Where("uid=? and space_id=? and status=1", uid, spaceID).
+		Where("uid=? and space_id=? and status=1 and (is_default IS NULL)", uid, spaceID).
 		Load(&count)
 	return count, err
 }

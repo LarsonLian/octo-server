@@ -79,6 +79,7 @@ CREATE TABLE `thread_member` (
 | 发送消息 | 父群成员 |
 | 加入/离开子区 | 父群成员 |
 | 归档/取消归档 | 创建者 或 群管理员 |
+| 修改名称 | 创建者 或 群管理员 |
 | 删除子区 | 创建者 或 群管理员 |
 
 ## API 接口
@@ -90,6 +91,7 @@ CREATE TABLE `thread_member` (
 | POST | `/v1/groups/{group_no}/threads` | 创建子区 |
 | GET | `/v1/groups/{group_no}/threads` | 列出子区 |
 | GET | `/v1/groups/{group_no}/threads/{short_id}` | 获取详情 |
+| PUT | `/v1/groups/{group_no}/threads/{short_id}` | 修改名称 |
 | GET | `/v1/groups/{group_no}/threads/{short_id}/members` | 成员列表 |
 | POST | `/v1/groups/{group_no}/threads/{short_id}/join` | 加入子区 |
 | POST | `/v1/groups/{group_no}/threads/{short_id}/leave` | 离开子区 |
@@ -149,6 +151,21 @@ Content-Type: application/json
   "updated_at": "2026-04-02 16:49:08"
 }
 ```
+
+#### 修改子区名称
+
+```bash
+PUT /v1/groups/{group_no}/threads/{short_id}
+Content-Type: application/json
+
+{
+  "name": "新的子区名称"
+}
+```
+
+响应: `{"status": "ok"}`
+
+权限: 创建者 或 群管理员。名称最大 100 字符。
 
 ## IMDatasource 集成
 

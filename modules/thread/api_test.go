@@ -557,6 +557,91 @@ func TestBussDataSource_ChannelGet(t *testing.T) {
 	assert.Equal(t, register.ErrDatasourceNotProcess, err)
 }
 
+// ==================== 修改子区名称测试 ====================
+
+func TestUpdateThreadName(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// 创建子区
+	shortID := createThreadViaAPI(t, s, groupNo, "原始名称")
+
+	// 修改名称
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID, bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "新名称",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 验证名称已更新
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID, nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"name":"新名称"`)
+}
+
+func TestUpdateThreadName_EmptyName(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	shortID := createThreadViaAPI(t, s, groupNo, "原始名称")
+
+	// 空名称
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID, bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpdateThreadName_InvalidShortID(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/invalid", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "新名称",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid short_id format")
+}
+
+func TestUpdateThreadName_NoPermission(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// testutil.UID 创建子区
+	shortID := createThreadViaAPI(t, s, groupNo, "原始名称")
+
+	// 为 user2 设置 token
+	user2Token := "token_user2"
+	err := ctx.Cache().Set(ctx.GetConfig().Cache.TokenCachePrefix+user2Token, "user2@test")
+	assert.NoError(t, err)
+
+	// user2 修改名称（非创建者、非管理员）
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID, bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "新名称",
+	}))))
+	req.Header.Set("token", user2Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "no permission")
+}
+
 // ==================== 统计字段测试 ====================
 
 // TestListThreads_WithStats 验证列表返回消息统计字段
@@ -856,4 +941,305 @@ func archiveThread(t *testing.T, s *server.Server, groupNo, shortID string) {
 	req.Header.Set("token", testutil.Token)
 	s.GetRoute().ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// ==================== 子区 GROUP.md API 测试 ====================
+
+func TestThreadMdGet_NotSet(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+	shortID := createThreadViaAPI(t, s, groupNo, "md读取测试")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"content":""`)
+	assert.Contains(t, w.Body.String(), `"version":0`)
+	assert.Contains(t, w.Body.String(), `"updated_by":""`)
+}
+
+func TestThreadMdUpdate(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+	shortID := createThreadViaAPI(t, s, groupNo, "md更新测试")
+
+	// 更新 GROUP.md
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": "# 子区规范\n## 代码风格",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"version":1`)
+
+	// 验证内容
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"content":"# 子区规范\n## 代码风格"`)
+	assert.Contains(t, w.Body.String(), `"version":1`)
+	assert.Contains(t, w.Body.String(), `"updated_by":"`+testutil.UID+`"`)
+}
+
+func TestThreadMdUpdate_VersionIncrement(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+	shortID := createThreadViaAPI(t, s, groupNo, "版本递增测试")
+
+	// 更新两次
+	for i := 1; i <= 2; i++ {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+			"content": fmt.Sprintf("version %d", i),
+		}))))
+		req.Header.Set("token", testutil.Token)
+		s.GetRoute().ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), fmt.Sprintf(`"version":%d`, i))
+	}
+}
+
+func TestThreadMdUpdate_EmptyContent(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+	shortID := createThreadViaAPI(t, s, groupNo, "空内容测试")
+
+	// 空字符串
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": "",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "content must not be empty")
+
+	// 纯空白
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": "   \n\t  ",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "content must not be empty")
+}
+
+func TestThreadMdUpdate_ExceedsMaxSize(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+	shortID := createThreadViaAPI(t, s, groupNo, "大小限制测试")
+
+	// 创建超大内容
+	bigContent := strings.Repeat("x", 10241) // 默认 10240 字节
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": bigContent,
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "exceeds max size")
+}
+
+func TestThreadMdDelete(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+	shortID := createThreadViaAPI(t, s, groupNo, "md删除测试")
+
+	// 先设置内容
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": "# 待删除",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 删除
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("DELETE", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 验证已删除（内容为空，版本号递增）
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"content":""`)
+	assert.Contains(t, w.Body.String(), `"version":2`)
+}
+
+// TestThreadMdGet_GroupMemberCanRead 验证群成员可以正常读取子区 GROUP.md
+// 注：权限拒绝路径（非群成员被拒绝）需要多用户 token 支持后补充
+func TestThreadMdGet_GroupMemberCanRead(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+	shortID := createThreadViaAPI(t, s, groupNo, "权限测试")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestThreadMdUpdate_CreatorCanEdit 验证群创建者可以编辑子区 GROUP.md
+// 注：权限拒绝路径（普通成员不能编辑）需要多用户 token 支持后补充
+func TestThreadMdUpdate_CreatorCanEdit(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// 用 testutil.UID（群创建者）创建子区
+	shortID := createThreadViaAPI(t, s, groupNo, "权限测试")
+
+	// 群创建者编辑 GROUP.md
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": "创建者编辑的内容",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestThreadMdDelete_CreatorCanDelete 验证群创建者可以删除子区 GROUP.md
+// 注：权限拒绝路径（普通成员不能删除）需要多用户 token 支持后补充
+func TestThreadMdDelete_CreatorCanDelete(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+	shortID := createThreadViaAPI(t, s, groupNo, "删除权限测试")
+
+	// 先设置内容
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": "# 内容",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 群创建者可以删除
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("DELETE", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestThreadMdGet_InvalidGroupNo(t *testing.T) {
+	s, _ := setupTestData(t)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/invalid/threads/123456789012345/md", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid group_no format")
+}
+
+func TestThreadMdGet_InvalidShortID(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/invalid/md", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid short_id format")
+}
+
+func TestThreadMd_ArchivedThread_CanReadAndEdit(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+	shortID := createThreadViaAPI(t, s, groupNo, "归档md测试")
+
+	// 先设置 GROUP.md
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": "# 归档前设置",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 归档子区
+	archiveThread(t, s, groupNo, shortID)
+
+	// 归档后仍可读取
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "归档前设置")
+
+	// 归档后仍可编辑
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": "# 归档后更新",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestThreadResp_HasThreadMdFields(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// 创建子区
+	shortID := createThreadViaAPI(t, s, groupNo, "ThreadResp测试")
+
+	// 获取详情，验证初始 GROUP.md 字段
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID, nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"has_thread_md":false`)
+	assert.Contains(t, w.Body.String(), `"thread_md_version":0`)
+
+	// 设置 GROUP.md
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID+"/md", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"content": "# 规范",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 再次获取详情，验证 GROUP.md 字段更新
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID, nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"has_thread_md":true`)
+	assert.Contains(t, w.Body.String(), `"thread_md_version":1`)
+	assert.Contains(t, w.Body.String(), `"thread_md_updated_at"`)
 }

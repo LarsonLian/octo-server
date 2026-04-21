@@ -10,6 +10,13 @@ type BotRegisterResp struct {
 	OwnerChannelID string `json:"owner_channel_id"`
 }
 
+// BotRegisterReq Bot自注册请求（可选字段，兼容旧客户端空 body）
+type BotRegisterReq struct {
+	AgentPlatform string `json:"agent_platform"` // AI Agent 平台名称
+	AgentVersion  string `json:"agent_version"`  // Agent 平台版本号
+	PluginVersion string `json:"plugin_version"` // DMWork 插件版本号
+}
+
 // BotSendMessageReq Bot发送消息请求
 type BotSendMessageReq struct {
 	ChannelID   string                 `json:"channel_id"`
@@ -33,20 +40,6 @@ type BotEventsReq struct {
 // BotEventAckReq Bot确认事件请求
 type BotEventAckReq struct {
 	EventID int64 `json:"event_id"`
-}
-
-// BotStreamStartReq 流式消息开始请求
-type BotStreamStartReq struct {
-	ChannelID   string `json:"channel_id"`
-	ChannelType uint8  `json:"channel_type"`
-	Payload     []byte `json:"payload"`
-}
-
-// BotStreamEndReq 流式消息结束请求
-type BotStreamEndReq struct {
-	StreamNo    string `json:"stream_no"`
-	ChannelID   string `json:"channel_id"`
-	ChannelType uint8  `json:"channel_type"`
 }
 
 // BotReadReceiptReq Bot阅读回执请求
@@ -145,10 +138,13 @@ type UpdateBotReq struct {
 
 // UserBotResp 用户Bot列表项
 type UserBotResp struct {
-	RobotID     string `json:"robot_id"`
-	Username    string `json:"username"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	BotToken    string `json:"bot_token"`
-	CreatedAt   string `json:"created_at"`
+	RobotID       string `json:"robot_id"`
+	Username      string `json:"username"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	BotToken      string `json:"bot_token"`
+	CreatedAt     string `json:"created_at"`
+	AgentPlatform string `json:"agent_platform,omitempty"`
+	AgentVersion  string `json:"agent_version,omitempty"`
+	PluginVersion string `json:"plugin_version,omitempty"`
 }

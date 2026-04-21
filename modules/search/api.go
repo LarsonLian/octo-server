@@ -8,6 +8,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/message"
+	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/log"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
@@ -182,22 +183,7 @@ func (s *Search) global(c *wkhttp.Context) {
 			realMessages = append(realMessages, m)
 		}
 	}
-	groupIds := make([]string, 0)
-	uids := make([]string, 0)
-	msgFromUids := make([]string, 0)
-
-	if len(realMessages) > 0 {
-		for _, m := range realMessages {
-			if m.ChannelType == common.ChannelTypeGroup.Uint8() {
-				groupIds = append(groupIds, m.ChannelID)
-			} else if m.ChannelType == common.ChannelTypePerson.Uint8() {
-				uids = append(uids, m.ChannelID)
-			}
-			if m.FromUID != "" {
-				msgFromUids = append(msgFromUids, m.FromUID)
-			}
-		}
-	}
+	groupIds, uids, msgFromUids, threadParentMap := collectChannelIDs(realMessages)
 
 	var joinedGroups []*group.InfoResp
 	if req.OnlyMessage == 0 {
@@ -217,6 +203,7 @@ func (s *Search) global(c *wkhttp.Context) {
 	var groups []*group.GroupResp
 	var users []*user.UserDetailResp
 	if len(groupIds) > 0 {
+		groupIds = util.RemoveRepeatedElement(groupIds)
 		groups, err = s.groupService.GetGroupDetails(groupIds, loginUID)
 		if err != nil {
 			s.Error("查询群列表错误", zap.Error(err))
@@ -237,6 +224,15 @@ func (s *Search) global(c *wkhttp.Context) {
 		}
 	}
 
+	groupMap := make(map[string]*group.GroupResp, len(groups))
+	for _, g := range groups {
+		groupMap[g.GroupNo] = g
+	}
+	userMap := make(map[string]*user.UserDetailResp, len(users))
+	for _, u := range users {
+		userMap[u.UID] = u
+	}
+
 	// 加入的群（按 Space 过滤，membership 已由 SpaceMiddleware 校验）
 	groupResps := make([]*channelResp, 0)
 	searchSpaceID := spacepkg.GetSpaceID(c)
@@ -251,15 +247,10 @@ func (s *Search) global(c *wkhttp.Context) {
 			if strings.Contains(g.Name, req.Keyword) {
 				isAdd = true
 			}
-			if len(groups) > 0 {
-				for _, group := range groups {
-					if group.GroupNo == g.GroupNo {
-						remark = group.Remark
-						if strings.Contains(group.Remark, req.Keyword) {
-							isAdd = true
-						}
-						break
-					}
+			if gr, ok := groupMap[g.GroupNo]; ok {
+				remark = gr.Remark
+				if strings.Contains(gr.Remark, req.Keyword) {
+					isAdd = true
 				}
 			}
 			if isAdd {
@@ -370,74 +361,78 @@ func (s *Search) global(c *wkhttp.Context) {
 				payloadMap = map[string]interface{}{
 					"type": common.SignalError.Int(),
 				}
+			} else if len(msg.Payload) > message.MaxSyncPayloadSize {
+				log.Warn("搜索结果消息 payload 超过大小阈值，已截断",
+					zap.Int64("message_id", msg.MessageID),
+					zap.String("from_uid", msg.FromUID),
+					zap.String("channel_id", msg.ChannelID),
+					zap.Int("payload_size", len(msg.Payload)))
+				payloadMap = message.TruncatedPayload(msg.Payload)
 			} else {
 				err := util.ReadJsonByByte(msg.Payload, &payloadMap)
 				if err != nil {
 					log.Warn("负荷数据不是json格式！", zap.Error(err), zap.String("payload", string(msg.Payload)))
 				}
-				if len(payloadMap) > 0 {
-					visibles := payloadMap["visibles"]
-					if visibles != nil {
-						visiblesArray, ok := visibles.([]interface{})
-						if !ok {
-							visiblesArray = nil
-						}
-						if len(visiblesArray) > 0 {
-							isDeleted = 1
-							for _, limitUID := range visiblesArray {
-								if limitUID == loginUID {
-									isDeleted = 0
-								}
-							}
-						}
-					}
-				} else {
+				if len(payloadMap) == 0 {
 					payloadMap = map[string]interface{}{
 						"type": common.ContentError.Int(),
 					}
 				}
 			}
+
+			if visiblesArray, ok := payloadMap["visibles"].([]interface{}); ok && len(visiblesArray) > 0 {
+				isDeleted = 1
+				for _, limitUID := range visiblesArray {
+					if limitUID == loginUID {
+						isDeleted = 0
+					}
+				}
+			}
+			message.CoerceTextPayloadContent(payloadMap)
 			if isDeleted == 1 {
 				continue
 			}
 			var tempChannel *channelResp
 			if msg.ChannelType == common.ChannelTypePerson.Uint8() {
-				for _, user := range users {
-					if user.UID == msg.ChannelID {
-						tempChannel = &channelResp{
-							ChannelID:     user.UID,
-							ChannelType:   common.ChannelTypePerson.Uint8(),
-							ChannelRemark: html.EscapeString(user.Remark),
-							ChannelName:   html.EscapeString(user.Name),
-						}
-						break
+				if u, ok := userMap[msg.ChannelID]; ok {
+					tempChannel = &channelResp{
+						ChannelID:     u.UID,
+						ChannelType:   common.ChannelTypePerson.Uint8(),
+						ChannelRemark: html.EscapeString(u.Remark),
+						ChannelName:   html.EscapeString(u.Name),
 					}
 				}
 			}
 			var fromChannel *channelResp
-			if len(users) > 0 && msg.FromUID != "" {
-				for _, user := range users {
-					if msg.FromUID == user.UID {
-						fromChannel = &channelResp{
-							ChannelID:     user.UID,
-							ChannelType:   common.ChannelTypePerson.Uint8(),
-							ChannelRemark: html.EscapeString(user.Remark),
-							ChannelName:   html.EscapeString(user.Name),
-						}
-						break
+			if msg.FromUID != "" {
+				if u, ok := userMap[msg.FromUID]; ok {
+					fromChannel = &channelResp{
+						ChannelID:     u.UID,
+						ChannelType:   common.ChannelTypePerson.Uint8(),
+						ChannelRemark: html.EscapeString(u.Remark),
+						ChannelName:   html.EscapeString(u.Name),
 					}
 				}
 			}
 			if msg.ChannelType == common.ChannelTypeGroup.Uint8() {
-				for _, group := range groups {
-					if group.GroupNo == msg.ChannelID {
+				if g, ok := groupMap[msg.ChannelID]; ok {
+					tempChannel = &channelResp{
+						ChannelID:     g.GroupNo,
+						ChannelType:   common.ChannelTypeGroup.Uint8(),
+						ChannelName:   html.EscapeString(g.Name),
+						ChannelRemark: html.EscapeString(g.Remark),
+					}
+				}
+			}
+			if msg.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+				if parentGroupNo, ok := threadParentMap[msg.ChannelID]; ok {
+					if g, ok := groupMap[parentGroupNo]; ok {
 						tempChannel = &channelResp{
-							ChannelID:     group.GroupNo,
-							ChannelType:   common.ChannelTypeGroup.Uint8(),
-							ChannelName:   html.EscapeString(group.Name),
-							ChannelRemark: html.EscapeString(group.Remark),
+							ChannelID:     msg.ChannelID,
+							ChannelType:   common.ChannelTypeCommunityTopic.Uint8(),
+							ChannelName:   html.EscapeString(g.Name),
+							ChannelRemark: html.EscapeString(g.Remark),
 						}
-						break
 					}
 				}
 			}
@@ -482,4 +477,31 @@ type messageResp struct {
 	IsDeleted    int8                   `json:"is_deleted"`        // 是否已删除
 	Channel      *channelResp           `json:"channel,omitempty"` // 消息所属channel
 	FromChannel  *channelResp           `json:"from_channel"`      // 消息发送者channel
+}
+
+func collectChannelIDs(messages []*config.MessageResp) (groupIDs, uids, fromUIDs []string, threadParentMap map[string]string) {
+	groupIDs = make([]string, 0)
+	uids = make([]string, 0)
+	fromUIDs = make([]string, 0)
+	threadParentMap = make(map[string]string)
+	for _, m := range messages {
+		switch {
+		case m.ChannelType == common.ChannelTypeGroup.Uint8():
+			groupIDs = append(groupIDs, m.ChannelID)
+		case m.ChannelType == common.ChannelTypePerson.Uint8():
+			uids = append(uids, m.ChannelID)
+		case m.ChannelType == common.ChannelTypeCommunityTopic.Uint8():
+			parentGroupNo, _, err := thread.ParseChannelID(m.ChannelID)
+			if err != nil {
+				log.Warn("解析Thread channel_id失败，跳过", zap.String("channel_id", m.ChannelID), zap.Error(err))
+			} else {
+				groupIDs = append(groupIDs, parentGroupNo)
+				threadParentMap[m.ChannelID] = parentGroupNo
+			}
+		}
+		if m.FromUID != "" {
+			fromUIDs = append(fromUIDs, m.FromUID)
+		}
+	}
+	return
 }

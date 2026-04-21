@@ -13,12 +13,21 @@ import (
 	"go.uber.org/zap"
 )
 
+// globalASRLogger is the singleton ASRLogger shared between voice and botfather modules.
+var globalASRLogger *ASRLogger
+
+// GetASRLogger returns the global ASRLogger singleton (nil if ASR logging is disabled).
+func GetASRLogger() *ASRLogger {
+	return globalASRLogger
+}
+
 // Voice is the API handler for voice transcription
 type Voice struct {
-	ctx     *config.Context
-	service *VoiceService
-	cfg     *VoiceConfig
-	db      VoiceStore
+	ctx       *config.Context
+	service   *VoiceService
+	cfg       *VoiceConfig
+	db        VoiceStore
+	asrLogger *ASRLogger
 	log.Log
 }
 
@@ -35,6 +44,11 @@ func New(ctx *config.Context, cfg *VoiceConfig) *Voice {
 
 // Route registers voice API routes
 func (v *Voice) Route(r *wkhttp.WKHttp) {
+	// Load configurable prompts (only when VOICE_PROMPT_FILE is set)
+	if v.cfg.PromptFile != "" {
+		LoadPrompts(v.cfg.PromptFile, v.Log)
+	}
+
 	auth := r.Group("/v1/voice", v.ctx.AuthMiddleware(r))
 	{
 		auth.POST("/transcribe", v.transcribe)
@@ -91,9 +105,18 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 		chatContext = TruncateRunesTail(chatContext, MaxChatContextLength)
 	}
 
-	text, model, err := v.service.Transcribe(audioData, mimeType, contextText, chatContext)
+	startTime := time.Now()
+	result, err := v.service.TranscribeWithResult(audioData, mimeType, contextText, chatContext,
+		TranscribeOptions{})
+	durationMs := time.Since(startTime).Milliseconds()
+
 	if err != nil {
 		v.Error("transcription failed", zap.Error(err))
+		if v.asrLogger != nil {
+			entry := v.buildASREntry("app", audioData, mimeType, contextText, chatContext,
+				startTime, durationMs, result, err)
+			v.asrLogger.Enqueue(entry)
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": http.StatusInternalServerError,
 			"msg":    "transcription failed",
@@ -101,11 +124,16 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 		return
 	}
 
+	if v.asrLogger != nil {
+		v.asrLogger.Enqueue(v.buildASREntry("app", audioData, mimeType, contextText, chatContext,
+			startTime, durationMs, result, nil))
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"status": http.StatusOK,
-		"text":   text,
-		"m":      shortenModelName(model),
-		"engine": shortenEngineName(v.cfg.Engine),
+		"text":   result.Text,
+		"m":      shortenModelName(result.Model),
+		"engine": ShortenEngineName(v.cfg.Engine),
 	})
 }
 
@@ -116,9 +144,47 @@ func (v *Voice) getConfig(c *wkhttp.Context) {
 		"enabled":       enabled,
 		"max_duration":  v.cfg.MaxDuration,
 		"max_file_size": v.cfg.MaxFileSize,
-		"engine":        shortenEngineName(v.cfg.Engine),
+		"engine":        ShortenEngineName(v.cfg.Engine),
 		"edit_mode":     v.cfg.EditMode,
 	})
+}
+
+// buildASREntry constructs an ASREntry with common fields populated.
+func (v *Voice) buildASREntry(source string, audioData []byte, mimeType string,
+	contextText string, chatContext string, startTime time.Time, durationMs int64,
+	result *TranscribeResult, err error) ASREntry {
+
+	entry := ASREntry{
+		RequestID: v.asrLogger.GenerateRequestID(),
+		Timestamp: startTime.UTC().Format(time.RFC3339Nano),
+		Source:    source,
+		Engine:    v.cfg.Engine,
+		Input: ASRInput{
+			Mode:        v.cfg.EditMode,
+			MimeType:    mimeType,
+			AudioSize:   len(audioData),
+			ContextText: contextText,
+			ChatContext: chatContext,
+		},
+		AudioData:  audioData,
+		DurationMs: durationMs,
+	}
+	if err != nil {
+		entry.Error = err.Error()
+	}
+	if result != nil {
+		entry.ModelUsed = result.Model
+		entry.Prompt = &ASRPrompt{
+			Type:        result.PromptType,
+			Text:        result.PromptText,
+			RequestBody: result.RequestBody,
+		}
+		entry.RawResultText = result.RawText
+		entry.ResultText = result.Text
+		entry.ResultLength = len([]rune(result.Text))
+		entry.IsNoSpeech = IsNoSpeech(result.RawText)
+	}
+	return entry
 }
 
 // getContext returns the user's personal voice correction context for the given space
@@ -170,12 +236,15 @@ func shortenModelName(model string) string {
 	return ShortenModelName(model)
 }
 
-func shortenEngineName(engine string) string {
+// ShortenEngineName returns a short identifier for an engine name.
+func ShortenEngineName(engine string) string {
 	switch engine {
-	case "gemini":
+	case EngineGemini:
 		return "gm"
-	case "gpt":
+	case EngineGPT:
 		return "gp"
+	case EngineQwen:
+		return "qw"
 	default:
 		return engine
 	}

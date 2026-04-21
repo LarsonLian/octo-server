@@ -9,6 +9,13 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 )
 
+// Engine name constants
+const (
+	EngineGemini = "gemini"
+	EngineGPT    = "gpt"
+	EngineQwen   = "qwen"
+)
+
 const (
 	defaultTimeout       = 30
 	defaultTotalTimeout  = 45
@@ -25,6 +32,7 @@ const (
 
 var defaultModels = []string{"gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro"}
 var defaultGPTModels = []string{"gpt-4o-mini-transcribe"}
+var defaultQwenModels = []string{"qwen3.5-omni-plus"}
 
 // VoiceConfig holds configuration for voice transcription
 type VoiceConfig struct {
@@ -35,10 +43,18 @@ type VoiceConfig struct {
 	Models       []string // model fallback chain (Gemini engine)
 	MaxDuration  int      // max audio duration in seconds
 	MaxFileSize  int64    // max file size in bytes
-	Engine       string   // "gemini" or "gpt"
+	Engine       string   // "gemini", "gpt", or "qwen"
 	GPTModels    []string // model fallback chain for GPT engine
 	Language     string   // language code for GPT engine, empty = auto-detect
 	EditMode     string   // "edit" or "append"
+
+	// Qwen engine configuration
+	QwenModels  []string // Qwen engine model fallback chain
+	QwenUrl     string   // Qwen-specific API URL (optional, falls back to LiteLLMUrl)
+	QwenKey     string   // Qwen-specific API key (optional, falls back to LiteLLMKey)
+	QwenTimeout int      // Qwen per-model timeout (optional, falls back to Timeout)
+
+	PromptFile string // Path to voice_prompts.yaml (env: VOICE_PROMPT_FILE)
 }
 
 // NewVoiceConfigFromEnv reads voice config from environment variables
@@ -47,6 +63,8 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 	copy(models, defaultModels)
 	gptModels := make([]string, len(defaultGPTModels))
 	copy(gptModels, defaultGPTModels)
+	qwenModels := make([]string, len(defaultQwenModels))
+	copy(qwenModels, defaultQwenModels)
 
 	cfg := &VoiceConfig{
 		LiteLLMUrl:   os.Getenv("VOICE_LITELLM_URL"),
@@ -56,8 +74,9 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 		Models:       models,
 		MaxDuration:  defaultMaxDuration,
 		MaxFileSize:  defaultMaxFileSize,
-		Engine:       "gemini",
+		Engine:       EngineGemini,
 		GPTModels:    gptModels,
+		QwenModels:   qwenModels,
 	}
 
 	if v := os.Getenv("VOICE_LITELLM_TIMEOUT"); v != "" {
@@ -98,7 +117,7 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 		}
 	}
 
-	if v := os.Getenv("VOICE_ENGINE"); v == "gpt" || v == "gemini" {
+	if v := os.Getenv("VOICE_ENGINE"); v == EngineGPT || v == EngineGemini || v == EngineQwen {
 		cfg.Engine = v
 	}
 
@@ -116,15 +135,48 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 		}
 	}
 
+	// Qwen engine configuration
+	if v := os.Getenv("VOICE_QWEN_MODELS"); v != "" {
+		models := strings.Split(v, ",")
+		trimmed := make([]string, 0, len(models))
+		for _, m := range models {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				trimmed = append(trimmed, m)
+			}
+		}
+		if len(trimmed) > 0 {
+			cfg.QwenModels = trimmed
+		}
+	}
+
+	if v := os.Getenv("VOICE_QWEN_URL"); v != "" {
+		cfg.QwenUrl = v
+	}
+
+	if v := os.Getenv("VOICE_QWEN_KEY"); v != "" {
+		cfg.QwenKey = v
+	}
+
+	if v := os.Getenv("VOICE_QWEN_TIMEOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.QwenTimeout = n
+		}
+	}
+
 	if v := os.Getenv("VOICE_LANGUAGE"); v != "" {
 		cfg.Language = v
+	}
+
+	if v := os.Getenv("VOICE_PROMPT_FILE"); v != "" {
+		cfg.PromptFile = v
 	}
 
 	// EditMode: explicit setting takes priority, otherwise auto-decide by engine
 	if v := os.Getenv("VOICE_EDIT_MODE"); v == "edit" || v == "append" {
 		cfg.EditMode = v
 	} else {
-		if cfg.Engine == "gpt" {
+		if cfg.Engine == EngineGPT {
 			cfg.EditMode = "append"
 		} else {
 			cfg.EditMode = "edit"
@@ -132,7 +184,7 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 	}
 
 	// GPT does not support edit mode, force to append
-	if cfg.Engine == "gpt" && cfg.EditMode == "edit" {
+	if cfg.Engine == EngineGPT && cfg.EditMode == "edit" {
 		lg := log.NewTLog("VoiceConfig")
 		lg.Warn("GPT engine does not support edit mode, forcing append")
 		cfg.EditMode = "append"
@@ -143,13 +195,36 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 
 // Validate checks that required config fields are set
 func (c *VoiceConfig) Validate() error {
+	if c.Engine == EngineQwen {
+		// Qwen can use its own URL/Key or fall back to global
+		url := c.QwenUrl
+		if url == "" {
+			url = c.LiteLLMUrl
+		}
+		if url == "" {
+			return errors.New("VOICE_QWEN_URL or VOICE_LITELLM_URL is required for qwen engine")
+		}
+		key := c.QwenKey
+		if key == "" {
+			key = c.LiteLLMKey
+		}
+		if key == "" {
+			return errors.New("VOICE_QWEN_KEY or VOICE_LITELLM_KEY is required for qwen engine")
+		}
+		if len(c.QwenModels) == 0 {
+			return errors.New("VOICE_QWEN_MODELS is required for qwen engine")
+		}
+		return nil
+	}
+
+	// Original validation for gemini/gpt
 	if c.LiteLLMUrl == "" {
 		return errors.New("VOICE_LITELLM_URL is required")
 	}
 	if c.LiteLLMKey == "" {
 		return errors.New("VOICE_LITELLM_KEY is required")
 	}
-	if c.Engine == "gpt" {
+	if c.Engine == EngineGPT {
 		if len(c.GPTModels) == 0 {
 			return errors.New("VOICE_GPT_MODELS is required for GPT engine")
 		}
@@ -191,6 +266,7 @@ var modelAbbreviations = map[string]string{
 	"gpt-4o-mini-transcribe":  "gpt4omt",
 	"whisper-1":               "w1",
 	"whisper-large-v3":        "wlv3",
+	"qwen3.5-omni-plus":       "q35op",
 }
 
 // ShortenModelName returns a short identifier for a model name.

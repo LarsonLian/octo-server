@@ -143,9 +143,9 @@ func TestTranscribeAPI_WithContextText(t *testing.T) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		// In edit mode, prompt uses modifyPromptTemplate
-		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "已有以下文本")
+		// In edit mode, user message uses editInputBufferTemplate
+		prompt := getUserPromptText(t, req)
+		assert.Contains(t, prompt, "<input_buffer>")
 		assert.Contains(t, prompt, "my existing content")
 
 		resp := chatCompletionResponse{
@@ -280,12 +280,16 @@ func TestTranscribeAPI_AudioRequestFormat(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, "test-model", req.Model)
-		assert.Len(t, req.Messages, 1)
-		assert.Equal(t, "user", req.Messages[0].Role)
-		assert.Len(t, req.Messages[0].Content, 2)
-		assert.Equal(t, "text", req.Messages[0].Content[0].Type)
-		assert.Equal(t, "input_audio", req.Messages[0].Content[1].Type)
-		assert.NotEmpty(t, req.Messages[0].Content[1].InputAudio.Data)
+		assert.Len(t, req.Messages, 2) // system + user
+
+		assert.Equal(t, "system", req.Messages[0].Role)
+		assert.Equal(t, "user", req.Messages[1].Role)
+		userParts, ok := req.Messages[1].Content.([]contentPart)
+		assert.True(t, ok)
+		assert.Len(t, userParts, 2)
+		assert.Equal(t, "text", userParts[0].Type)
+		assert.Equal(t, "input_audio", userParts[1].Type)
+		assert.NotEmpty(t, userParts[1].InputAudio.Data)
 
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "OK"}}},
@@ -310,8 +314,8 @@ func TestTranscribeAPI_WithChatContext(t *testing.T) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "辅助识别专有名词拼写")
+		prompt := getUserPromptText(t, req)
+		assert.Contains(t, prompt, "<vocabulary_reference>")
 		assert.Contains(t, prompt, "Alice: 明天开会")
 
 		resp := chatCompletionResponse{
@@ -341,7 +345,7 @@ func TestTranscribeAPI_ChatContextTruncation(t *testing.T) {
 	litellmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
-		receivedPrompt = req.Messages[0].Content[0].Text
+		receivedPrompt = getUserPromptText(t, req)
 
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "OK"}}},
@@ -378,8 +382,8 @@ func TestTranscribeAPI_EmptyChatContext(t *testing.T) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		prompt := req.Messages[0].Content[0].Text
-		assert.NotContains(t, prompt, "辅助识别专有名词拼写")
+		prompt := getUserPromptText(t, req)
+		assert.NotContains(t, prompt, "vocabulary_reference")
 
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "plain transcription"}}},
@@ -481,7 +485,7 @@ func TestTranscribeAPI_ContextTextTruncation(t *testing.T) {
 	litellmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
-		receivedPrompt = req.Messages[0].Content[0].Text
+		receivedPrompt = getUserPromptText(t, req)
 
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "OK"}}},
@@ -543,9 +547,10 @@ func TestShortenModelName(t *testing.T) {
 }
 
 func TestShortenEngineName(t *testing.T) {
-	assert.Equal(t, "gm", shortenEngineName("gemini"))
-	assert.Equal(t, "gp", shortenEngineName("gpt"))
-	assert.Equal(t, "other", shortenEngineName("other"))
+	assert.Equal(t, "gm", ShortenEngineName("gemini"))
+	assert.Equal(t, "gp", ShortenEngineName("gpt"))
+	assert.Equal(t, "qw", ShortenEngineName("qwen"))
+	assert.Equal(t, "other", ShortenEngineName("other"))
 }
 
 // --- getConfig max_file_size tests ---
@@ -762,7 +767,7 @@ func TestTranscribeAPI_RuneSafeChatContextTruncation(t *testing.T) {
 	litellmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
-		receivedPrompt = req.Messages[0].Content[0].Text
+		receivedPrompt = getUserPromptText(t, req)
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "OK"}}},
 		}
@@ -789,4 +794,69 @@ func TestTranscribeAPI_RuneSafeChatContextTruncation(t *testing.T) {
 	// Truncation should keep the tail (CJK chars), not break multi-byte chars
 	assert.Contains(t, receivedPrompt, cjkTail)
 	assert.NotContains(t, receivedPrompt, "AAA")
+}
+
+// --- Qwen engine API tests ---
+
+func TestTranscribeAPI_QwenEngine(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/chat/completions", r.URL.Path)
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "Qwen text"}}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := &VoiceConfig{
+		QwenUrl:      server.URL,
+		QwenKey:      "qwen-key",
+		Timeout:      5,
+		TotalTimeout: 10,
+		Engine:       "qwen",
+		QwenModels:   []string{"qwen3.5-omni-plus"},
+		MaxDuration:  60,
+		MaxFileSize:  5 * 1024 * 1024,
+		EditMode:     "edit",
+	}
+
+	router := setupTestRouter(cfg, "")
+
+	w := httptest.NewRecorder()
+	req := createMultipartRequest(t, "/v1/voice/transcribe", []byte("fake-audio"), "")
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "Qwen text", resp["text"])
+	assert.Equal(t, "q35op", resp["m"])
+	assert.Equal(t, "qw", resp["engine"])
+}
+
+func TestGetConfigAPI_QwenEngine(t *testing.T) {
+	cfg := &VoiceConfig{
+		QwenUrl:     "https://qwen.example.com",
+		QwenKey:     "key",
+		QwenModels:  []string{"qwen3.5-omni-plus"},
+		MaxDuration: 60,
+		MaxFileSize: 3 * 1024 * 1024,
+		Engine:      "qwen",
+		EditMode:    "edit",
+	}
+
+	router := setupTestRouter(cfg, "")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/voice/config", nil)
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, true, resp["enabled"])
+	assert.Equal(t, "qw", resp["engine"])
+	assert.Equal(t, "edit", resp["edit_mode"])
 }

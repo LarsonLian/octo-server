@@ -29,6 +29,42 @@ func NewVoiceService(cfg *VoiceConfig) *VoiceService {
 	}
 }
 
+// effectiveURL returns the API base URL for the current engine.
+func (s *VoiceService) effectiveURL() string {
+	if s.config.Engine == EngineQwen && s.config.QwenUrl != "" {
+		return s.config.QwenUrl
+	}
+	return s.config.LiteLLMUrl
+}
+
+// effectiveKey returns the API key for the current engine.
+func (s *VoiceService) effectiveKey() string {
+	if s.config.Engine == EngineQwen && s.config.QwenKey != "" {
+		return s.config.QwenKey
+	}
+	return s.config.LiteLLMKey
+}
+
+// effectiveTimeout returns the per-model timeout for the current engine.
+func (s *VoiceService) effectiveTimeout() int {
+	if s.config.Engine == EngineQwen && s.config.QwenTimeout > 0 {
+		return s.config.QwenTimeout
+	}
+	return s.config.Timeout
+}
+
+// chatCompletionModels returns the model fallback chain for the current
+// chat/completions engine (Gemini or Qwen). Not used by the GPT engine,
+// which has its own model list (GPTModels) and uses audio/transcriptions.
+func (s *VoiceService) chatCompletionModels() []string {
+	switch s.config.Engine {
+	case EngineQwen:
+		return s.config.QwenModels
+	default: // gemini
+		return s.config.Models
+	}
+}
+
 // TranscribeOptions holds per-request overrides for transcription
 type TranscribeOptions struct {
 	// Mode overrides the transcription mode: "append" or "edit".
@@ -40,6 +76,17 @@ type TranscribeOptions struct {
 	Model string
 }
 
+// TranscribeResult holds the transcription result along with metadata for logging
+type TranscribeResult struct {
+	Text         string      // post-processed final result
+	RawText      string      // raw model output (before post-processing)
+	Model        string      // actual model used
+	PromptText   string      // user message text sent to model
+	SystemPrompt string      // system message sent to model (empty for GPT engine)
+	PromptType   string      // "chat_completion" or "audio_transcription"
+	RequestBody  interface{} // full request body sent to LiteLLM (JSON-serializable)
+}
+
 // Transcribe dispatches to append or edit path based on EditMode.
 func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText string, chatContext string) (string, string, error) {
 	return s.TranscribeWithOptions(audioData, mimeType, contextText, chatContext, TranscribeOptions{})
@@ -49,223 +96,264 @@ func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText
 var ErrGPTEditNotSupported = fmt.Errorf("edit mode is not supported with GPT engine")
 
 // TranscribeWithOptions supports per-request mode/model override.
-// Empty option fields fall back to the global configuration.
+// Internally delegates to TranscribeWithResult.
 func (s *VoiceService) TranscribeWithOptions(audioData []byte, mimeType, contextText, chatContext string, opts TranscribeOptions) (string, string, error) {
+	result, err := s.TranscribeWithResult(audioData, mimeType, contextText, chatContext, opts)
+	if err != nil {
+		return "", "", err
+	}
+	return result.Text, result.Model, nil
+}
+
+// TranscribeWithResult is like TranscribeWithOptions but returns additional metadata
+// (prompt text, request body, raw text) needed for ASR data collection.
+func (s *VoiceService) TranscribeWithResult(audioData []byte, mimeType, contextText, chatContext string,
+	opts TranscribeOptions) (*TranscribeResult, error) {
+
 	mode := s.config.EditMode
 	if opts.Mode != "" {
 		mode = opts.Mode
 	}
 
-	if s.config.Engine == "gpt" && mode == "edit" {
-		return "", "", ErrGPTEditNotSupported
+	if s.config.Engine == EngineGPT && mode == "edit" {
+		return nil, ErrGPTEditNotSupported
 	}
 
 	svc := s
 	if opts.Model != "" {
 		cfgCopy := *s.config
-		if s.config.Engine == "gpt" {
+		switch s.config.Engine {
+		case EngineGPT:
 			cfgCopy.GPTModels = append([]string{opts.Model}, s.config.GPTModels...)
-		} else {
+		case EngineQwen:
+			cfgCopy.QwenModels = append([]string{opts.Model}, s.config.QwenModels...)
+		default: // gemini
 			cfgCopy.Models = append([]string{opts.Model}, s.config.Models...)
 		}
 		svc = &VoiceService{config: &cfgCopy, client: s.client}
 	}
 
+	// Build prompts
+	userMsg := buildUserMessage(mode, contextText, chatContext)
+	var systemMsg string
+	if svc.config.Engine != EngineGPT {
+		systemMsg = buildSystemMessage()
+	}
+
+	// Call model
+	var rawText, model string
+	var requestBody interface{}
+	var promptType string
+	var err error
+
+	switch svc.config.Engine {
+	case EngineGPT:
+		promptType = "audio_transcription"
+		rawText, model, requestBody, err = svc.callGPTWithModelFallback(audioData, mimeType, userMsg)
+	default:
+		promptType = "chat_completion"
+		rawText, model, requestBody, err = svc.callChatCompletionWithFallback(audioData, mimeType,
+			systemMsg, userMsg, svc.chatCompletionModels())
+	}
+	if err != nil {
+		return &TranscribeResult{
+			PromptText:   userMsg,
+			SystemPrompt: systemMsg,
+			PromptType:   promptType,
+			RequestBody:  requestBody,
+		}, err
+	}
+
+	result := &TranscribeResult{
+		RawText:      rawText,
+		Text:         rawText,
+		Model:        model,
+		PromptText:   userMsg,
+		SystemPrompt: systemMsg,
+		PromptType:   promptType,
+		RequestBody:  requestBody,
+	}
+
+	// Post-processing: append and edit have different NoSpeech semantics
 	switch mode {
 	case "append":
-		return svc.transcribeAppend(audioData, mimeType, contextText, chatContext)
-	default: // "edit"
-		return svc.transcribeEdit(audioData, mimeType, contextText, chatContext)
-	}
-}
-
-// transcribeAppend — pure transcription + backend join, used by both engines.
-// NO_SPEECH: both empty and [NO_SPEECH] sentinel are treated as silence.
-func (s *VoiceService) transcribeAppend(audioData []byte, mimeType string,
-	contextText string, chatContext string) (string, string, error) {
-
-	prompt := buildAppendPrompt(contextText, chatContext)
-
-	var text, model string
-	var err error
-	switch s.config.Engine {
-	case "gpt":
-		text, model, err = s.callGPTWithModelFallback(audioData, mimeType, prompt)
-	default: // gemini
-		text, model, err = s.callWithModelFallback(audioData, mimeType, prompt)
-	}
-	if err != nil {
-		return "", "", err
-	}
-
-	// NO_SPEECH: both empty and sentinel treated as silence
-	if isNoSpeech(text) {
-		if contextText != "" {
-			return contextText, model, nil
+		if IsNoSpeech(rawText) {
+			if contextText != "" {
+				result.Text = contextText
+			} else {
+				result.Text = ""
+			}
+		} else if contextText != "" {
+			result.Text = joinContextAndText(contextText, rawText)
 		}
-		return "", model, nil
-	}
-
-	// Backend join
-	if contextText != "" {
-		text = joinContextAndText(contextText, text)
-	}
-
-	return text, model, nil
-}
-
-// transcribeEdit — Gemini only, LLM performs editing + whitespace restore.
-// NO_SPEECH: only [NO_SPEECH] sentinel is silence; empty string is legitimate "delete everything".
-func (s *VoiceService) transcribeEdit(audioData []byte, mimeType string,
-	contextText string, chatContext string) (string, string, error) {
-
-	prompt := buildPrompt(contextText, chatContext)
-
-	text, model, err := s.callWithModelFallback(audioData, mimeType, prompt)
-	if err != nil {
-		return "", "", err
-	}
-
-	// Only sentinel counts as silence; empty string = "delete everything"
-	if text == noSpeechSentinel {
-		if contextText != "" {
-			return contextText, model, nil
+	default: // edit
+		if rawText == noSpeechSentinel {
+			if contextText != "" {
+				result.Text = contextText
+			} else {
+				result.Text = ""
+			}
+		} else if contextText != "" {
+			result.Text = restoreTrailingWhitespace(contextText, rawText)
 		}
-		return "", model, nil
 	}
 
-	// Restore trailing whitespace that LLM may have stripped
-	if contextText != "" {
-		text = restoreTrailingWhitespace(contextText, text)
-	}
-
-	return text, model, nil
+	return result, nil
 }
 
-// callWithModelFallback wraps callLiteLLM with model loop + total timeout.
-func (s *VoiceService) callWithModelFallback(audioData []byte, mimeType string,
-	prompt string) (string, string, error) {
+// callChatCompletionWithFallback wraps callChatCompletion with model loop + total timeout.
+func (s *VoiceService) callChatCompletionWithFallback(audioData []byte, mimeType string,
+	systemMsg, userMsg string, models []string) (string, string, interface{}, error) {
 
 	totalCtx, totalCancel := context.WithTimeout(context.Background(),
 		time.Duration(s.config.TotalTimeout)*time.Second)
 	defer totalCancel()
 
 	var lastErr error
-	for _, model := range s.config.Models {
+	var lastReqBody interface{}
+	for _, model := range models {
 		if totalCtx.Err() != nil {
 			break
 		}
 
-		text, err := s.callLiteLLM(totalCtx, model, audioData, mimeType, prompt)
+		text, reqBody, err := s.callChatCompletion(totalCtx, model, audioData, mimeType, systemMsg, userMsg)
+		lastReqBody = reqBody
 		if err == nil {
-			return text, model, nil
+			return text, model, reqBody, nil
 		}
 
 		lastErr = err
 		if isNonRetryableError(err) {
-			return "", model, err
+			return "", model, reqBody, err
 		}
 	}
 
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no models configured")
 	}
-	return "", "", fmt.Errorf("all models failed: %w", lastErr)
+	return "", "", lastReqBody, fmt.Errorf("all models failed: %w", lastErr)
 }
 
 // callGPTWithModelFallback wraps callAudioTranscriptions with model loop + total timeout.
+// Returns requestBody containing audio_base64 for self-contained JSON logging.
 func (s *VoiceService) callGPTWithModelFallback(audioData []byte, mimeType string,
-	prompt string) (string, string, error) {
+	prompt string) (string, string, interface{}, error) {
 
 	totalCtx, totalCancel := context.WithTimeout(context.Background(),
 		time.Duration(s.config.TotalTimeout)*time.Second)
 	defer totalCancel()
 
+	audioBase64 := base64.StdEncoding.EncodeToString(audioData)
+
 	var lastErr error
+	var lastReqBody interface{}
 	for _, model := range s.config.GPTModels {
 		if totalCtx.Err() != nil {
 			break
 		}
 
 		text, err := s.callAudioTranscriptions(totalCtx, model, audioData, mimeType, prompt)
+
+		reqBody := map[string]interface{}{
+			"model":        model,
+			"language":     s.config.Language,
+			"prompt":       prompt,
+			"file":         "(multipart binary, see audio_file in input)",
+			"audio_base64": audioBase64,
+		}
+		lastReqBody = reqBody
+
 		if err == nil {
-			return text, model, nil
+			return text, model, reqBody, nil
 		}
 
 		lastErr = err
 		if isNonRetryableError(err) {
-			return "", model, err
+			return "", model, reqBody, err
 		}
 	}
 
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no GPT models configured")
 	}
-	return "", "", fmt.Errorf("all GPT models failed: %w", lastErr)
+	return "", "", lastReqBody, fmt.Errorf("all GPT models failed: %w", lastErr)
 }
 
-// callLiteLLM sends a chat completion request to LiteLLM with audio content.
-func (s *VoiceService) callLiteLLM(totalCtx context.Context, model string, audioData []byte, mimeType string, prompt string) (string, error) {
+// callChatCompletion sends a chat completion request with audio content.
+// Used by both Gemini and Qwen engines. Qwen Omni natively supports the
+// OpenAI-compatible input_audio content part, so the same request format
+// works for both engines without any adaptation.
+func (s *VoiceService) callChatCompletion(totalCtx context.Context, model string, audioData []byte, mimeType string, systemMsg, userMsg string) (string, interface{}, error) {
 	b64Audio := base64.StdEncoding.EncodeToString(audioData)
+
+	// DashScope (Qwen) requires data URI format: "data:;base64,{base64}"
+	if s.config.Engine == EngineQwen {
+		b64Audio = "data:;base64," + b64Audio
+	}
 
 	// Only use reasoning_effort=low for Gemini 3.1 Pro (reduces latency without hurting quality)
 	var reasoningEffort string
-	if strings.Contains(model, "3.1-pro") {
+	if s.config.Engine == EngineGemini && strings.Contains(model, "3.1-pro") {
 		reasoningEffort = "low"
 	}
+
+	var messages []message
+	if systemMsg != "" {
+		messages = append(messages, message{Role: "system", Content: systemMsg})
+	}
+	messages = append(messages, message{
+		Role: "user",
+		Content: []contentPart{
+			{
+				Type: "text",
+				Text: userMsg,
+			},
+			{
+				Type: "input_audio",
+				InputAudio: &inputAudio{
+					Data:   b64Audio,
+					Format: mimeTypeToFormat(mimeType),
+				},
+			},
+		},
+	})
 
 	reqBody := chatCompletionRequest{
 		Model:           model,
 		ReasoningEffort: reasoningEffort,
-		Messages: []message{
-			{
-				Role: "user",
-				Content: []contentPart{
-					{
-						Type: "text",
-						Text: prompt,
-					},
-					{
-						Type: "input_audio",
-						InputAudio: &inputAudio{
-							Data:   b64Audio,
-							Format: mimeTypeToFormat(mimeType),
-						},
-					},
-				},
-			},
-		},
+		Messages:        messages,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
+		return "", reqBody, fmt.Errorf("marshal request: %w", err)
 	}
 
-	perModelTimeout := time.Duration(s.config.Timeout) * time.Second
+	perModelTimeout := time.Duration(s.effectiveTimeout()) * time.Second
 	ctx, cancel := context.WithTimeout(totalCtx, perModelTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(s.config.LiteLLMUrl, "/")+"/chat/completions", bytes.NewReader(bodyBytes))
+	url := strings.TrimRight(s.effectiveURL(), "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return "", reqBody, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.config.LiteLLMKey)
+	req.Header.Set("Authorization", "Bearer "+s.effectiveKey())
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", reqBody, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
+		return "", reqBody, fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", &apiError{
+		return "", reqBody, &apiError{
 			StatusCode: resp.StatusCode,
 			Body:       string(respBody),
 		}
@@ -273,15 +361,15 @@ func (s *VoiceService) callLiteLLM(totalCtx context.Context, model string, audio
 
 	var chatResp chatCompletionResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return "", fmt.Errorf("parse response: %w", err)
+		return "", reqBody, fmt.Errorf("parse response: %w", err)
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("empty response from model")
+		return "", reqBody, fmt.Errorf("empty response from model")
 	}
 
 	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	return result, nil
+	return result, reqBody, nil
 }
 
 // callAudioTranscriptions sends audio to the OpenAI-compatible audio transcriptions API.
@@ -447,14 +535,45 @@ func isNonRetryableError(err error) bool {
 // Request/response types for OpenAI-compatible chat completion API
 
 type chatCompletionRequest struct {
-	Model            string            `json:"model"`
-	Messages         []message         `json:"messages"`
-	ReasoningEffort  string            `json:"reasoning_effort,omitempty"`
+	Model           string    `json:"model"`
+	Messages        []message `json:"messages"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
 }
 
+// message represents a chat completion message. Content is string for system
+// messages and []contentPart for user messages with audio.
 type message struct {
-	Role    string        `json:"role"`
-	Content []contentPart `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
+// UnmarshalJSON handles decoding both string content (system) and array
+// content (user) from JSON.
+func (m *message) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	m.Role = raw.Role
+
+	// Try string first (system message)
+	var s string
+	if err := json.Unmarshal(raw.Content, &s); err == nil {
+		m.Content = s
+		return nil
+	}
+
+	// Try []contentPart (user message)
+	var parts []contentPart
+	if err := json.Unmarshal(raw.Content, &parts); err == nil {
+		m.Content = parts
+		return nil
+	}
+
+	return fmt.Errorf("message content is neither string nor []contentPart")
 }
 
 type contentPart struct {

@@ -400,6 +400,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	groupNos := make([]string, 0, len(conversations))
 	uids := make([]string, 0, len(conversations))
 	channelIDs := make([]string, 0, len(conversations))
+	threadChannelShortIDMap := make(map[string]string)
 	if len(conversations) > 0 {
 		for _, conversation := range conversations {
 			if len(conversation.Recents) == 0 {
@@ -411,6 +412,11 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 				groupNos = append(groupNos, conversation.ChannelID)
 			}
 			channelIDs = append(channelIDs, conversation.ChannelID)
+			if conversation.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+				if _, shortID, err := thread.ParseChannelID(conversation.ChannelID); err == nil {
+					threadChannelShortIDMap[conversation.ChannelID] = shortID
+				}
+			}
 		}
 	}
 
@@ -418,6 +424,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	groupMap := map[string]*group.GroupResp{}                   // 群详情
 	conversationExtraMap := map[string]*conversationExtraResp{} // 最近会话扩展
 	groupVailds := make([]string, 0, len(conversations))        // 有效群
+	activeThreadShortIDs := make(map[string]struct{})            // 有效子区
 
 	// ---------- 是否在群内 ----------
 	if len(groupNos) > 0 {
@@ -428,6 +435,24 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			return
 		}
 
+	}
+
+	// ---------- 过滤已删除子区 ----------
+	threadFilterEnabled := false
+	if len(threadChannelShortIDMap) > 0 {
+		shortIDs := make([]string, 0, len(threadChannelShortIDMap))
+		for _, shortID := range threadChannelShortIDMap {
+			shortIDs = append(shortIDs, shortID)
+		}
+		activeIDs, err := co.threadDB.QueryNonDeletedShortIDs(shortIDs)
+		if err != nil {
+			co.Error("查询有效子区失败！", zap.Error(err))
+		} else {
+			threadFilterEnabled = true
+			for _, id := range activeIDs {
+				activeThreadShortIDs[id] = struct{}{}
+			}
+		}
 	}
 
 	// ---------- 扩展 ----------
@@ -537,6 +562,14 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 				}
 				if !vaild { // 无效群则跳过
 					continue
+				}
+			}
+
+			if conversation.ChannelType == common.ChannelTypeCommunityTopic.Uint8() && threadFilterEnabled {
+				if shortID, ok := threadChannelShortIDMap[conversation.ChannelID]; ok {
+					if _, active := activeThreadShortIDs[shortID]; !active {
+						continue
+					}
 				}
 			}
 

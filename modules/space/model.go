@@ -4,6 +4,11 @@ import "github.com/Mininglamp-OSS/octo-server/pkg/db"
 
 // ---------- DB Models ----------
 
+const (
+	JoinModeDirect   = 0 // 直接加入
+	JoinModeApproval = 1 // 需要审批
+)
+
 // SpaceModel 空间表模型
 type SpaceModel struct {
 	SpaceId        string // 空间ID
@@ -65,6 +70,7 @@ type createSpaceReq struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Logo        string `json:"logo"`
+	JoinMode    int    `json:"join_mode"` // 0=直接加入(默认) 1=需要审批
 }
 
 type updateSpaceReq struct {
@@ -89,7 +95,6 @@ type updateMemberRoleReq struct {
 
 type joinSpaceReq struct {
 	InviteCode string `json:"invite_code"`
-	Remark     string `json:"remark"`
 }
 
 // ---------- Response Models ----------
@@ -127,6 +132,7 @@ type inviteResp struct {
 	UsedCount   int    `json:"used_count"`
 	ExpiresAt   string `json:"expires_at"`
 	MemberCount int    `json:"member_count"`
+	JoinMode    int    `json:"join_mode"`
 }
 
 // botResp Bot 信息响应
@@ -148,6 +154,7 @@ type invitePreviewResp struct {
 	UsedCount   int       `json:"used_count"`
 	ExpiresAt   string    `json:"expires_at"`
 	MemberCount int       `json:"member_count"`
+	JoinMode    int       `json:"join_mode"`
 	Bots        []botResp `json:"bots"`
 }
 
@@ -181,6 +188,7 @@ type spaceJoinApplyResp struct {
 	ApplicantName string `json:"applicant_name"`
 	Remark        string `json:"remark"`
 	Status        int    `json:"status"`
+	ReviewerUID   string `json:"reviewer_uid,omitempty"`
 	CreatedAt     string `json:"created_at"`
 }
 

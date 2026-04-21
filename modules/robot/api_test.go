@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
+	"time"
 
+	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -245,4 +249,37 @@ func TestSpaceBots_ExcludesDeletedSpaceMembers(t *testing.T) {
 	if len(results) == 1 {
 		assert.Equal(t, "sbot_active_836", results[0]["uid"])
 	}
+}
+
+func TestRobotObjectPathFormat(t *testing.T) {
+	filename := "qualcomm_review.xlsx"
+	objectPath := fmt.Sprintf("chat/%d/%s/%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
+	parts := strings.Split(objectPath, "/")
+	assert.Equal(t, 4, len(parts), "expected 4 path segments")
+	assert.Equal(t, filename, parts[len(parts)-1])
+}
+
+func TestRobotLegacyUUIDStripping(t *testing.T) {
+	path := "chat/1713360000/afd1a8d99bb94bf0a8d2c1e3f4a5b6c7_report.xlsx"
+	got := pkgutil.ExtractFilenameFromPath(path)
+	assert.Equal(t, "report.xlsx", got)
+}
+
+func TestRobotLegacyUUIDStrippingWithEncoding(t *testing.T) {
+	path := "chat/1713360000/afd1a8d99bb94bf0a8d2c1e3f4a5b6c7_" + url.PathEscape("报告.xlsx")
+	got := pkgutil.ExtractFilenameFromPath(path)
+	assert.Equal(t, "报告.xlsx", got)
+}
+
+func TestRobotLegacyNoFalsePositive(t *testing.T) {
+	path := "chat/1713360000/my_very_long_filename_with_underscores.xlsx"
+	got := pkgutil.ExtractFilenameFromPath(path)
+	assert.Equal(t, "my_very_long_filename_with_underscores.xlsx", got)
+}
+
+func TestRobotProxyFileNewPath(t *testing.T) {
+	uuid := util.GenerUUID()
+	path := fmt.Sprintf("chat/%d/%s/file.xlsx", time.Now().Unix(), uuid)
+	got := pkgutil.ExtractFilenameFromPath(path)
+	assert.Equal(t, "file.xlsx", got)
 }

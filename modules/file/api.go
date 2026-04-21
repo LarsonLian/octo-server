@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -47,6 +49,11 @@ func (f *File) Route(r *wkhttp.WKHttp) {
 		auth.GET("/upload", f.getFilePath)
 		//上传文件
 		auth.POST("/upload", f.uploadFile)
+		// 预签名上传 URL 签发
+		auth.GET("/upload/presigned", f.getUploadCredentials)
+		auth.GET("/upload/credentials", f.getUploadCredentials) // 兼容旧路径
+		// 预签名下载 URL
+		auth.GET("/download/url", f.getDownloadURL)
 	}
 }
 
@@ -248,7 +255,8 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 		}
 		sign = h.Sum(nil)
 	}
-	_, err = f.service.UploadFile(fmt.Sprintf("%s%s", fileType, path), contentType, func(w io.Writer) error {
+	contentDisposition := buildContentDisposition(fileName)
+	_, err = f.service.UploadFile(fmt.Sprintf("%s%s", fileType, path), contentType, contentDisposition, func(w io.Writer) error {
 		_, err := file.Seek(0, io.SeekStart)
 		if err != nil {
 			f.Error("设置文件偏移量错误", zap.Error(err))
@@ -325,10 +333,7 @@ func (f *File) getFile(c *wkhttp.Context) {
 	}
 	filename := c.Query("filename")
 	if filename == "" {
-		paths := strings.Split(ph, "/")
-		if len(paths) > 0 {
-			filename = paths[len(paths)-1]
-		}
+		filename = pkgutil.ExtractFilenameFromPath(ph)
 	}
 	// 清洗文件名，防止 CRLF 注入和路径穿越
 	filename = sanitizeFilename(filename)
@@ -364,6 +369,192 @@ func (f *File) getFile(c *wkhttp.Context) {
 		return
 	}
 	c.Redirect(http.StatusFound, downloadURL)
+}
+
+// getUploadCredentials 返回预签名 PUT URL，供客户端直接上传文件，无需后端中转
+func (f *File) getUploadCredentials(c *wkhttp.Context) {
+	fileType := c.Query("type")
+	uploadPath := c.Query("path")
+	filename := c.Query("filename")
+	contentType := c.Query("contentType")
+
+	// 当 filename 提供时，允许 path 为空
+	pathForCheck := uploadPath
+	if pathForCheck == "" && filename != "" {
+		pathForCheck = filename
+	}
+	if err := f.checkReq(Type(fileType), pathForCheck); err != nil {
+		c.ResponseError(err)
+		return
+	}
+
+	if filename != "" {
+		filename = sanitizeFilename(filename)
+	}
+
+	ext := ""
+	if filename != "" {
+		ext = strings.ToLower(filepath.Ext(filepath.Base(filename)))
+	} else if uploadPath != "" {
+		ext = strings.ToLower(filepath.Ext(uploadPath))
+	}
+	if ext == "" || IsBlockedExtension(ext) || !IsAllowedExtension(ext) {
+		c.ResponseError(errors.New("不支持的文件类型"))
+		return
+	}
+
+	if ext != "" {
+		inferred := mime.TypeByExtension(ext)
+		if inferred != "" {
+			contentType = inferred
+		}
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	// When both path and filename are provided, path determines the objectKey
+	// while filename is used for Content-Disposition (friendly download name).
+	// This allows custom storage paths with user-friendly download filenames.
+	var objectKey string
+	if uploadPath != "" {
+		sanitized, err := sanitizePath(uploadPath)
+		if err != nil {
+			c.ResponseError(errors.New("无效的文件路径"))
+			return
+		}
+		if !strings.HasPrefix(sanitized, "/") {
+			sanitized = "/" + sanitized
+		}
+		objectKey = fileType + sanitized
+	} else if filename != "" {
+		objectKey = fmt.Sprintf("%s/%d/%s/%s", fileType, time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
+	} else {
+		objectKey = fmt.Sprintf("%s/%s%s", fileType, util.GenerUUID(), ext)
+	}
+
+	// 构造 Content-Disposition
+	contentDisposition := buildContentDisposition(filename)
+
+	expiry := 30 * time.Minute
+	uploadURL, downloadURL, err := f.service.PresignedPutURL(objectKey, contentType, contentDisposition, expiry)
+	if err != nil {
+		f.Error("生成预签名URL失败", zap.Error(err))
+		c.ResponseError(errors.New("生成预签名上传 URL 失败"))
+		return
+	}
+
+	resp := map[string]interface{}{
+		"method":      "PUT",
+		"uploadUrl":   uploadURL,
+		"downloadUrl": downloadURL,
+		"contentType": contentType,
+		"key":         objectKey,
+		"expiresIn":   int(expiry.Seconds()),
+		"expiredTime": time.Now().Add(expiry).Unix(),
+	}
+	if contentDisposition != "" {
+		resp["contentDisposition"] = contentDisposition
+	}
+	c.Response(resp)
+}
+
+// getDownloadURL 返回预签名 GET URL，用于客户端下载带正确文件名的文件
+func (f *File) getDownloadURL(c *wkhttp.Context) {
+	ph := c.Query("path")
+	if strings.TrimSpace(ph) == "" {
+		c.ResponseError(errors.New("path参数不能为空"))
+		return
+	}
+
+	// If path is a full URL, extract just the object path
+	// e.g. https://bucket.cos.region.myqcloud.com/prefix/chat/2/xxx → /chat/2/xxx
+	if strings.HasPrefix(ph, "http://") || strings.HasPrefix(ph, "https://") {
+		parsed, parseErr := url.Parse(ph)
+		if parseErr == nil {
+			ph = parsed.Path
+			// Strip the COS prefix (e.g. /bucket-prefix) from the path
+			cosPrefix := strings.TrimSpace(f.ctx.GetConfig().COS.Prefix)
+			if cosPrefix != "" {
+				ph = strings.TrimPrefix(ph, "/"+cosPrefix)
+			}
+		}
+	}
+
+	sanitized, err := sanitizePath(ph)
+	if err != nil {
+		c.ResponseError(errors.New("无效的文件路径"))
+		return
+	}
+
+	filename := c.Query("filename")
+	if strings.TrimSpace(filename) == "" {
+		filename = filepath.Base(sanitized)
+	}
+	filename = sanitizeFilename(filename)
+
+	disposition := c.Query("disposition")
+	if disposition != "inline" {
+		disposition = "attachment"
+	}
+
+	expiry := 30 * time.Minute
+	signedURL, err := f.service.PresignedGetURL(sanitized, filename, disposition, expiry)
+	if err != nil {
+		f.Error("生成预签名下载URL失败", zap.Error(err))
+		c.ResponseError(errors.New("生成预签名下载URL失败"))
+		return
+	}
+
+	c.Response(gin.H{
+		"url":      signedURL,
+		"filename": filename,
+	})
+}
+
+// buildContentDisposition 根据文件名构造 RFC 6266 兼容的 Content-Disposition 头。
+// 始终同时提供 filename（ASCII 回退）和 filename*（RFC 5987 编码），
+// 以确保新旧客户端都能正确解析下载文件名。
+// rfc5987Encode encodes a filename for RFC 5987 filename* parameter.
+// url.PathEscape doesn't encode single quotes, which are delimiters in RFC 5987.
+func rfc5987Encode(s string) string {
+	encoded := url.PathEscape(s)
+	return strings.ReplaceAll(encoded, "'", "%27")
+}
+
+func buildContentDisposition(filename string) string {
+	if filename == "" {
+		return ""
+	}
+	encoded := rfc5987Encode(filename)
+	if isASCII(filename) {
+		// ASCII 文件名：转义反斜杠和双引号以确保安全
+		safe := strings.ReplaceAll(filename, `\`, `\\`)
+		safe = strings.ReplaceAll(safe, `"`, `\"`)
+		return fmt.Sprintf("inline; filename=\"%s\"; filename*=UTF-8''%s", safe, encoded)
+	}
+	// 非 ASCII 文件名：filename 使用下划线替换非 ASCII 字符作为回退
+	var asciiFallback strings.Builder
+	for _, r := range filename {
+		if r > 127 {
+			asciiFallback.WriteRune('_')
+		} else {
+			asciiFallback.WriteRune(r)
+		}
+	}
+	safe := strings.ReplaceAll(asciiFallback.String(), `\`, `\\`)
+	safe = strings.ReplaceAll(safe, `"`, `\"`)
+	return fmt.Sprintf("inline; filename=\"%s\"; filename*=UTF-8''%s", safe, encoded)
+}
+
+// isASCII 检查字符串是否全部为 ASCII 字符
+func isASCII(s string) bool {
+	for _, r := range s {
+		if r > 127 {
+			return false
+		}
+	}
+	return true
 }
 
 // sanitizePath 规范化上传路径，防止路径遍历攻击（包括双重编码）

@@ -137,6 +137,8 @@ var allowedExtensions = map[string]bool{
 	".gz": true, ".bz2": true, ".xz": true,
 	// 其他
 	".json": true, ".xml": true, ".yaml": true, ".yml": true,
+	// 安装包
+	".dmg": true, ".pkg": true, ".deb": true, ".rpm": true, ".appimage": true,
 }
 
 // blockedExtensions 禁止上传的文件扩展名（可执行文件）

@@ -19,6 +19,10 @@ func clearVoiceEnv() {
 	os.Unsetenv("VOICE_GPT_MODELS")
 	os.Unsetenv("VOICE_LANGUAGE")
 	os.Unsetenv("VOICE_EDIT_MODE")
+	os.Unsetenv("VOICE_QWEN_MODELS")
+	os.Unsetenv("VOICE_QWEN_URL")
+	os.Unsetenv("VOICE_QWEN_KEY")
+	os.Unsetenv("VOICE_QWEN_TIMEOUT")
 }
 
 func TestNewVoiceConfigFromEnv_Defaults(t *testing.T) {
@@ -394,4 +398,108 @@ func TestShortenModelName_Unknown(t *testing.T) {
 
 func TestMaxVoiceContextLength_Constant(t *testing.T) {
 	assert.Equal(t, 10000, MaxVoiceContextLength)
+}
+
+// --- Qwen engine config tests ---
+
+func TestNewVoiceConfigFromEnv_QwenEngine(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "qwen")
+	os.Setenv("VOICE_QWEN_URL", "https://qwen.example.com")
+	os.Setenv("VOICE_QWEN_KEY", "qwen-key")
+	os.Setenv("VOICE_QWEN_MODELS", "qwen3.5-omni-plus,qwen3.5-omni")
+	os.Setenv("VOICE_QWEN_TIMEOUT", "45")
+	os.Setenv("VOICE_LITELLM_URL", "https://litellm.example.com")
+	os.Setenv("VOICE_LITELLM_KEY", "litellm-key")
+
+	cfg := NewVoiceConfigFromEnv()
+
+	assert.Equal(t, "qwen", cfg.Engine)
+	assert.Equal(t, "https://qwen.example.com", cfg.QwenUrl)
+	assert.Equal(t, "qwen-key", cfg.QwenKey)
+	assert.Equal(t, []string{"qwen3.5-omni-plus", "qwen3.5-omni"}, cfg.QwenModels)
+	assert.Equal(t, 45, cfg.QwenTimeout)
+	assert.Equal(t, "edit", cfg.EditMode) // qwen supports edit
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestNewVoiceConfigFromEnv_QwenDefaultModels(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "qwen")
+	os.Setenv("VOICE_QWEN_URL", "https://qwen.example.com")
+	os.Setenv("VOICE_QWEN_KEY", "qwen-key")
+	// No VOICE_QWEN_MODELS set — should use default
+
+	cfg := NewVoiceConfigFromEnv()
+
+	assert.Equal(t, "qwen", cfg.Engine)
+	assert.Equal(t, []string{"qwen3.5-omni-plus"}, cfg.QwenModels) // default
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestVoiceConfig_Validate_QwenFallbackToGlobal(t *testing.T) {
+	cfg := &VoiceConfig{
+		Engine:     "qwen",
+		LiteLLMUrl: "https://litellm.example.com",
+		LiteLLMKey: "litellm-key",
+		QwenModels: []string{"qwen3.5-omni-plus"},
+	}
+	// Should pass: falls back to global URL/Key
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestVoiceConfig_Validate_QwenNoModels(t *testing.T) {
+	cfg := &VoiceConfig{
+		Engine:     "qwen",
+		QwenUrl:    "https://qwen.example.com",
+		QwenKey:    "key",
+		QwenModels: nil,
+	}
+	assert.Error(t, cfg.Validate())
+}
+
+func TestVoiceConfig_Validate_QwenNoURL(t *testing.T) {
+	cfg := &VoiceConfig{
+		Engine:     "qwen",
+		QwenModels: []string{"qwen3.5-omni-plus"},
+		QwenKey:    "key",
+		// No URL at all
+	}
+	assert.Error(t, cfg.Validate())
+}
+
+func TestVoiceConfig_Validate_QwenNoKey(t *testing.T) {
+	cfg := &VoiceConfig{
+		Engine:     "qwen",
+		QwenUrl:    "https://qwen.example.com",
+		QwenModels: []string{"qwen3.5-omni-plus"},
+		// No key at all
+	}
+	assert.Error(t, cfg.Validate())
+}
+
+func TestShortenModelName_Qwen(t *testing.T) {
+	assert.Equal(t, "q35op", ShortenModelName("qwen3.5-omni-plus"))
+}
+
+func TestEditMode_QwenDefaultsToEdit(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_ENGINE", "qwen")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, "edit", cfg.EditMode)
+}
+
+func TestNewVoiceConfigFromEnv_QwenModelsWithSpaces(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_QWEN_MODELS", " qwen3.5-omni-plus , qwen3.5-omni ")
+	cfg := NewVoiceConfigFromEnv()
+	assert.Equal(t, []string{"qwen3.5-omni-plus", "qwen3.5-omni"}, cfg.QwenModels)
 }

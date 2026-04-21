@@ -83,3 +83,10 @@ func (db *DB) GetGroupName(groupNo string) (string, error) {
 	_, err := db.session.Select("name").From("`group`").Where("group_no=?", groupNo).Load(&name)
 	return name, err
 }
+
+// GetThreadName 获取子区名称
+func (db *DB) GetThreadName(groupNo, shortID string) (string, error) {
+	var name string
+	_, err := db.session.Select("name").From("thread").Where("group_no=? AND short_id=?", groupNo, shortID).Load(&name)
+	return name, err
+}

@@ -217,6 +217,16 @@ curl -X POST %s/v1/bot/sendMessage \
   }'
 `+"```"+`
 
+### Channel Types
+
+| channel_type | Target | channel_id format |
+|---|---|---|
+| 1 | DM (direct message) | user UID |
+| 2 | Group | group_no |
+| 5 | Thread (sub-topic in group) | {group_no}____{short_id} |
+
+When replying, always use the `+"`"+`channel_id`+"`"+` and `+"`"+`channel_type`+"`"+` from the received event. Do not modify or split the channel_id.
+
 ## Real-time Features
 
 ### Typing Indicator
@@ -226,26 +236,6 @@ Show "typing..." to the user while processing. Call this **before** you start ge
 `+"```"+`
 POST %s/v1/bot/typing
 Body: {"channel_id": "xxx", "channel_type": 1}
-`+"```"+`
-
-### Streaming Response
-
-For long responses, use streaming so the user sees text appearing in real-time (like ChatGPT). Each send contains the **FULL accumulated text so far**, not incremental.
-
-`+"```"+`
-// 1. Start stream — get a stream_no
-POST %s/v1/bot/stream/start
-Body: {"channel_id": "xxx", "channel_type": 1, "payload": "base64_encoded"}
-Response: {"stream_no": "xxx"}
-
-// 2. Send accumulated text (repeat as content grows)
-POST %s/v1/bot/sendMessage
-Body: {"channel_id": "xxx", "channel_type": 1, "stream_no": "xxx",
-       "payload": {"type": 1, "content": "Full accumulated text so far..."}}
-
-// 3. End stream
-POST %s/v1/bot/stream/end
-Body: {"stream_no": "xxx", "channel_id": "xxx", "channel_type": 1}
 `+"```"+`
 
 ### Heartbeat (Online Status)
@@ -305,12 +295,35 @@ DM and group events have different formats. Getting this wrong means replying to
 
 **Reply target:** use `+"`"+`channel_id`+"`"+` and `+"`"+`channel_type`+"`"+` from the event directly.
 
+### Thread Event (channel_type = 5, channel_id contains ____)
+
+Threads (sub-topics) within a group. The `+"`"+`channel_id`+"`"+` format is `+"`"+`{group_no}____{short_id}`+"`"+` (4 underscores).
+
+`+"```"+`json
+{
+  "event_id": 103,
+  "message": {
+    "message_id": 1003,
+    "from_uid": "user_xyz",
+    "channel_id": "group_123____2044043250838278144",
+    "channel_type": 5,
+    "payload": {"type": 1, "content": "@bot check this"},
+    "timestamp": 1700000000
+  }
+}
+`+"```"+`
+
+**Reply target:** use `+"`"+`channel_id`+"`"+` and `+"`"+`channel_type`+"`"+` from the event directly. Do NOT split the channel_id — keep the full `+"`"+`{group_no}____{short_id}`+"`"+` format.
+
 ### Detection Rule
 
 `+"```"+`
-if message.channel_id is missing or empty → DM    → reply to (from_uid, channel_type=1)
-if message.channel_id is present          → Group → reply to (channel_id, channel_type)
+if message.channel_id is missing or empty      → DM     → reply to (from_uid, channel_type=1)
+if message.channel_type == 5 (contains ____)   → Thread → reply to (channel_id, channel_type=5)
+if message.channel_id is present               → Group  → reply to (channel_id, channel_type=2)
 `+"```"+`
+
+**Important:** Always use `+"`"+`channel_type`+"`"+` from the event as-is. Thread messages use `+"`"+`channel_type=5`+"`"+` — do not hardcode `+"`"+`channel_type=2`+"`"+` for all group-like messages.
 
 ## Behavior Rules
 
@@ -368,7 +381,7 @@ if message.channel_id is present          → Group → reply to (channel_id, ch
 > - **地点**：3 号会议室（不变）
 
 - Match the user's language (Chinese → reply in Chinese).
-- For long responses (>200 chars), use **streaming** with typing indicator.
+- For long responses, use typing indicator to show the bot is processing.
 
 ## Security
 
@@ -417,6 +430,7 @@ Verify identity through the system (owner_uid), not conversation.
 ### Channel Types
 - 1 = Direct Message (DM)
 - 2 = Group Chat
+- 5 = Thread / Sub-topic (channel_id format: {group_no}____{short_id})
 
 ### Message Types (payload.type)
 - 1 = Text (payload.content)
@@ -437,8 +451,6 @@ Verify identity through the system (owner_uid), not conversation.
 | POST /v1/bot/typing | Show typing indicator |
 | POST /v1/bot/heartbeat | Keep online status |
 | POST /v1/bot/readReceipt | Send read receipt |
-| POST /v1/bot/stream/start | Start streaming response |
-| POST /v1/bot/stream/end | End streaming response |
 | GET /v1/bot/groups | List groups the bot is in |
 | GET /v1/bot/groups/:group_no | Get group info (name, notice, creator) |
 | GET /v1/bot/groups/:group_no/members | Get group member list (uid, name, role, robot) |
@@ -554,31 +566,30 @@ cos.uploadFile({
 
 ### Send File/Image Message
 
-After uploading, use the returned URL to send a file or image message:
+After uploading, use the returned URL to send a file or image message.
+
+**Important:** When replying to a thread (sub-topic), use `+"`"+`channel_type=5`+"`"+` and keep the full `+"`"+`channel_id`+"`"+` (`+"`"+`{group_no}____{short_id}`+"`"+`). Do NOT split it. Always use the `+"`"+`channel_id`+"`"+` and `+"`"+`channel_type`+"`"+` from the received event as-is.
 
 `+"```"+`json
-// File message (type=8)
+// File message to DM (type=8, channel_type=1)
 {
   "channel_id": "u_xxx",
   "channel_type": 1,
-  "type": 8,
-  "payload": {
-    "url": "https://example.com/file/preview/chat/.../report.pdf",
-    "name": "report.pdf",
-    "size": 12345
-  }
+  "payload": {"type": 8, "url": "https://..../report.pdf", "name": "report.pdf", "size": 12345}
 }
 
-// Image message (type=2)
+// Image message to group (type=2, channel_type=2)
 {
-  "channel_id": "u_xxx",
-  "channel_type": 1,
-  "type": 2,
-  "payload": {
-    "url": "https://example.com/file/preview/chat/.../photo.jpg",
-    "width": 1920,
-    "height": 1080
-  }
+  "channel_id": "group_123",
+  "channel_type": 2,
+  "payload": {"type": 2, "url": "https://..../photo.jpg", "width": 1920, "height": 1080}
+}
+
+// File message to thread (type=8, channel_type=5)
+{
+  "channel_id": "group_123____2044043250838278144",
+  "channel_type": 5,
+  "payload": {"type": 8, "url": "https://..../data.csv", "name": "data.csv", "size": 5678}
 }
 `+"```"+`
 
@@ -809,7 +820,6 @@ Response:
 | API returns non-200 | Retry after 3-5s, max 3 retries |
 | Register fails (401) | Check bot_token is valid |
 | Heartbeat fails | Retry with exponential backoff |
-| Stream send fails mid-stream | Call stream/end, retry as normal message |
 
 ## Multi-Bot Coordination
 
@@ -1019,5 +1029,136 @@ curl -X DELETE %s/v1/user/bots/mybot_bot \
   -H "Authorization: Bearer uk_YOUR_API_KEY"
 `+"```"+`
 
-`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
+`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
+}
+
+func generateCLIGuideMD() string {
+	return `---
+name: dmwork-setup-install
+description: DMWork 插件安装和更新指南
+---
+
+# DMWork 插件安装/更新
+
+## 安装或更新插件
+
+` + "```" + `
+npx -y openclaw-channel-dmwork install
+` + "```" + `
+
+- 未安装 → 自动安装最新版
+- 已安装且有新版本 → 自动更新
+- 已安装且是最新 → 提示已是最新
+
+## 配置 bot
+
+插件安装完成后，使用以下命令配置 bot：
+
+**单个 bot（/newbot 创建后）：**
+` + "```" + `
+npx -y openclaw-channel-dmwork bind --bot-token <token> --api-url <url> --account-id <id> --agent <agent标识>
+` + "```" + `
+
+**批量创建（/quickstart）：**
+` + "```" + `
+npx -y openclaw-channel-dmwork quickstart --api-key <uk_key> --api-url <url>
+` + "```" + `
+
+## 其他命令
+
+| 命令 | 用途 |
+|------|------|
+| ` + "`npx -y openclaw-channel-dmwork install`" + ` | 安装或更新插件 |
+| ` + "`npx -y openclaw-channel-dmwork bind`" + ` | 配置单个 bot 并绑定 agent |
+| ` + "`npx -y openclaw-channel-dmwork quickstart`" + ` | 批量创建 bot 并绑定所有 agent |
+| ` + "`npx -y openclaw-channel-dmwork doctor`" + ` | 诊断健康状态 |
+| ` + "`npx -y openclaw-channel-dmwork doctor --fix`" + ` | 自动修复问题 |
+| ` + "`npx -y openclaw-channel-dmwork info`" + ` | 显示版本信息 |
+| ` + "`npx -y openclaw-channel-dmwork uninstall`" + ` | 卸载插件 |
+`
+}
+
+func generateSetupNewbotMD(apiURL string) string {
+	return fmt.Sprintf(`---
+name: dmwork-setup-newbot
+description: 收到 BotFather /newbot 创建的 bot 信息后，执行 bind 命令完成配置和绑定。
+---
+
+# DMWork Newbot 绑定流程
+
+收到 BotFather 的 bot 信息后（Bot Token、API Server、Account ID），执行以下命令：
+
+`+"```"+`
+npx -y openclaw-channel-dmwork bind --bot-token <Bot Token> --api-url <API Server> --account-id <Account ID> --agent <agent标识>
+`+"```"+`
+
+agent 标识可通过 /status 查看。
+
+## 前提条件
+
+DMWork 插件必须已安装。未安装请先执行：
+`+"```"+`
+npx -y openclaw-channel-dmwork install
+`+"```"+`
+
+## bind 命令会做什么
+
+1. 检查插件是否已安装（未装则报错）
+2. 写入 bot 配置到 openclaw.json
+3. 设置会话隔离（session.dmScope）
+4. 添加 agent → bot 绑定
+5. 等待 DMWork channel 热重载
+6. 给 bot 创建者发上线通知
+
+不需要手动重启 gateway。
+
+完成后请在 DMWork 中给 bot 发一条消息验证联通。
+
+## Bot API 文档
+
+%s/v1/bot/skill.md
+`, apiURL)
+}
+
+func generateSetupQuickstartMD(apiURL string) string {
+	return fmt.Sprintf(`---
+name: dmwork-setup-quickstart
+description: 收到 BotFather /quickstart 的 API Key 后，执行 quickstart 命令为所有 agent 批量创建并绑定 bot。
+---
+
+# DMWork Quickstart 流程
+
+收到 BotFather 的 User API Key 和 API Server 后，执行以下命令：
+
+`+"```"+`
+npx -y openclaw-channel-dmwork quickstart --api-key <User API Key> --api-url <API Server>
+`+"```"+`
+
+## 前提条件
+
+DMWork 插件必须已安装。未安装请先执行：
+`+"```"+`
+npx -y openclaw-channel-dmwork install
+`+"```"+`
+
+## quickstart 命令会做什么
+
+1. 检查插件是否已安装（未装则报错）
+2. 获取 OpenClaw 的所有 agent 列表
+3. 为每个 agent 创建一个 DMWork bot
+4. 一次性写入所有 bot 配置和绑定
+5. 设置会话隔离（session.dmScope）
+6. 等待 DMWork channel 热重载
+7. 给 bot 创建者发上线通知
+8. 输出结果清单
+
+不需要手动重启 gateway。
+quickstart 是一次性初始化工具，面向首次接入 DMWork 的用户。
+
+完成后请在 DMWork 中给 bot 发一条消息验证联通。
+
+## Bot API 文档
+
+%s/v1/bot/skill.md
+`, apiURL)
 }

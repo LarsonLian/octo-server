@@ -61,7 +61,7 @@ func (sc *ServiceCOS) getClient() (*minio.Client, error) {
 }
 
 // UploadFile 上传文件到腾讯云COS
-func (sc *ServiceCOS) UploadFile(filePath string, contentType string, copyFileWriter func(io.Writer) error) (map[string]interface{}, error) {
+func (sc *ServiceCOS) UploadFile(filePath string, contentType string, contentDisposition string, copyFileWriter func(io.Writer) error) (map[string]interface{}, error) {
 	buff := bytes.NewBuffer(make([]byte, 0))
 	err := copyFileWriter(buff)
 	if err != nil {
@@ -79,11 +79,16 @@ func (sc *ServiceCOS) UploadFile(filePath string, contentType string, copyFileWr
 	// COS 单 bucket 模式：保留完整路径（含 chat/ 等原始 bucket 名），用 prefix 区分环境
 	fileName := sc.withPrefix(filePath)
 
-	ctx := context.Background()
-	n, err := client.PutObject(ctx, bucketName, fileName, buff, int64(buff.Len()), minio.PutObjectOptions{
+	opts := minio.PutObjectOptions{
 		ContentType: contentType,
 		PartSize:    10 * 1024 * 1024,
-	})
+	}
+	if contentDisposition != "" {
+		opts.ContentDisposition = contentDisposition
+	}
+
+	ctx := context.Background()
+	n, err := client.PutObject(ctx, bucketName, fileName, buff, int64(buff.Len()), opts)
 	if err != nil {
 		sc.Error("上传文件到COS失败", zap.Error(err))
 		return map[string]interface{}{
@@ -120,6 +125,81 @@ func (sc *ServiceCOS) GetFile(ph string) (io.ReadCloser, string, error) {
 	return obj, stat.ContentType, nil
 }
 
+// PresignedPutURL 生成预签名 PUT URL，用于客户端直传 COS。
+// 上传和下载都使用 BucketURL 配置的域名，配置源站域名即可支持 PUT。
+func (sc *ServiceCOS) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (uploadURL string, downloadURL string, err error) {
+	cosConfig := sc.ctx.GetConfig().COS
+	client, err := sc.getClient()
+	if err != nil {
+		return "", "", err
+	}
+
+	key := sc.withPrefix(objectPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var presigned *url.URL
+	if contentDisposition != "" {
+		headers := http.Header{}
+		headers.Set("Content-Disposition", contentDisposition)
+		presigned, err = client.PresignHeader(ctx, http.MethodPut, cosConfig.Bucket, key, expires, nil, headers)
+	} else {
+		presigned, err = client.PresignedPutObject(ctx, cosConfig.Bucket, key, expires)
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("生成预签名URL失败: %w", err)
+	}
+
+	// 上传和下载统一使用 BucketURL 配置的域名
+	if customBase := strings.TrimSpace(cosConfig.BucketURL); customBase != "" {
+		parsed, parseErr := url.Parse(strings.TrimRight(customBase, "/"))
+		if parseErr == nil {
+			presigned.Host = parsed.Host
+			presigned.Scheme = parsed.Scheme
+		}
+	}
+
+	uploadURL = presigned.String()
+
+	downloadURL, dlErr := sc.DownloadURL(objectPath, "")
+	if dlErr != nil {
+		sc.Warn("生成下载URL失败", zap.Error(dlErr))
+	}
+	return uploadURL, downloadURL, nil
+}
+
+// extractFilenameFromDisposition 从 Content-Disposition 头中提取文件名。
+// 优先解析 RFC 5987 的 filename*=UTF-8''xxx 格式，其次解析 filename="xxx" 格式。
+func extractFilenameFromDisposition(cd string) string {
+	if cd == "" {
+		return ""
+	}
+
+	// 优先匹配 filename*=UTF-8''xxx
+	if idx := strings.Index(cd, "filename*=UTF-8''"); idx >= 0 {
+		val := cd[idx+len("filename*=UTF-8''"):]
+		// 截取到分号或末尾
+		if semi := strings.Index(val, ";"); semi >= 0 {
+			val = val[:semi]
+		}
+		val = strings.TrimSpace(val)
+		if decoded, err := url.PathUnescape(val); err == nil && decoded != "" {
+			return decoded
+		}
+	}
+
+	// 回退：匹配 filename="xxx"
+	if idx := strings.Index(cd, "filename=\""); idx >= 0 {
+		val := cd[idx+len("filename=\""):]
+		if end := strings.Index(val, "\""); end >= 0 {
+			return val[:end]
+		}
+	}
+
+	return ""
+}
+
 func (sc *ServiceCOS) DownloadURL(ph string, filename string) (string, error) {
 	cosConfig := sc.ctx.GetConfig().COS
 
@@ -130,11 +210,41 @@ func (sc *ServiceCOS) DownloadURL(ph string, filename string) (string, error) {
 
 	ph = sc.withPrefix(ph)
 	result, _ := url.JoinPath(downloadBase, ph)
-	if strings.TrimSpace(filename) == "" {
-		return result, nil
+	return result, nil
+}
+
+// PresignedGetURL 生成预签名 GET URL，带 response-content-disposition 用于下载。
+func (sc *ServiceCOS) PresignedGetURL(objectPath string, filename string, disposition string, expires time.Duration) (string, error) {
+	cosConfig := sc.ctx.GetConfig().COS
+	client, err := sc.getClient()
+	if err != nil {
+		return "", err
 	}
-	vals := url.Values{}
-	encodedFilename := "UTF-8''" + url.QueryEscape(filename)
-	vals.Set("response-content-disposition", fmt.Sprintf("attachment; filename*=%s", encodedFilename))
-	return fmt.Sprintf("%s?%s", result, vals.Encode()), nil
+
+	key := sc.withPrefix(objectPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if disposition != "inline" {
+		disposition = "attachment"
+	}
+	encodedFilename := "UTF-8''" + rfc5987Encode(filename)
+	params := url.Values{}
+	params.Set("response-content-disposition", fmt.Sprintf("%s; filename*=%s", disposition, encodedFilename))
+
+	presigned, err := client.PresignHeader(ctx, http.MethodGet, cosConfig.Bucket, key, expires, params, nil)
+	if err != nil {
+		return "", fmt.Errorf("生成预签名GET URL失败: %w", err)
+	}
+
+	if customBase := strings.TrimSpace(cosConfig.BucketURL); customBase != "" {
+		parsed, parseErr := url.Parse(strings.TrimRight(customBase, "/"))
+		if parseErr == nil {
+			presigned.Host = parsed.Host
+			presigned.Scheme = parsed.Scheme
+		}
+	}
+
+	return presigned.String(), nil
 }

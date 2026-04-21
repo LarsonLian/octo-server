@@ -148,6 +148,12 @@ func TestGenerateSkillMD(t *testing.T) {
 	assert.Contains(t, md, "/v1/bot/heartbeat")
 	assert.Contains(t, md, "/v1/bot/typing")
 	assert.Contains(t, md, "Authorization: Bearer")
+
+	// Thread/子区相关文档必须存在
+	assert.Contains(t, md, "channel_type = 5", "skill.md must document thread channel_type")
+	assert.Contains(t, md, "group_no}____{short_id}", "skill.md must document thread channel_id format")
+	assert.Contains(t, md, "Do NOT split the channel_id", "skill.md must warn against splitting thread channel_id")
+	assert.Contains(t, md, "5 = Thread", "Reference section must list channel_type 5")
 }
 
 func TestDeriveWSURL(t *testing.T) {

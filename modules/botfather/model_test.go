@@ -93,39 +93,6 @@ func TestBotEventAckReq_JSON(t *testing.T) {
 	assert.Equal(t, int64(42), decoded.EventID)
 }
 
-func TestBotStreamStartReq_JSON(t *testing.T) {
-	req := BotStreamStartReq{
-		ChannelID:   "ch_001",
-		ChannelType: 1,
-		Payload:     []byte("base64payload"),
-	}
-
-	data, err := json.Marshal(req)
-	assert.NoError(t, err)
-
-	var decoded BotStreamStartReq
-	err = json.Unmarshal(data, &decoded)
-	assert.NoError(t, err)
-	assert.Equal(t, "ch_001", decoded.ChannelID)
-	assert.Equal(t, uint8(1), decoded.ChannelType)
-}
-
-func TestBotStreamEndReq_JSON(t *testing.T) {
-	req := BotStreamEndReq{
-		StreamNo:    "stream_001",
-		ChannelID:   "ch_001",
-		ChannelType: 1,
-	}
-
-	data, err := json.Marshal(req)
-	assert.NoError(t, err)
-
-	var decoded BotStreamEndReq
-	err = json.Unmarshal(data, &decoded)
-	assert.NoError(t, err)
-	assert.Equal(t, req, decoded)
-}
-
 func TestBotReadReceiptReq_JSON(t *testing.T) {
 	req := BotReadReceiptReq{
 		ChannelID:   "ch_001",
@@ -197,23 +164,6 @@ func TestBotEventsReq_Defaults(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, int64(0), decoded.EventID)
 	assert.Equal(t, 0, decoded.Limit)
-}
-
-func TestBotStreamStartReq_EmptyPayload(t *testing.T) {
-	req := BotStreamStartReq{
-		ChannelID:   "ch_001",
-		ChannelType: 2,
-	}
-
-	data, err := json.Marshal(req)
-	assert.NoError(t, err)
-
-	var decoded BotStreamStartReq
-	err = json.Unmarshal(data, &decoded)
-	assert.NoError(t, err)
-	assert.Equal(t, "ch_001", decoded.ChannelID)
-	assert.Equal(t, uint8(2), decoded.ChannelType)
-	assert.Nil(t, decoded.Payload)
 }
 
 func TestBotReadReceiptReq_EmptyMessageIDs(t *testing.T) {

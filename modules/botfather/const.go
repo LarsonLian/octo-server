@@ -42,6 +42,7 @@ const (
 	CmdReject         = "/reject"
 	CmdPending        = "/pending"
 	CmdQuickstart     = "/quickstart"
+	CmdInstall        = "/install"
 )
 
 // 对话状态

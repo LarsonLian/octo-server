@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -15,6 +16,11 @@ import (
 )
 
 // ---------- helpers ----------
+
+func resetDefaultCategoryName() {
+	_defaultCategoryNameOnce = sync.Once{}
+	_defaultCategoryName = ""
+}
 
 // seedSpaceAndMember inserts a space and makes testutil.UID a member with given role.
 func seedSpaceAndMember(t *testing.T, f *Category, spaceID string, role int) {
@@ -139,18 +145,18 @@ func TestCategory_List(t *testing.T) {
 	assert.Equal(t, http.StatusOK, wl.Code)
 
 	cats := parseJSONArray(t, wl)
-	// should have 3 entries: 工作, 生活, 未分类
+	// should have 3 entries: 工作, 生活, 默认分组(default)
 	assert.Equal(t, 3, len(cats))
 
-	// last entry is 未分类
-	assert.Nil(t, cats[2]["category_id"])
-	assert.Equal(t, "未分类", cats[2]["name"])
+	// last entry is 默认分组 (now with a real ID)
+	assert.NotNil(t, cats[2]["category_id"])
+	assert.Equal(t, defaultCategoryNameFallback, cats[2]["name"])
 
 	// 工作 category should have 1 group
 	workGroups := cats[0]["groups"].([]interface{})
 	assert.Equal(t, 1, len(workGroups))
 
-	// 未分类 should have 1 group
+	// 默认分组 should have 1 group
 	uncatGroups := cats[2]["groups"].([]interface{})
 	assert.Equal(t, 1, len(uncatGroups))
 }
@@ -262,14 +268,13 @@ func TestCategory_Sort(t *testing.T) {
 	assert.Equal(t, http.StatusOK, wl.Code)
 	cats := parseJSONArray(t, wl)
 
+	assert.Equal(t, 3, len(cats))
 	// first named category should be C (sort=0)
 	assert.Equal(t, "C", cats[0]["name"])
 	// second should be A (sort=1)
 	assert.Equal(t, "A", cats[1]["name"])
 	// third should be B (sort=2)
 	assert.Equal(t, "B", cats[2]["name"])
-	// last is always 未分类
-	assert.Equal(t, "未分类", cats[3]["name"])
 }
 
 func TestCategory_MoveGroupToCategory(t *testing.T) {
@@ -692,13 +697,438 @@ func TestCategory_ListEmpty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, wl.Code)
 
 	cats := parseJSONArray(t, wl)
-	// should have 1 entry: 未分类 only
+	// no groups → no default category → empty list
+	assert.Equal(t, 0, len(cats))
+}
+
+// ---------- Default Category (is_default=1) Tests ----------
+
+func TestCategory_ListAutoCreatesDefault(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-default-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+
+	// create a group (will be uncategorized)
+	groupNo := "group-default-001"
+	seedGroup(t, f, groupNo, spaceID)
+
+	// list — should auto-create default category with real UUID
+	wl := doRequest(t, s.GetRoute(), "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+
+	cats := parseJSONArray(t, wl)
 	assert.Equal(t, 1, len(cats))
-	assert.Nil(t, cats[0]["category_id"])
-	assert.Equal(t, "未分类", cats[0]["name"])
+
+	// default category should have a real string ID (not null)
+	assert.NotNil(t, cats[0]["category_id"])
+	catID, ok := cats[0]["category_id"].(string)
+	assert.True(t, ok)
+	assert.NotEmpty(t, catID)
+	assert.Equal(t, defaultCategoryNameFallback, cats[0]["name"])
+
+	// the uncategorized group should be under this default category
+	groups := cats[0]["groups"].([]interface{})
+	assert.Equal(t, 1, len(groups))
+
+	// verify DB row has is_default=1 and stores placeholder (not display name)
+	defaultCat, err := f.db.queryDefaultCategory(testutil.UID, spaceID)
+	assert.NoError(t, err)
+	assert.NotNil(t, defaultCat)
+	assert.Equal(t, intPtr(1), defaultCat.IsDefault)
+	assert.Equal(t, defaultCategoryNamePlaceholder, defaultCat.Name)
+}
+
+func TestCategory_ListDefaultIdempotent(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-default-idem-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	seedGroup(t, f, "group-idem-001", spaceID)
+	route := s.GetRoute()
+
+	// list twice — should not create duplicate default categories
+	wl1 := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl1.Code)
+	cats1 := parseJSONArray(t, wl1)
+
+	wl2 := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl2.Code)
+	cats2 := parseJSONArray(t, wl2)
+
+	// same default category ID both times
+	assert.Equal(t, cats1[0]["category_id"], cats2[0]["category_id"])
+	assert.Equal(t, len(cats1), len(cats2))
+}
+
+func TestCategory_ListWithCategoriesAndDefault(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-default-mixed-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	route := s.GetRoute()
+
+	// create a real category
+	wc := createCategory(t, route, spaceID, "工作")
+	assert.Equal(t, http.StatusOK, wc.Code)
+	cat := parseJSON(t, wc)
+	catID := cat["category_id"].(string)
+
+	// create two groups, assign one to the category
+	seedGroup(t, f, "group-mixed-001", spaceID)
+	seedGroup(t, f, "group-mixed-002", spaceID)
+	wm := doRequest(t, route, "PUT", "/v1/groups/group-mixed-001/category", map[string]string{
+		"category_id": catID,
+	})
+	assert.Equal(t, http.StatusOK, wm.Code)
+
+	// list
+	wl := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+	cats := parseJSONArray(t, wl)
+
+	// should have 2 entries: 工作 + 默认未分类
+	assert.Equal(t, 2, len(cats))
+
+	// find the default category
+	var defaultCat map[string]interface{}
+	for _, c := range cats {
+		if c["name"] == defaultCategoryNameFallback {
+			defaultCat = c
+		}
+	}
+	assert.NotNil(t, defaultCat)
+	assert.NotNil(t, defaultCat["category_id"])
+
+	// default should have 1 uncategorized group
+	groups := defaultCat["groups"].([]interface{})
+	assert.Equal(t, 1, len(groups))
+}
+
+func TestCategory_DeleteDefaultRejected(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-default-del-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	seedGroup(t, f, "group-default-del-001", spaceID)
+	route := s.GetRoute()
+
+	// list to trigger default creation
+	wl := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+	cats := parseJSONArray(t, wl)
+	defaultCatID := cats[0]["category_id"].(string)
+
+	// try to delete — should be rejected
+	wd := doRequest(t, route, "DELETE", "/v1/spaces/"+spaceID+"/categories/"+defaultCatID, nil)
+	assert.Equal(t, http.StatusBadRequest, wd.Code)
+	assert.Contains(t, wd.Body.String(), "默认分类不可删除")
+}
+
+func TestCategory_UpdateDefaultRejected(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-default-upd-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	seedGroup(t, f, "group-default-upd-001", spaceID)
+	route := s.GetRoute()
+
+	// list to trigger default creation
+	wl := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+	cats := parseJSONArray(t, wl)
+	defaultCatID := cats[0]["category_id"].(string)
+
+	// try to update — should be rejected
+	wu := doRequest(t, route, "PUT", "/v1/spaces/"+spaceID+"/categories/"+defaultCatID, map[string]string{"name": "改名"})
+	assert.Equal(t, http.StatusBadRequest, wu.Code)
+	assert.Contains(t, wu.Body.String(), "默认分类不可修改")
+}
+
+func TestCategory_SortWithDefault(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-default-sort-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	seedGroup(t, f, "group-default-sort-001", spaceID)
+	route := s.GetRoute()
+
+	// create two categories
+	wc1 := createCategory(t, route, spaceID, "A")
+	assert.Equal(t, http.StatusOK, wc1.Code)
+	cat1 := parseJSON(t, wc1)
+
+	wc2 := createCategory(t, route, spaceID, "B")
+	assert.Equal(t, http.StatusOK, wc2.Code)
+	cat2 := parseJSON(t, wc2)
+
+	// list to get the default category ID
+	wl := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+	cats := parseJSONArray(t, wl)
+
+	var defaultCatID string
+	for _, c := range cats {
+		if c["name"] == defaultCategoryNameFallback {
+			defaultCatID = c["category_id"].(string)
+		}
+	}
+	assert.NotEmpty(t, defaultCatID)
+
+	catID1 := cat1["category_id"].(string)
+	catID2 := cat2["category_id"].(string)
+
+	// sort: 未分类, B, A (put default first)
+	ws := doRequest(t, route, "PUT", "/v1/spaces/"+spaceID+"/categories/sort", map[string]interface{}{
+		"category_ids": []string{defaultCatID, catID2, catID1},
+	})
+	assert.Equal(t, http.StatusOK, ws.Code)
+
+	// verify order
+	wl2 := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl2.Code)
+	cats2 := parseJSONArray(t, wl2)
+
+	assert.Equal(t, 3, len(cats2))
+	assert.Equal(t, defaultCategoryNameFallback, cats2[0]["name"])
+	assert.Equal(t, "B", cats2[1]["name"])
+	assert.Equal(t, "A", cats2[2]["name"])
+}
+
+func TestCategory_DefaultNameFromEnv(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-default-env-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	seedGroup(t, f, "group-default-env-001", spaceID)
+
+	t.Setenv("DM_DEFAULT_CATEGORY_NAME", "自定义分组")
+	resetDefaultCategoryName()
+	t.Cleanup(resetDefaultCategoryName)
+
+	wl := doRequest(t, s.GetRoute(), "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+
+	cats := parseJSONArray(t, wl)
+	assert.Equal(t, 1, len(cats))
+	assert.Equal(t, "自定义分组", cats[0]["name"])
+}
+
+func TestCategory_DefaultNotCountedInLimit(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-default-limit-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	seedGroup(t, f, "group-default-limit-001", spaceID)
+	route := s.GetRoute()
+
+	// list to trigger default category creation
+	wl := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+
+	// create 20 normal categories — should all succeed
+	for i := 0; i < 20; i++ {
+		w := createCategory(t, route, spaceID, fmt.Sprintf("Cat-%d", i))
+		assert.Equal(t, http.StatusOK, w.Code, "creating category %d should succeed", i)
+	}
+
+	// 21st should fail
+	w := createCategory(t, route, spaceID, "Cat-20")
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestCategory_ListNoGroupsNoDefault(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-nogroups-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+
+	// list without any groups — no default category should be created
+	wl := doRequest(t, s.GetRoute(), "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+
+	cats := parseJSONArray(t, wl)
+	assert.Equal(t, 0, len(cats))
+
+	// verify no default row in DB
+	defaultCat, err := f.db.queryDefaultCategory(testutil.UID, spaceID)
+	assert.NoError(t, err)
+	assert.Nil(t, defaultCat)
+}
+
+func TestCategory_MoveGroupToDefaultCategory(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-movedefault-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	route := s.GetRoute()
+
+	seedGroup(t, f, "group-md-001", spaceID)
+	seedGroup(t, f, "group-md-002", spaceID)
+
+	// list to trigger default category creation
+	wl := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl.Code)
+	cats := parseJSONArray(t, wl)
+	assert.Equal(t, 1, len(cats))
+	defaultCatID := cats[0]["category_id"].(string)
+
+	// --- Phase 1: move one group into default, one stays uncategorized ---
+	wm := doRequest(t, route, "PUT", "/v1/groups/group-md-001/category", map[string]string{
+		"category_id": defaultCatID,
+	})
+	assert.Equal(t, http.StatusOK, wm.Code)
+
+	wl2 := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl2.Code)
+	cats2 := parseJSONArray(t, wl2)
+	assert.Equal(t, 1, len(cats2))
+
+	groups2 := cats2[0]["groups"].([]interface{})
+	assert.Equal(t, 2, len(groups2), "phase 1: default category should merge explicit + uncategorized")
+
+	// --- Phase 2: move all groups into default ---
+	wm2 := doRequest(t, route, "PUT", "/v1/groups/group-md-002/category", map[string]string{
+		"category_id": defaultCatID,
+	})
+	assert.Equal(t, http.StatusOK, wm2.Code)
+
+	wl3 := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl3.Code)
+	cats3 := parseJSONArray(t, wl3)
+	assert.Equal(t, 1, len(cats3))
+
+	groups3 := cats3[0]["groups"].([]interface{})
+	assert.Equal(t, 2, len(groups3), "phase 2: all groups explicitly in default should still appear")
+
+	// --- Phase 3: create a new group without category after all moved ---
+	seedGroup(t, f, "group-md-003", spaceID)
+
+	wl4 := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
+	assert.Equal(t, http.StatusOK, wl4.Code)
+	cats4 := parseJSONArray(t, wl4)
+	assert.Equal(t, 1, len(cats4))
+
+	groups4 := cats4[0]["groups"].([]interface{})
+	assert.Equal(t, 3, len(groups4), "phase 3: new uncategorized group should also appear alongside explicit ones")
 }
 
 // ---------- Edge Cases ----------
+
+func TestCategory_InsertDefaultCategoryIdempotent(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-idem-default-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+
+	// simulate concurrent inserts: call insertDefaultCategory twice with different UUIDs
+	m1 := &CategoryModel{
+		CategoryID: "default-uuid-001",
+		SpaceID:    spaceID,
+		UID:        testutil.UID,
+		Name:       defaultCategoryNamePlaceholder,
+		Sort:       0,
+	}
+	err = f.db.insertDefaultCategory(m1)
+	assert.NoError(t, err)
+
+	m2 := &CategoryModel{
+		CategoryID: "default-uuid-002",
+		SpaceID:    spaceID,
+		UID:        testutil.UID,
+		Name:       defaultCategoryNamePlaceholder,
+		Sort:       0,
+	}
+	err = f.db.insertDefaultCategory(m2)
+	assert.NoError(t, err)
+
+	// should only have 1 default category in DB
+	var count int
+	_, err = f.db.session.Select("count(*)").From("group_category").
+		Where("uid=? and space_id=? and is_default=1 and status=1", testutil.UID, spaceID).
+		Load(&count)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, count, "insertDefaultCategory should be idempotent — only one default row")
+}
+
+func TestCategory_UniqueIndexPreventsDefaultDuplicate(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-uidx-default-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+
+	// first insert succeeds
+	err = f.db.insertCategory(&CategoryModel{
+		CategoryID: "uidx-default-001",
+		SpaceID:    spaceID,
+		UID:        testutil.UID,
+		Name:       defaultCategoryNamePlaceholder,
+		Sort:       0,
+		Status:     1,
+		IsDefault:  intPtr(1),
+	})
+	assert.NoError(t, err)
+
+	// second insert with different ID but same (uid, space_id, is_default=1) should be rejected
+	err = f.db.insertCategory(&CategoryModel{
+		CategoryID: "uidx-default-002",
+		SpaceID:    spaceID,
+		UID:        testutil.UID,
+		Name:       defaultCategoryNamePlaceholder,
+		Sort:       0,
+		Status:     1,
+		IsDefault:  intPtr(1),
+	})
+	assert.Error(t, err, "unique index should prevent duplicate default categories")
+}
 
 func TestCategory_SortCountMismatch(t *testing.T) {
 	s, ctx := testutil.NewTestServer()

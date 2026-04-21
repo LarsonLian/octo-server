@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"path"
@@ -26,6 +27,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis"
@@ -96,8 +98,12 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 	// 启动时批量同步所有 bot 的 token 到 WuKongIM（防止 WuKongIM 重启后 token 丢失）
 	go bf.syncAllBotTokens()
 
-	// skill.md 端点（无需认证）
+	// 文档端点（无需认证）
 	r.GET("/v1/bot/skill.md", bf.skillMD)
+	r.GET("/v1/bot/cli-guide.md", bf.cliGuideMD) // 保留旧路径兼容
+	r.GET("/v1/bot/setup-install.md", bf.cliGuideMD)
+	r.GET("/v1/bot/setup-newbot.md", bf.setupNewbotMD)
+	r.GET("/v1/bot/setup-quickstart.md", bf.setupQuickstartMD)
 
 	// register 端点（只需bot token，不走authBot中间件组）
 	r.POST("/v1/bot/register", bf.register)
@@ -110,8 +116,7 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.POST("/readReceipt", bf.readReceipt)
 		botAPI.POST("/events", bf.getEvents)
 		botAPI.POST("/events/:event_id/ack", bf.eventAck)
-		botAPI.POST("/stream/start", bf.streamStart)
-		botAPI.POST("/stream/end", bf.streamEnd)
+		// stream/start and stream/end removed — DMWork does not support streaming
 		botAPI.POST("/heartbeat", bf.heartbeat)
 		botAPI.POST("/messages/sync", bf.syncMessages)
 		botAPI.GET("/groups", bf.getGroups)
@@ -132,12 +137,15 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.GET("/groups/:group_no/threads/:short_id/members", bf.botListThreadMembers)
 		botAPI.POST("/groups/:group_no/threads/:short_id/join", bf.botJoinThread)
 		botAPI.POST("/groups/:group_no/threads/:short_id/leave", bf.botLeaveThread)
+		botAPI.GET("/groups/:group_no/threads/:short_id/md", bf.botGetThreadMd)
+		botAPI.PUT("/groups/:group_no/threads/:short_id/md", bf.botUpdateThreadMd)
 		botAPI.POST("/setCommands", bf.setCommands)
 		// Bot File API (#433)
 		botAPI.POST("/file/upload", bf.botUploadFile)
 		botAPI.POST("/upload", bf.botUploadFile) // 兼容旧路径 (/v1/bot/upload)
 		botAPI.GET("/file/download/*path", bf.botFileDownload)
 		botAPI.GET("/upload/credentials", bf.botUploadCredentials) // STS 临时密钥签发
+		botAPI.GET("/upload/presigned", bf.botUploadPresigned)    // 预签名上传 URL 签发
 		botAPI.POST("/message/edit", bf.botMessageEdit)            // Bot 编辑消息
 		botAPI.GET("/user/info", bf.getUserInfo)                    // 查询用户基本信息 (#852)
 		// Voice context API
@@ -175,6 +183,37 @@ func (bf *BotFather) skillMD(c *wkhttp.Context) {
 	}
 	wsURL := deriveWSURL(cfg)
 	content := generateSkillMD(apiURL, wsURL)
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, content)
+}
+
+// cliGuideMD 返回 CLI 使用指南
+func (bf *BotFather) cliGuideMD(c *wkhttp.Context) {
+	content := generateCLIGuideMD()
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, content)
+}
+
+// setupNewbotMD 返回 /newbot 设置流程文档
+func (bf *BotFather) setupNewbotMD(c *wkhttp.Context) {
+	cfg := bf.ctx.GetConfig()
+	apiURL := cfg.External.BaseURL
+	if strings.TrimSpace(apiURL) == "" {
+		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
+	}
+	content := generateSetupNewbotMD(apiURL)
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, content)
+}
+
+// setupQuickstartMD 返回 /quickstart 设置流程文档
+func (bf *BotFather) setupQuickstartMD(c *wkhttp.Context) {
+	cfg := bf.ctx.GetConfig()
+	apiURL := cfg.External.BaseURL
+	if strings.TrimSpace(apiURL) == "" {
+		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
+	}
+	content := generateSetupQuickstartMD(apiURL)
 	c.Header("Content-Type", "text/markdown; charset=utf-8")
 	c.String(http.StatusOK, content)
 }
@@ -324,6 +363,7 @@ func (bf *BotFather) initBotFatherUser() {
 // registerBotFatherCommands 注册BotFather自身的命令列表
 func (bf *BotFather) registerBotFatherCommands() {
 	commands := []map[string]string{
+		{"command": CmdInstall, "description": "安装/更新 DMWork 插件"},
 		{"command": CmdQuickstart, "description": "AI Agent 快速入门"},
 		{"command": CmdNewBot, "description": "创建新机器人"},
 		{"command": CmdMyBots, "description": "查看我的机器人"},
@@ -568,6 +608,35 @@ func (bf *BotFather) register(c *wkhttp.Context) {
 	// 更新缓存
 	if robot.IMTokenCache != imToken {
 		bf.db.updateRobotIMTokenCache(robot.RobotID, imToken)
+	}
+
+	// 可选解析版本信息（兼容旧客户端空 body）
+	// 只更新实际传入的非空字段，缺失字段保持现有值
+	var req BotRegisterReq
+	_ = c.ShouldBindJSON(&req) // 忽略解析错误
+	if req.AgentPlatform != "" || req.AgentVersion != "" || req.PluginVersion != "" {
+		// Merge: 缺失字段用现有值填充
+		merged := struct{ platform, version, plugin string }{
+			platform: req.AgentPlatform,
+			version:  req.AgentVersion,
+			plugin:   req.PluginVersion,
+		}
+		if merged.platform == "" {
+			merged.platform = robot.AgentPlatform
+		}
+		if merged.version == "" {
+			merged.version = robot.AgentVersion
+		}
+		if merged.plugin == "" {
+			merged.plugin = robot.PluginVersion
+		}
+		if robot.AgentPlatform != merged.platform ||
+			robot.AgentVersion != merged.version ||
+			robot.PluginVersion != merged.plugin {
+			if updateErr := bf.db.updateRobotAgentInfo(robot.RobotID, merged.platform, merged.version, merged.plugin); updateErr != nil {
+				bf.Warn("更新Agent信息失败", zap.Error(updateErr), zap.String("robotID", robot.RobotID))
+			}
+		}
 	}
 
 	cfg := bf.ctx.GetConfig()
@@ -1049,58 +1118,6 @@ func (bf *BotFather) eventAck(c *wkhttp.Context) {
 	c.ResponseOK()
 }
 
-// ========== Bot Stream API ==========
-
-func (bf *BotFather) streamStart(c *wkhttp.Context) {
-	var req BotStreamStartReq
-	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("数据格式有误"))
-		return
-	}
-
-	robotID := getRobotIDFromContext(c)
-	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
-	streamNo, err := bf.ctx.IMStreamStart(config.MessageStreamStartReq{
-		Header: config.MsgHeader{
-			RedDot: 1,
-		},
-		FromUID:     robotID,
-		ChannelID:   channelID,
-		ChannelType: req.ChannelType,
-		Payload:     req.Payload,
-	})
-	if err != nil {
-		bf.Error("stream start失败", zap.Error(err))
-		c.ResponseError(errors.New("stream start失败"))
-		return
-	}
-	c.Response(gin.H{
-		"stream_no": streamNo,
-	})
-}
-
-func (bf *BotFather) streamEnd(c *wkhttp.Context) {
-	var req BotStreamEndReq
-	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("数据格式有误"))
-		return
-	}
-
-	robotID := getRobotIDFromContext(c)
-	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
-	err := bf.ctx.IMStreamEnd(config.MessageStreamEndReq{
-		StreamNo:    req.StreamNo,
-		ChannelID:   channelID,
-		ChannelType: req.ChannelType,
-	})
-	if err != nil {
-		bf.Error("stream end失败", zap.Error(err))
-		c.ResponseError(errors.New("stream end失败"))
-		return
-	}
-	c.ResponseOK()
-}
-
 // ========== Bot Heartbeat API ==========
 
 func (bf *BotFather) heartbeat(c *wkhttp.Context) {
@@ -1138,10 +1155,7 @@ func (bf *BotFather) botProxyFile(c *wkhttp.Context) {
 
 	filename := c.Query("filename")
 	if filename == "" {
-		parts := strings.Split(ph, "/")
-		if len(parts) > 0 {
-			filename = parts[len(parts)-1]
-		}
+		filename = pkgutil.ExtractFilenameFromPath(ph)
 	}
 
 	downloadURL, err := bf.fileService.DownloadURL(ph, filename)
@@ -1183,7 +1197,7 @@ func (bf *BotFather) botUploadFile(c *wkhttp.Context) {
 
 	storagePath := fmt.Sprintf("%s%s", fileType, path)
 	contentType := "application/octet-stream"
-	_, err = bf.fileService.UploadFile(storagePath, contentType, func(w io.Writer) error {
+	_, err = bf.fileService.UploadFile(storagePath, contentType, "", func(w io.Writer) error {
 		_, err := io.Copy(w, multipartFile)
 		return err
 	})
@@ -1223,10 +1237,7 @@ func (bf *BotFather) botFileDownload(c *wkhttp.Context) {
 
 	filename := c.Query("filename")
 	if filename == "" {
-		parts := strings.Split(ph, "/")
-		if len(parts) > 0 {
-			filename = parts[len(parts)-1]
-		}
+		filename = pkgutil.ExtractFilenameFromPath(ph)
 	}
 
 	downloadURL, err := bf.fileService.DownloadURL(ph, filename)
@@ -1239,6 +1250,7 @@ func (bf *BotFather) botFileDownload(c *wkhttp.Context) {
 }
 
 // sanitizeBotFilePath 规范化文件路径，防止路径遍历攻击
+// TODO: sanitizeBotFilePath uses QueryUnescape but upload uses PathEscape. These handle "+" differently. Consider unifying to PathUnescape.
 func sanitizeBotFilePath(p string) (string, error) {
 	// 循环解码防止双重/多重 URL 编码绕过
 	decoded := p
@@ -1317,6 +1329,13 @@ func (bf *BotFather) botUploadCredentials(c *wkhttp.Context) {
 		c.ResponseError(errors.New("filename 不能为空"))
 		return
 	}
+	filename = filepath.Base(filename)
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" || file.IsBlockedExtension(ext) || !file.IsAllowedExtension(ext) {
+		c.ResponseError(errors.New("不支持的文件类型"))
+		return
+	}
 
 	cosConfig := bf.ctx.GetConfig().COS
 	if cosConfig.SecretID == "" || cosConfig.SecretKey == "" || cosConfig.Bucket == "" {
@@ -1325,9 +1344,8 @@ func (bf *BotFather) botUploadCredentials(c *wkhttp.Context) {
 		return
 	}
 
-	// 生成对象 key：{prefix}/chat/{timestamp}/{random}_{filename}
 	prefix := strings.TrimSpace(cosConfig.Prefix)
-	objectPath := fmt.Sprintf("chat/%d/%s_%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
+	objectPath := fmt.Sprintf("chat/%d/%s/%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
 	var key string
 	if prefix != "" {
 		key = path.Join(prefix, objectPath)
@@ -1338,7 +1356,6 @@ func (bf *BotFather) botUploadCredentials(c *wkhttp.Context) {
 	bucket := cosConfig.Bucket
 	region := cosConfig.Region
 
-	// 从 bucket 名中提取 appId（格式：bucketname-appid）
 	appId := ""
 	if idx := strings.LastIndex(bucket, "-"); idx > 0 {
 		appId = bucket[idx+1:]
@@ -1349,7 +1366,6 @@ func (bf *BotFather) botUploadCredentials(c *wkhttp.Context) {
 		return
 	}
 
-	// 使用 STS SDK 生成临时密钥
 	client := sts.NewClient(cosConfig.SecretID, cosConfig.SecretKey, nil)
 	opt := &sts.CredentialOptions{
 		DurationSeconds: 1800,
@@ -1357,11 +1373,9 @@ func (bf *BotFather) botUploadCredentials(c *wkhttp.Context) {
 		Policy: &sts.CredentialPolicy{
 			Statement: []sts.CredentialPolicyStatement{
 				{
-					Action: []string{"cos:PutObject"},
-					Effect: "allow",
-					Resource: []string{
-						fmt.Sprintf("qcs::cos:%s:uid/%s:%s/%s", region, appId, bucket, key),
-					},
+					Action:   []string{"cos:PutObject"},
+					Effect:   "allow",
+					Resource: []string{fmt.Sprintf("qcs::cos:%s:uid/%s:%s/%s", region, appId, bucket, key)},
 				},
 			},
 		},
@@ -1386,6 +1400,46 @@ func (bf *BotFather) botUploadCredentials(c *wkhttp.Context) {
 		"startTime":   res.StartTime,
 		"expiredTime": res.ExpiredTime,
 		"cdnBaseUrl":  cosConfig.BucketURL,
+	})
+}
+
+// botUploadPresigned 签发预签名 PUT URL，供客户端直传文件（/v1/bot/upload/presigned）
+func (bf *BotFather) botUploadPresigned(c *wkhttp.Context) {
+	filename := c.Query("filename")
+	if strings.TrimSpace(filename) == "" {
+		c.ResponseError(errors.New("filename 不能为空"))
+		return
+	}
+	filename = filepath.Base(filename)
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" || file.IsBlockedExtension(ext) || !file.IsAllowedExtension(ext) {
+		c.ResponseError(errors.New("不支持的文件类型"))
+		return
+	}
+
+	objectPath := fmt.Sprintf("chat/%d/%s/%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	expiry := 30 * time.Minute
+	uploadURL, downloadURL, err := bf.fileService.PresignedPutURL(objectPath, contentType, "", expiry)
+	if err != nil {
+		bf.Error("生成预签名上传URL失败", zap.Error(err))
+		c.ResponseError(errors.New("生成上传URL失败"))
+		return
+	}
+
+	c.Response(gin.H{
+		"method":      "PUT",
+		"uploadUrl":   uploadURL,
+		"downloadUrl": downloadURL,
+		"contentType": contentType,
+		"key":         objectPath,
+		"expiresIn":   int(expiry.Seconds()),
+		"expiredTime": time.Now().Add(expiry).Unix(),
 	})
 }
 

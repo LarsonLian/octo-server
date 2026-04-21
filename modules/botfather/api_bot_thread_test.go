@@ -301,3 +301,191 @@ func TestBotThreadAPI_Unauthorized(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
+
+// ==================== Bot Thread GROUP.md 测试 ====================
+
+// setupBotThreadMdTestData 创建 Bot Thread GROUP.md 测试数据
+// 返回 server, bf, robotID(bot_admin), groupNo, botToken, shortID
+func setupBotThreadMdTestData(t *testing.T) (s *server.Server, bf *BotFather, robotID, groupNo, botToken, shortID string) {
+	t.Helper()
+	s, bf, robotID, groupNo, botToken = setupBotThreadTestData(t)
+
+	// 将 bot 设置为 bot_admin
+	_, err := bf.db.session.UpdateBySql(
+		"UPDATE group_member SET bot_admin=1 WHERE group_no=? AND uid=?",
+		groupNo, robotID,
+	).Exec()
+	assert.NoError(t, err)
+
+	// 创建子区
+	shortID = createBotThread(t, s, groupNo, botToken, "md测试子区")
+	return
+}
+
+func TestBotGetThreadMd_NotSet(t *testing.T) {
+	s, _, _, groupNo, botToken, shortID := setupBotThreadMdTestData(t)
+
+	w := botRequest(t, s, "GET", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", botToken, nil)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"content":""`)
+	assert.Contains(t, w.Body.String(), `"version":0`)
+	assert.Contains(t, w.Body.String(), `"updated_by":""`)
+}
+
+func TestBotUpdateThreadMd(t *testing.T) {
+	s, _, _, groupNo, botToken, shortID := setupBotThreadMdTestData(t)
+
+	// 更新
+	w := botRequest(t, s, "PUT", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", botToken, map[string]interface{}{
+		"content": "# Bot 管理的子区文档",
+	})
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"version":1`)
+
+	// 验证内容
+	w = botRequest(t, s, "GET", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", botToken, nil)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Bot 管理的子区文档")
+	assert.Contains(t, w.Body.String(), `"version":1`)
+}
+
+func TestBotUpdateThreadMd_VersionIncrement(t *testing.T) {
+	s, _, _, groupNo, botToken, shortID := setupBotThreadMdTestData(t)
+
+	// 更新两次
+	for i := 1; i <= 2; i++ {
+		w := botRequest(t, s, "PUT", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", botToken, map[string]interface{}{
+			"content": "version " + strings.Repeat("x", i),
+		})
+		assert.Equal(t, http.StatusOK, w.Code)
+	}
+
+	// 验证最终版本
+	w := botRequest(t, s, "GET", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", botToken, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"version":2`)
+}
+
+func TestBotUpdateThreadMd_NotBotAdmin(t *testing.T) {
+	s, bf, _, groupNo, _, shortID := setupBotThreadMdTestData(t)
+
+	// 创建另一个 bot（不是 bot_admin）
+	nonAdminBotID := "non_admin_bot"
+	nonAdminToken := "bf_" + nonAdminBotID
+	createTestRobot(t, bf, nonAdminBotID, "group_owner_001", 0)
+	_, err := bf.db.session.InsertInto("user").Columns(
+		"uid", "name", "username", "short_no", "status", "robot",
+	).Values(
+		nonAdminBotID, "NonAdminBot", nonAdminBotID, "sn_"+nonAdminBotID, 1, 1,
+	).Exec()
+	assert.NoError(t, err)
+
+	groupDB := group.NewDB(bf.ctx)
+	err = groupDB.InsertMember(&group.MemberModel{
+		GroupNo: groupNo,
+		UID:     nonAdminBotID,
+		Role:    group.MemberRoleCommon,
+		Status:  1,
+		Version: 1,
+		Vercode: util.GenerUUID(),
+	})
+	assert.NoError(t, err)
+
+	// 非 bot_admin 尝试更新
+	w := botRequest(t, s, "PUT", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", nonAdminToken, map[string]interface{}{
+		"content": "不应该成功",
+	})
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "bot_admin")
+}
+
+func TestBotUpdateThreadMd_EmptyContent(t *testing.T) {
+	s, _, _, groupNo, botToken, shortID := setupBotThreadMdTestData(t)
+
+	// 空内容
+	w := botRequest(t, s, "PUT", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", botToken, map[string]interface{}{
+		"content": "",
+	})
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "content must not be empty")
+}
+
+func TestBotUpdateThreadMd_ExceedsMaxSize(t *testing.T) {
+	s, _, _, groupNo, botToken, shortID := setupBotThreadMdTestData(t)
+
+	bigContent := strings.Repeat("x", 10241)
+	w := botRequest(t, s, "PUT", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", botToken, map[string]interface{}{
+		"content": bigContent,
+	})
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "exceeds max size")
+}
+
+func TestBotGetThreadMd_NotGroupMember(t *testing.T) {
+	s, bf, _, groupNo, _, shortID := setupBotThreadMdTestData(t)
+
+	// 创建不在群内的 bot
+	outsiderID := "outsider_md_bot"
+	outsiderToken := "bf_" + outsiderID
+	createTestRobot(t, bf, outsiderID, "group_owner_001", 0)
+
+	w := botRequest(t, s, "GET", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", outsiderToken, nil)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "not a member")
+}
+
+func TestBotGetThreadMd_GroupMemberCanRead(t *testing.T) {
+	s, bf, _, groupNo, botToken, shortID := setupBotThreadMdTestData(t)
+
+	// bot_admin 先设置内容
+	w := botRequest(t, s, "PUT", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", botToken, map[string]interface{}{
+		"content": "# 可读取的内容",
+	})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 创建一个非 bot_admin 的群成员 bot
+	readerBotID := "reader_bot"
+	readerToken := "bf_" + readerBotID
+	createTestRobot(t, bf, readerBotID, "group_owner_001", 0)
+	_, err := bf.db.session.InsertInto("user").Columns(
+		"uid", "name", "username", "short_no", "status", "robot",
+	).Values(
+		readerBotID, "ReaderBot", readerBotID, "sn_"+readerBotID, 1, 1,
+	).Exec()
+	assert.NoError(t, err)
+
+	groupDB := group.NewDB(bf.ctx)
+	err = groupDB.InsertMember(&group.MemberModel{
+		GroupNo: groupNo,
+		UID:     readerBotID,
+		Role:    group.MemberRoleCommon,
+		Status:  1,
+		Version: 1,
+		Vercode: util.GenerUUID(),
+	})
+	assert.NoError(t, err)
+
+	// 普通群成员 bot 可以读取
+	w = botRequest(t, s, "GET", "/v1/bot/groups/"+groupNo+"/threads/"+shortID+"/md", readerToken, nil)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "可读取的内容")
+}
+
+func TestBotUpdateThreadMd_InvalidShortID(t *testing.T) {
+	s, _, _, groupNo, botToken, _ := setupBotThreadMdTestData(t)
+
+	w := botRequest(t, s, "PUT", "/v1/bot/groups/"+groupNo+"/threads/invalid/md", botToken, map[string]interface{}{
+		"content": "不应该成功",
+	})
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid short_id format")
+}

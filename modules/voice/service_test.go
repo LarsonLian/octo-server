@@ -15,6 +15,44 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// getUserPromptText extracts the text content from the user message in a decoded chat request.
+func getUserPromptText(t *testing.T, req chatCompletionRequest) string {
+	t.Helper()
+	for _, msg := range req.Messages {
+		if msg.Role == "user" {
+			parts, ok := msg.Content.([]contentPart)
+			if ok {
+				for _, p := range parts {
+					if p.Type == "text" {
+						return p.Text
+					}
+				}
+			}
+		}
+	}
+	t.Fatal("no user text content found in request")
+	return ""
+}
+
+// getUserAudioData extracts the audio data from the user message in a decoded chat request.
+func getUserAudioData(t *testing.T, req chatCompletionRequest) string {
+	t.Helper()
+	for _, msg := range req.Messages {
+		if msg.Role == "user" {
+			parts, ok := msg.Content.([]contentPart)
+			if ok {
+				for _, p := range parts {
+					if p.Type == "input_audio" && p.InputAudio != nil {
+						return p.InputAudio.Data
+					}
+				}
+			}
+		}
+	}
+	t.Fatal("no audio content found in request")
+	return ""
+}
+
 func newTestConfig(serverURL string) *VoiceConfig {
 	return &VoiceConfig{
 		LiteLLMUrl:   serverURL,
@@ -217,9 +255,11 @@ func TestTranscribe_WithContextText(t *testing.T) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		// In edit mode, prompt uses modifyPromptTemplate
-		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "已有以下文本")
+		// System message should be present
+		assert.Equal(t, "system", req.Messages[0].Role)
+		// In edit mode, user message uses editInputBufferTemplate
+		prompt := getUserPromptText(t, req)
+		assert.Contains(t, prompt, "<input_buffer>")
 		assert.Contains(t, prompt, "existing text here")
 
 		resp := chatCompletionResponse{
@@ -244,10 +284,10 @@ func TestTranscribe_WithChatContext(t *testing.T) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "辅助识别专有名词拼写")
+		prompt := getUserPromptText(t, req)
+		assert.Contains(t, prompt, "<vocabulary_reference>")
 		assert.Contains(t, prompt, "Alice: 周五开会")
-		assert.Contains(t, prompt, "准确还原说话内容")
+		assert.Contains(t, prompt, "请转写音频中的语音")
 
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "transcribed with context"}}},
@@ -271,10 +311,10 @@ func TestTranscribe_WithChatContextAndContextText(t *testing.T) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "辅助识别专有名词拼写")
+		prompt := getUserPromptText(t, req)
+		assert.Contains(t, prompt, "<vocabulary_reference>")
 		assert.Contains(t, prompt, "chat history here")
-		assert.Contains(t, prompt, "已有以下文本")
+		assert.Contains(t, prompt, "<input_buffer>")
 		assert.Contains(t, prompt, "existing draft")
 
 		resp := chatCompletionResponse{
@@ -509,8 +549,8 @@ func TestGPT_Transcribe_NoSpeech_Sentinel(t *testing.T) {
 func TestGPT_Transcribe_WithContextText(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fields := parseMultipartForm(t, r)
-		// In append mode, prompt uses appendContextPromptTemplate
-		assert.Contains(t, fields["prompt"], "辅助理解语境和专有名词纠错")
+		// In append mode, prompt uses appendInputBufferNoVocabTemplate
+		assert.Contains(t, fields["prompt"], "辅助你理解当前语境")
 		assert.Contains(t, fields["prompt"], "existing text here")
 
 		w.Header().Set("Content-Type", "application/json")
@@ -778,9 +818,9 @@ func TestTranscribeAppend_Gemini_NoContext(t *testing.T) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "准确还原说话内容")
-		assert.NotContains(t, prompt, "辅助理解语境")
+		prompt := getUserPromptText(t, req)
+		assert.Contains(t, prompt, "请转写音频中的语音")
+		assert.NotContains(t, prompt, "input_buffer")
 
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "transcribed text"}}},
@@ -805,8 +845,8 @@ func TestTranscribeAppend_Gemini_WithContext(t *testing.T) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "辅助理解语境和专有名词纠错")
+		prompt := getUserPromptText(t, req)
+		assert.Contains(t, prompt, "辅助你理解当前语境")
 		assert.Contains(t, prompt, "原有文本")
 
 		resp := chatCompletionResponse{
@@ -929,8 +969,8 @@ func TestTranscribeEdit_NoContext(t *testing.T) {
 		var req chatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "准确还原说话内容")
+		prompt := getUserPromptText(t, req)
+		assert.Contains(t, prompt, "请转写音频中的语音")
 
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "transcribed"}}},
@@ -1046,9 +1086,9 @@ func TestTranscribeEdit_NoSpeech_Sentinel_NoContext(t *testing.T) {
 	assert.Equal(t, "", text)
 }
 
-// --- callWithModelFallback tests ---
+// --- callChatCompletionWithFallback tests ---
 
-func TestCallWithModelFallback_Success(t *testing.T) {
+func TestCallChatCompletionWithFallback_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := chatCompletionResponse{
 			Choices: []choice{{Message: responseMessage{Content: "ok"}}},
@@ -1061,13 +1101,13 @@ func TestCallWithModelFallback_Success(t *testing.T) {
 	cfg.Models = []string{"model-a"}
 	svc := NewVoiceService(cfg)
 
-	text, model, err := svc.callWithModelFallback([]byte("audio"), "audio/wav", "prompt")
+	text, model, _, err := svc.callChatCompletionWithFallback([]byte("audio"), "audio/wav", "system", "prompt", cfg.Models)
 	assert.NoError(t, err)
 	assert.Equal(t, "ok", text)
 	assert.Equal(t, "model-a", model)
 }
 
-func TestCallWithModelFallback_NoModels(t *testing.T) {
+func TestCallChatCompletionWithFallback_NoModels(t *testing.T) {
 	cfg := &VoiceConfig{
 		LiteLLMUrl:   "http://unused",
 		LiteLLMKey:   "key",
@@ -1077,7 +1117,7 @@ func TestCallWithModelFallback_NoModels(t *testing.T) {
 	}
 	svc := NewVoiceService(cfg)
 
-	_, _, err := svc.callWithModelFallback([]byte("audio"), "audio/wav", "prompt")
+	_, _, _, err := svc.callChatCompletionWithFallback([]byte("audio"), "audio/wav", "", "prompt", cfg.Models)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no models configured")
 }
@@ -1096,7 +1136,7 @@ func TestCallGPTWithModelFallback_Success(t *testing.T) {
 	cfg.GPTModels = []string{"gpt-a"}
 	svc := NewVoiceService(cfg)
 
-	text, model, err := svc.callGPTWithModelFallback([]byte("audio"), "audio/wav", "prompt")
+	text, model, _, err := svc.callGPTWithModelFallback([]byte("audio"), "audio/wav", "prompt")
 	assert.NoError(t, err)
 	assert.Equal(t, "gpt result", text)
 	assert.Equal(t, "gpt-a", model)
@@ -1120,7 +1160,7 @@ func TestCallGPTWithModelFallback_Fallback(t *testing.T) {
 	cfg.GPTModels = []string{"gpt-a", "gpt-b"}
 	svc := NewVoiceService(cfg)
 
-	text, model, err := svc.callGPTWithModelFallback([]byte("audio"), "audio/wav", "prompt")
+	text, model, _, err := svc.callGPTWithModelFallback([]byte("audio"), "audio/wav", "prompt")
 	assert.NoError(t, err)
 	assert.Equal(t, "from gpt-b", text)
 	assert.Equal(t, "gpt-b", model)
@@ -1136,7 +1176,7 @@ func TestCallGPTWithModelFallback_NoModels(t *testing.T) {
 	}
 	svc := NewVoiceService(cfg)
 
-	_, _, err := svc.callGPTWithModelFallback([]byte("audio"), "audio/wav", "prompt")
+	_, _, _, err := svc.callGPTWithModelFallback([]byte("audio"), "audio/wav", "prompt")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no GPT models configured")
 }
@@ -1171,4 +1211,476 @@ func TestTranscribeWithOptions_GPT_EditModeRejected(t *testing.T) {
 
 func TestMaxContextTextLength_Constant(t *testing.T) {
 	assert.Equal(t, 10000, MaxContextTextLength)
+}
+
+// --- Qwen engine tests ---
+
+func newQwenTestConfig(serverURL string) *VoiceConfig {
+	return &VoiceConfig{
+		QwenUrl:      serverURL,
+		QwenKey:      "qwen-test-key",
+		Timeout:      5,
+		TotalTimeout: 10,
+		QwenModels:   []string{"qwen3.5-omni-plus", "qwen3.5-omni"},
+		QwenTimeout:  8,
+		MaxDuration:  60,
+		MaxFileSize:  5 * 1024 * 1024,
+		Engine:       "qwen",
+		EditMode:     "edit",
+	}
+}
+
+func TestQwenTranscribe_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/chat/completions", r.URL.Path)
+		assert.Equal(t, "Bearer qwen-test-key", r.Header.Get("Authorization"))
+
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		assert.Equal(t, "qwen3.5-omni-plus", req.Model)
+		// Verify no reasoning_effort for qwen
+		assert.Empty(t, req.ReasoningEffort)
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "你好世界"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newQwenTestConfig(server.URL)
+	svc := NewVoiceService(cfg)
+
+	text, model, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
+	assert.NoError(t, err)
+	assert.Equal(t, "你好世界", text)
+	assert.Equal(t, "qwen3.5-omni-plus", model)
+}
+
+func TestQwenTranscribe_EditMode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "修改后的文本"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newQwenTestConfig(server.URL)
+	cfg.EditMode = "edit"
+	svc := NewVoiceService(cfg)
+
+	text, _, err := svc.TranscribeWithOptions(
+		[]byte("fake-audio"), "audio/wav",
+		"原始文本", "",
+		TranscribeOptions{Mode: "edit"},
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, "修改后的文本", text)
+}
+
+func TestQwenTranscribe_UsesQwenSpecificConfig(t *testing.T) {
+	// Verify that qwen engine uses QwenUrl/QwenKey instead of global LiteLLMUrl/LiteLLMKey
+	qwenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer qwen-specific-key", r.Header.Get("Authorization"))
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "ok"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer qwenServer.Close()
+
+	cfg := &VoiceConfig{
+		LiteLLMUrl:   "https://should-not-be-used.example.com",
+		LiteLLMKey:   "should-not-be-used",
+		QwenUrl:      qwenServer.URL,
+		QwenKey:      "qwen-specific-key",
+		QwenModels:   []string{"qwen3.5-omni-plus"},
+		Engine:       "qwen",
+		EditMode:     "edit",
+		Timeout:      5,
+		TotalTimeout: 10,
+	}
+	svc := NewVoiceService(cfg)
+
+	text, _, err := svc.Transcribe([]byte("audio"), "audio/wav", "", "")
+	assert.NoError(t, err)
+	assert.Equal(t, "ok", text)
+}
+
+func TestQwenTranscribe_FallbackToGlobalURL(t *testing.T) {
+	// When QwenUrl is empty, should fall back to LiteLLMUrl
+	globalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer global-key", r.Header.Get("Authorization"))
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "via global"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer globalServer.Close()
+
+	cfg := &VoiceConfig{
+		LiteLLMUrl:   globalServer.URL,
+		LiteLLMKey:   "global-key",
+		QwenModels:   []string{"qwen3.5-omni-plus"},
+		Engine:       "qwen",
+		EditMode:     "edit",
+		Timeout:      5,
+		TotalTimeout: 10,
+	}
+	svc := NewVoiceService(cfg)
+
+	text, _, err := svc.Transcribe([]byte("audio"), "audio/wav", "", "")
+	assert.NoError(t, err)
+	assert.Equal(t, "via global", text)
+}
+
+func TestQwenTranscribe_ModelOverride(t *testing.T) {
+	var requestedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		requestedModel = req.Model
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "ok"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newQwenTestConfig(server.URL)
+	svc := NewVoiceService(cfg)
+
+	_, usedModel, err := svc.TranscribeWithOptions([]byte("audio"), "audio/wav", "", "",
+		TranscribeOptions{Model: "qwen-custom"})
+	assert.NoError(t, err)
+	assert.Equal(t, "qwen-custom", requestedModel)
+	assert.Equal(t, "qwen-custom", usedModel)
+}
+
+func TestQwenTranscribe_ModelFallback(t *testing.T) {
+	var callCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := atomic.AddInt32(&callCount, 1)
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		if count == 1 {
+			assert.Equal(t, "qwen3.5-omni-plus", req.Model)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error": "internal error"}`))
+			return
+		}
+
+		assert.Equal(t, "qwen3.5-omni", req.Model)
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "fallback ok"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newQwenTestConfig(server.URL)
+	svc := NewVoiceService(cfg)
+
+	text, model, err := svc.Transcribe([]byte("audio"), "audio/wav", "", "")
+	assert.NoError(t, err)
+	assert.Equal(t, "fallback ok", text)
+	assert.Equal(t, "qwen3.5-omni", model)
+}
+
+func TestQwenTranscribe_AppendNoSpeech(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "[NO_SPEECH]"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newQwenTestConfig(server.URL)
+	cfg.EditMode = "append"
+	svc := NewVoiceService(cfg)
+
+	text, _, err := svc.Transcribe([]byte("audio"), "audio/wav", "keep this", "")
+	assert.NoError(t, err)
+	assert.Equal(t, "keep this", text) // returns contextText on no speech
+}
+
+func TestQwenTranscribe_EditNoSpeech(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "[NO_SPEECH]"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newQwenTestConfig(server.URL)
+	cfg.EditMode = "edit"
+	svc := NewVoiceService(cfg)
+
+	text, _, err := svc.Transcribe([]byte("audio"), "audio/wav", "keep this", "")
+	assert.NoError(t, err)
+	assert.Equal(t, "keep this", text) // returns contextText on no speech sentinel
+}
+
+func TestQwenTranscribe_AppendMode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "新内容"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newQwenTestConfig(server.URL)
+	cfg.EditMode = "append"
+	svc := NewVoiceService(cfg)
+
+	text, _, err := svc.Transcribe([]byte("audio"), "audio/wav", "原有文本", "")
+	assert.NoError(t, err)
+	assert.Equal(t, "原有文本新内容", text) // CJK join, no space
+}
+
+func TestQwenTranscribe_AudioDataURI(t *testing.T) {
+	// Qwen (DashScope) requires data URI format for input_audio.data
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		audioData := getUserAudioData(t, req)
+		assert.True(t, strings.HasPrefix(audioData, "data:;base64,"),
+			"qwen audio data should have data URI prefix, got: %s", audioData)
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "ok"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newQwenTestConfig(server.URL)
+	svc := NewVoiceService(cfg)
+
+	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
+	assert.NoError(t, err)
+}
+
+func TestGeminiTranscribe_AudioRawBase64(t *testing.T) {
+	// Gemini should use raw base64 without data URI prefix
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		audioData := getUserAudioData(t, req)
+		assert.False(t, strings.HasPrefix(audioData, "data:"),
+			"gemini audio data should be raw base64, got: %s", audioData)
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "ok"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.Models = []string{"gemini-model"}
+	svc := NewVoiceService(cfg)
+
+	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
+	assert.NoError(t, err)
+}
+
+// --- TranscribeWithResult tests ---
+
+func TestTranscribeWithResult_Gemini_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "transcribed text"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.Models = []string{"model-a"}
+	svc := NewVoiceService(cfg)
+
+	result, err := svc.TranscribeWithResult([]byte("audio"), "audio/wav", "", "", TranscribeOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "transcribed text", result.Text)
+	assert.Equal(t, "transcribed text", result.RawText)
+	assert.Equal(t, "model-a", result.Model)
+	assert.Equal(t, "chat_completion", result.PromptType)
+	assert.NotEmpty(t, result.PromptText)
+	assert.NotNil(t, result.RequestBody)
+}
+
+func TestTranscribeWithResult_Gemini_EditMode_WithContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "工作计划还有托马斯的。"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.EditMode = "edit"
+	cfg.Models = []string{"model-a"}
+	svc := NewVoiceService(cfg)
+
+	result, err := svc.TranscribeWithResult([]byte("audio"), "audio/wav", "工作计划\n", "", TranscribeOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "工作计划还有托马斯的。", result.RawText)
+	assert.Equal(t, "工作计划\n还有托马斯的。", result.Text) // trailing \n restored
+}
+
+func TestTranscribeWithResult_AppendMode_NoSpeech(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "[NO_SPEECH]"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.EditMode = "append"
+	cfg.Models = []string{"model-a"}
+	svc := NewVoiceService(cfg)
+
+	result, err := svc.TranscribeWithResult([]byte("audio"), "audio/wav", "keep this", "", TranscribeOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "[NO_SPEECH]", result.RawText)
+	assert.Equal(t, "keep this", result.Text) // returns contextText on no speech
+}
+
+func TestTranscribeWithResult_EditMode_NoSpeech_Sentinel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "[NO_SPEECH]"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.EditMode = "edit"
+	cfg.Models = []string{"model-a"}
+	svc := NewVoiceService(cfg)
+
+	result, err := svc.TranscribeWithResult([]byte("audio"), "audio/wav", "keep this", "", TranscribeOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "[NO_SPEECH]", result.RawText)
+	assert.Equal(t, "keep this", result.Text)
+}
+
+func TestTranscribeWithResult_EditMode_EmptyIsDeleteAll(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: ""}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.EditMode = "edit"
+	cfg.Models = []string{"model-a"}
+	svc := NewVoiceService(cfg)
+
+	result, err := svc.TranscribeWithResult([]byte("audio"), "audio/wav", "工作计划\n", "", TranscribeOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "", result.RawText)
+	assert.Equal(t, "\n", result.Text) // restoreTrailingWhitespace adds back \n
+}
+
+func TestTranscribeWithResult_GPT_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"text": "GPT result"})
+	}))
+	defer server.Close()
+
+	cfg := newGPTTestConfig(server.URL)
+	svc := NewVoiceService(cfg)
+
+	result, err := svc.TranscribeWithResult([]byte("audio"), "audio/wav", "", "", TranscribeOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "GPT result", result.Text)
+	assert.Equal(t, "audio_transcription", result.PromptType)
+	assert.NotNil(t, result.RequestBody)
+
+	// GPT requestBody should contain audio_base64
+	reqBody, ok := result.RequestBody.(map[string]interface{})
+	assert.True(t, ok)
+	assert.NotEmpty(t, reqBody["audio_base64"])
+}
+
+func TestTranscribeWithResult_GPT_EditModeRejected(t *testing.T) {
+	cfg := newGPTTestConfig("http://unused")
+	svc := NewVoiceService(cfg)
+
+	result, err := svc.TranscribeWithResult([]byte("audio"), "audio/wav", "", "", TranscribeOptions{Mode: "edit"})
+	assert.ErrorIs(t, err, ErrGPTEditNotSupported)
+	assert.Nil(t, result)
+}
+
+func TestTranscribeWithResult_Error_StillReturnsPrompt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"fail"}`))
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.Models = []string{"model-a"}
+	svc := NewVoiceService(cfg)
+
+	result, err := svc.TranscribeWithResult([]byte("audio"), "audio/wav", "", "", TranscribeOptions{})
+	assert.Error(t, err)
+	assert.NotNil(t, result)
+	assert.Equal(t, "chat_completion", result.PromptType)
+	assert.NotEmpty(t, result.PromptText)
+	assert.NotNil(t, result.RequestBody)
+}
+
+func TestTranscribeWithResult_RequestBody_ContainsChatCompletionFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "ok"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.Models = []string{"model-a"}
+	svc := NewVoiceService(cfg)
+
+	result, err := svc.TranscribeWithResult([]byte("audio"), "audio/wav", "", "", TranscribeOptions{})
+	assert.NoError(t, err)
+	assert.NotEmpty(t, result.SystemPrompt)
+
+	// RequestBody should be a chatCompletionRequest
+	reqBody, ok := result.RequestBody.(chatCompletionRequest)
+	assert.True(t, ok, "request body should be chatCompletionRequest")
+	assert.Equal(t, "model-a", reqBody.Model)
+	assert.Len(t, reqBody.Messages, 2) // system + user
+
+	// System message
+	assert.Equal(t, "system", reqBody.Messages[0].Role)
+	systemContent, ok := reqBody.Messages[0].Content.(string)
+	assert.True(t, ok, "system content should be string")
+	assert.NotEmpty(t, systemContent)
+
+	// User message
+	assert.Equal(t, "user", reqBody.Messages[1].Role)
+	userParts, ok := reqBody.Messages[1].Content.([]contentPart)
+	assert.True(t, ok, "user content should be []contentPart")
+	assert.Len(t, userParts, 2)
+	assert.Equal(t, "text", userParts[0].Type)
+	assert.Equal(t, "input_audio", userParts[1].Type)
 }

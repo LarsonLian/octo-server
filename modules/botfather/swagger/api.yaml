@@ -28,13 +28,3 @@ paths:
       summary: Bot轮询消息
       tags:
         - bot
-  /v1/bot/stream/start:
-    post:
-      summary: 流式消息开始
-      tags:
-        - bot
-  /v1/bot/stream/end:
-    post:
-      summary: 流式消息结束
-      tags:
-        - bot

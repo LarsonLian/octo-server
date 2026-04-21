@@ -65,6 +65,7 @@ func (cn *Common) Route(r *wkhttp.WKHttp) {
 		// commonNoAuth.GET("/keepalive", cn.getKeepAliveVideo)   // 获取后台运行引导视频
 		commonNoAuth.GET("/updater/:os/:version", cn.updater)  // 版本更新检查（兼容tauri）
 		commonNoAuth.GET("/pcupdater/:os", cn.getPCNewVersion) // pc版本更新检查
+		commonNoAuth.GET("/changelog", cn.changelog)            // 版本更新日志（公开）
 	}
 
 	r.GET("/v1/health", func(c *wkhttp.Context) {
@@ -511,6 +512,28 @@ func (cn *Common) appVersionList(c *wkhttp.Context) {
 		"count": count,
 		"list":  resps,
 	})
+}
+
+// changelog 公开版本更新日志
+func (cn *Common) changelog(c *wkhttp.Context) {
+	list, err := cn.db.queryAppVersionListWithPage(200, 1)
+	if err != nil {
+		cn.Error("查询版本列表错误", zap.Error(err))
+		c.ResponseError(errors.New("查询版本列表错误"))
+		return
+	}
+	resps := make([]*appVersionResp, 0, len(list))
+	for _, model := range list {
+		resps = append(resps, &appVersionResp{
+			AppVersion:  model.AppVersion,
+			OS:          model.OS,
+			IsForce:     model.IsForce,
+			UpdateDesc:  model.UpdateDesc,
+			DownloadURL: model.DownloadURL,
+			CreatedAt:   model.CreatedAt.String(),
+		})
+	}
+	c.Response(resps)
 }
 
 func (cn *Common) check(req appVersionReq) error {

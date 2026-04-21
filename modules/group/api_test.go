@@ -2,17 +2,33 @@ package group
 
 import (
 	"bytes"
+	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestMain(m *testing.M) {
+	db, err := sql.Open("mysql", "root:demo@tcp(127.0.0.1:3306)/test?charset=utf8mb4&parseTime=true")
+	if err == nil {
+		defer db.Close()
+		db.Exec("CREATE TABLE IF NOT EXISTS `robot` (`id` BIGINT AUTO_INCREMENT PRIMARY KEY, `robot_id` VARCHAR(40) NOT NULL DEFAULT '', `token` VARCHAR(100) NOT NULL DEFAULT '', `version` BIGINT NOT NULL DEFAULT 0, `status` SMALLINT NOT NULL DEFAULT 1, `creator_uid` VARCHAR(40) NOT NULL DEFAULT '', `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+		db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS `robot_id_robot_index` ON `robot` (`robot_id`)")
+		db.Exec("CREATE TABLE IF NOT EXISTS `robot_menu` (`id` BIGINT AUTO_INCREMENT PRIMARY KEY, `robot_id` VARCHAR(40) NOT NULL DEFAULT '', `cmd` VARCHAR(100) NOT NULL DEFAULT '', `remark` VARCHAR(100) NOT NULL DEFAULT '', `type` VARCHAR(100) NOT NULL DEFAULT '', `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+	}
+	os.Exit(m.Run())
+}
 
 func TestGroupCreate(t *testing.T) {
 
@@ -41,6 +57,158 @@ func TestGroupCreate(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), `"name":"群组1"`)
 	time.Sleep(time.Millisecond * 200)
+}
+
+func TestGroupCreate_WithCategoryID(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	// 确保 group_category 表和 group_setting category 列存在（category 模块迁移可能未执行）
+	ctx.DB().InsertBySql("CREATE TABLE IF NOT EXISTS `group_category` (`id` BIGINT AUTO_INCREMENT PRIMARY KEY, `category_id` VARCHAR(32) NOT NULL, `space_id` VARCHAR(40) NOT NULL, `uid` VARCHAR(40) NOT NULL, `name` VARCHAR(100) NOT NULL, `sort` INT NOT NULL DEFAULT 0, `status` TINYINT NOT NULL DEFAULT 1, `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP, `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE KEY `uk_category_id` (`category_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4").Exec()
+	ctx.DB().InsertBySql("ALTER TABLE `group_setting` ADD COLUMN `category_id` VARCHAR(32) DEFAULT NULL").Exec()
+	ctx.DB().InsertBySql("ALTER TABLE `group_setting` ADD COLUMN `category_sort` INT NOT NULL DEFAULT 0").Exec()
+
+	spaceID := "space-create-cat-001"
+	categoryID := "cat-create-001"
+
+	// 创建测试用户（使用唯一 ShortNo 避免冲突）
+	f.userDB.Insert(&user.Model{UID: testutil.UID, Name: "测试用户", ShortNo: "cat_u10000"})
+	err := f.userDB.Insert(&user.Model{UID: "10009", Name: "张九", ShortNo: "cat_u10009"})
+	assert.NoError(t, err)
+	err = f.userDB.Insert(&user.Model{UID: "10010", Name: "李十", ShortNo: "cat_u10010"})
+	assert.NoError(t, err)
+
+	// 创建 Space 并添加成员
+	_, err = ctx.DB().InsertInto("space").
+		Columns("space_id", "name", "creator", "status").
+		Values(spaceID, "测试空间", testutil.UID, 1).Exec()
+	assert.NoError(t, err)
+	for _, uid := range []string{testutil.UID, "10009", "10010"} {
+		_, err = ctx.DB().InsertInto("space_member").
+			Columns("space_id", "uid", "role", "status").
+			Values(spaceID, uid, 0, 1).Exec()
+		assert.NoError(t, err)
+	}
+
+	// 创建 Category（属于当前用户）
+	_, err = ctx.DB().InsertInto("group_category").
+		Columns("category_id", "space_id", "uid", "name", "sort", "status").
+		Values(categoryID, spaceID, testutil.UID, "工作", 0, 1).Exec()
+	assert.NoError(t, err)
+
+	// 创建群聊并携带 category_id
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("POST", "/v1/group/create", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name":        "分组群聊",
+		"members":     []string{"10009", "10010"},
+		"space_id":    spaceID,
+		"category_id": categoryID,
+	}))))
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+	if !assert.Equal(t, http.StatusOK, w.Code) {
+		t.Fatalf("创建群失败，响应: %s", w.Body.String())
+	}
+	assert.Contains(t, w.Body.String(), `"name":"分组群聊"`)
+
+	// 解析响应获取 group_no
+	var resp map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	groupNo := resp["group_no"].(string)
+
+	// 验证 group_setting 中 category_id 已设置
+	var settingCategoryID *string
+	_, err = ctx.DB().Select("category_id").From("group_setting").
+		Where("group_no=? and uid=?", groupNo, testutil.UID).
+		Load(&settingCategoryID)
+	assert.NoError(t, err)
+	assert.NotNil(t, settingCategoryID)
+	assert.Equal(t, categoryID, *settingCategoryID)
+
+	time.Sleep(time.Millisecond * 200)
+}
+
+func TestGroupCreate_WithCategoryID_NoSpaceID(t *testing.T) {
+	s, _ := testutil.NewTestServer()
+
+	// 传 category_id 但不传 space_id → 应报错
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("POST", "/v1/group/create", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name":        "分组群聊",
+		"members":     []string{"10009"},
+		"category_id": "cat-no-space",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGroupCreate_WithCategoryID_NotFound(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+
+	spaceID := "space-cat-notfound"
+
+	_, err := ctx.DB().InsertInto("space").
+		Columns("space_id", "name", "creator", "status").
+		Values(spaceID, "测试空间", testutil.UID, 1).Exec()
+	assert.NoError(t, err)
+	_, err = ctx.DB().InsertInto("space_member").
+		Columns("space_id", "uid", "role", "status").
+		Values(spaceID, testutil.UID, 0, 1).Exec()
+	assert.NoError(t, err)
+
+	// 传不存在的 category_id → 应报错
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("POST", "/v1/group/create", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name":        "分组群聊",
+		"members":     []string{testutil.UID},
+		"space_id":    spaceID,
+		"category_id": "cat-not-exist",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGroupCreate_WithCategoryID_NotOwned(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+
+	spaceID := "space-cat-notowned"
+	categoryID := "cat-other-user"
+
+	_, err := ctx.DB().InsertInto("space").
+		Columns("space_id", "name", "creator", "status").
+		Values(spaceID, "测试空间", testutil.UID, 1).Exec()
+	assert.NoError(t, err)
+	_, err = ctx.DB().InsertInto("space_member").
+		Columns("space_id", "uid", "role", "status").
+		Values(spaceID, testutil.UID, 0, 1).Exec()
+	assert.NoError(t, err)
+
+	// Category 属于其他用户
+	_, err = ctx.DB().InsertInto("group_category").
+		Columns("category_id", "space_id", "uid", "name", "sort", "status").
+		Values(categoryID, spaceID, "other_user", "工作", 0, 1).Exec()
+	assert.NoError(t, err)
+
+	// 传别人的 category_id → 应报错
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("POST", "/v1/group/create", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name":        "分组群聊",
+		"members":     []string{testutil.UID},
+		"space_id":    spaceID,
+		"category_id": categoryID,
+	}))))
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestGroupGet(t *testing.T) {

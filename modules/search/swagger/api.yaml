@@ -1,8 +1,8 @@
 swagger: "2.0"
 info:
-  description: "DMWork API"
+  description: "DMWork 搜索 API"
   version: "1.0.0"
-  title: "DMWork API"
+  title: "DMWork Search API"
 host: "api.botgate.cn"
 tags:
   - name: "search"
@@ -17,7 +17,15 @@ paths:
       tags:
         - "search"
       summary: "全局搜索"
-      description: "全局搜索"
+      description: |
+        搜索好友、群组和消息。底层调用 WuKongIM 搜索插件 `wk.plugin.search/usersearch`，
+        支持中文分词、关键词高亮（`<mark>` 标签）。
+
+        支持的消息频道类型：
+        - `channel_type=1` — 私聊消息，`channel_id` 为对方用户 UID
+        - `channel_type=2` — 群聊消息，`channel_id` 为群编号
+        - `channel_type=5` — Thread（子区）消息，`channel_id` 格式为 `{群编号}____{threadID}`，
+          返回的 channel 信息使用父群名称
       operationId: "global"
       consumes:
         - "application/json"
@@ -25,74 +33,22 @@ paths:
         - "application/json"
       parameters:
         - in: "body"
-          name: "key"
+          name: "body"
           required: true
           schema:
-            type: object
-            properties:
-              only_message:
-                type: integer
-                description: "1.只返回消息记录 0.返回好友，群，消息记录"
-              keyword:
-                type: string
-                description: "搜索关键字"
-              channel_id:
-                type: string
-                description: "频道ID 搜索某个channel的消息时传递"
-              channel_type:
-                type: integer
-                format: int
-                description: "频道类型 搜索某个channel的消息时传递"
-              from_uid:
-                type: string
-                description: "发送者uid"
-              content_type:
-                type: array
-                items:
-                  type: integer
-                  format: int
-                  description: "指定查询的消息类型"
-              page:
-                type: integer
-                format: int
-                description: "页码"
-              limit:
-                type: integer
-                format: int
-                description: "每页数量"
-              start_time:
-                type: integer
-                description: "开始时间戳"
-              end_time:
-                type: integer
-                description: "消息时间（结束，结果不包含end_time）"
+            $ref: "#/definitions/searchGlobalReq"
       responses:
         200:
-          description: "返回"
+          description: "搜索结果"
           schema:
-            type: object
-            properties:
-              friends:
-                type: array
-                items:
-                  $ref: "#/definitions/channelResp"
-                description: "好友列表"
-              groups:
-                type: array
-                items:
-                  $ref: "#/definitions/channelResp"
-                description: "群列表"
-              messages:
-                type: array
-                items:
-                  $ref: "#/definitions/messageResp"
+            $ref: "#/definitions/searchGlobalResp"
         400:
-          description: "错误"
+          description: "请求参数错误"
           schema:
             $ref: "#/definitions/response"
       security:
         - token: []
-  
+
 securityDefinitions:
   token:
     type: "apiKey"
@@ -100,59 +56,123 @@ securityDefinitions:
     name: "token"
     description: "用户token"
 definitions:
+  searchGlobalReq:
+    type: object
+    properties:
+      keyword:
+        type: string
+        description: "搜索关键字，支持中文分词。匹配内容会用 <mark> 标签高亮"
+        example: "搜索"
+      only_message:
+        type: integer
+        description: "1=只返回消息记录，0=返回好友+群组+消息记录（默认0）"
+        default: 0
+        enum: [0, 1]
+      channel_id:
+        type: string
+        description: "限定搜索某个频道的消息。私聊传对方 UID，群聊传群编号，Thread 传 {群编号}____{threadID}"
+      channel_type:
+        type: integer
+        description: "频道类型，与 channel_id 配合使用。1=私聊 2=群聊 5=Thread"
+        enum: [1, 2, 5]
+      from_uid:
+        type: string
+        description: "限定发送者 UID，只搜索该用户发送的消息"
+      content_type:
+        type: array
+        items:
+          type: integer
+        description: "消息正文类型过滤，如 [1] 只搜文本消息"
+      page:
+        type: integer
+        description: "页码（从1开始），用于分页"
+        default: 1
+      limit:
+        type: integer
+        description: "每页数量，最大100"
+        default: 20
+        maximum: 100
+      start_time:
+        type: integer
+        format: int64
+        description: "消息时间范围（开始），Unix 时间戳（秒）"
+      end_time:
+        type: integer
+        format: int64
+        description: "消息时间范围（结束，不包含），Unix 时间戳（秒）"
+  searchGlobalResp:
+    type: object
+    properties:
+      friends:
+        type: array
+        items:
+          $ref: "#/definitions/channelResp"
+        description: "匹配的好友/联系人列表（only_message=1 时为空数组）"
+      groups:
+        type: array
+        items:
+          $ref: "#/definitions/channelResp"
+        description: "匹配的群组列表（only_message=1 时为空数组）"
+      messages:
+        type: array
+        items:
+          $ref: "#/definitions/messageResp"
+        description: "匹配的消息列表"
   messageResp:
     type: object
     properties:
       message_id:
         type: integer
-        description: "服务端的消息ID(全局唯一)"
+        format: int64
+        description: "服务端消息ID（全局唯一）"
       message_idstr:
         type: string
-        description: "服务端的消息ID(全局唯一)字符串形式"
+        description: "消息ID字符串形式（避免前端精度丢失）"
       message_seq:
         type: integer
-        description: "消息序列号 （用户唯一，有序递增）"
+        description: "消息序列号（频道内有序递增）"
       client_msg_no:
         type: string
         description: "客户端消息唯一编号"
       from_uid:
         type: string
-        description: "发送者"
+        description: "发送者 UID"
       timestamp:
         type: integer
-        description: "消息时间戳"
+        description: "消息时间戳（Unix秒）"
       payload:
         type: object
-        description: "内容体"
+        description: "消息内容体，包含 type（消息类型）和 content（正文，含高亮标签）等字段"
+      is_deleted:
+        type: integer
+        description: "是否已删除（0=正常 1=已删除）"
+        enum: [0, 1]
       channel:
-        type: object
         $ref: "#/definitions/channelResp"
-        description: "消息所属频道"
+        description: "消息所属频道。channel_type: 1=私聊 2=群聊 5=Thread。Thread 消息的 channel_id 为 {群编号}____{threadID}，channel_name 为父群名称"
       from_channel:
-        type: object
         $ref: "#/definitions/channelResp"
-        description: "消息发送者频道资料"
+        description: "消息发送者资料"
   channelResp:
     type: object
     properties:
       channel_id:
         type: string
-        description: "频道ID"
+        description: "频道ID。私聊为用户 UID，群聊为群编号，Thread 为 {群编号}____{threadID}"
       channel_type:
         type: integer
-        format: int
-        description: "频道类型"
+        description: "频道类型：1=私聊 2=群聊 5=Thread（子区）"
+        enum: [1, 2, 5]
       channel_name:
         type: string
-        description: "频道名称"
+        description: "频道名称（含高亮标签）。Thread 类型返回父群名称"
       channel_remark:
         type: string
         description: "频道备注"
   response:
-    type: "object"
+    type: object
     properties:
       status:
         type: integer
-        format: int
       msg:
-        type: "string"
+        type: string

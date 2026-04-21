@@ -219,6 +219,15 @@ func newChannelRespWithUserDetailResp(user *UserDetailResp) *model.ChannelResp {
 	if user.Robot == 1 {
 		extraMap["bot_auto_approve"] = user.BotAutoApprove
 	}
+	if user.BotAgentPlatform != "" {
+		extraMap["bot_agent_platform"] = user.BotAgentPlatform
+	}
+	if user.BotAgentVersion != "" {
+		extraMap["bot_agent_version"] = user.BotAgentVersion
+	}
+	if user.BotPluginVersion != "" {
+		extraMap["bot_plugin_version"] = user.BotPluginVersion
+	}
 	resp.Extra = extraMap
 
 	return resp

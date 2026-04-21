@@ -10,8 +10,15 @@ type CategoryModel struct {
 	Name       string
 	Sort       int
 	Status     int
+	IsDefault  *int
 	db.BaseModel
 }
+
+func (m *CategoryModel) isDefault() bool {
+	return m.IsDefault != nil && *m.IsDefault == 1
+}
+
+func intPtr(v int) *int { return &v }
 
 // groupSettingCategoryRow group_setting 表 category 相关字段投影
 type groupSettingCategoryRow struct {
@@ -51,10 +58,11 @@ type moveGroupToCategoryReq struct {
 // ---------- Response ----------
 
 type categoryResp struct {
-	CategoryID *string                `json:"category_id"`
-	Name       string                 `json:"name"`
-	Sort       int                    `json:"sort"`
-	Groups     []groupInCategoryResp  `json:"groups"`
+	CategoryID *string               `json:"category_id"`
+	Name       string                `json:"name"`
+	Sort       int                   `json:"sort"`
+	IsDefault  bool                  `json:"is_default"`
+	Groups     []groupInCategoryResp `json:"groups"`
 }
 
 type groupInCategoryResp struct {

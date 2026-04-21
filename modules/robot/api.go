@@ -29,6 +29,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis"
@@ -105,6 +106,7 @@ func (rb *Robot) Route(r *wkhttp.WKHttp) {
 		robotAuth.GET("/file/*path", rb.proxyFile)                  // 文件下载代理
 		robotAuth.POST("/upload", rb.botUploadFile)                 // 文件上传
 		robotAuth.GET("/upload/credentials", rb.botUploadCredentials) // STS 临时密钥签发
+		robotAuth.GET("/upload/presigned", rb.botUploadPresigned)    // 预签名上传 URL 签发
 		robotAuth.POST("/message/edit", rb.botMessageEdit)           // Bot 编辑消息
 		// GROUP.md routes are in botfather module (/v1/bot/groups/:group_no/md)
 
@@ -1184,10 +1186,7 @@ func (rb *Robot) proxyFile(c *wkhttp.Context) {
 
 	filename := c.Query("filename")
 	if filename == "" {
-		parts := strings.Split(ph, "/")
-		if len(parts) > 0 {
-			filename = parts[len(parts)-1]
-		}
+		filename = pkgutil.ExtractFilenameFromPath(ph)
 	}
 
 	downloadURL, err := rb.fileService.DownloadURL(ph, filename)
@@ -1240,7 +1239,7 @@ func (rb *Robot) botUploadFile(c *wkhttp.Context) {
 	}
 
 	storagePath := fmt.Sprintf("%s%s", fileType, path)
-	_, err = rb.fileService.UploadFile(storagePath, contentType, func(w io.Writer) error {
+	_, err = rb.fileService.UploadFile(storagePath, contentType, "", func(w io.Writer) error {
 		_, err := io.Copy(w, multipartFile)
 		return err
 	})
@@ -1269,6 +1268,13 @@ func (rb *Robot) botUploadCredentials(c *wkhttp.Context) {
 		c.ResponseError(errors.New("filename 不能为空"))
 		return
 	}
+	filename = filepath.Base(filename)
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" || file.IsBlockedExtension(ext) || !file.IsAllowedExtension(ext) {
+		c.ResponseError(errors.New("不支持的文件类型"))
+		return
+	}
 
 	cosConfig := rb.ctx.GetConfig().COS
 	if cosConfig.SecretID == "" || cosConfig.SecretKey == "" || cosConfig.Bucket == "" {
@@ -1277,9 +1283,8 @@ func (rb *Robot) botUploadCredentials(c *wkhttp.Context) {
 		return
 	}
 
-	// 生成对象 key：{prefix}/chat/{timestamp}/{random}_{filename}
 	prefix := strings.TrimSpace(cosConfig.Prefix)
-	objectPath := fmt.Sprintf("chat/%d/%s_%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
+	objectPath := fmt.Sprintf("chat/%d/%s/%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
 	var key string
 	if prefix != "" {
 		key = path.Join(prefix, objectPath)
@@ -1290,7 +1295,6 @@ func (rb *Robot) botUploadCredentials(c *wkhttp.Context) {
 	bucket := cosConfig.Bucket
 	region := cosConfig.Region
 
-	// 从 bucket 名中提取 appId（格式：bucketname-appid）
 	appId := ""
 	if idx := strings.LastIndex(bucket, "-"); idx > 0 {
 		appId = bucket[idx+1:]
@@ -1301,7 +1305,6 @@ func (rb *Robot) botUploadCredentials(c *wkhttp.Context) {
 		return
 	}
 
-	// 使用 STS SDK 生成临时密钥
 	client := sts.NewClient(cosConfig.SecretID, cosConfig.SecretKey, nil)
 	opt := &sts.CredentialOptions{
 		DurationSeconds: 1800,
@@ -1309,11 +1312,9 @@ func (rb *Robot) botUploadCredentials(c *wkhttp.Context) {
 		Policy: &sts.CredentialPolicy{
 			Statement: []sts.CredentialPolicyStatement{
 				{
-					Action: []string{"cos:PutObject"},
-					Effect: "allow",
-					Resource: []string{
-						fmt.Sprintf("qcs::cos:%s:uid/%s:%s/%s", region, appId, bucket, key),
-					},
+					Action:   []string{"cos:PutObject"},
+					Effect:   "allow",
+					Resource: []string{fmt.Sprintf("qcs::cos:%s:uid/%s:%s/%s", region, appId, bucket, key)},
 				},
 			},
 		},
@@ -1338,6 +1339,46 @@ func (rb *Robot) botUploadCredentials(c *wkhttp.Context) {
 		"startTime":   res.StartTime,
 		"expiredTime": res.ExpiredTime,
 		"cdnBaseUrl":  cosConfig.BucketURL,
+	})
+}
+
+// botUploadPresigned 签发预签名 PUT URL，供客户端直传文件
+func (rb *Robot) botUploadPresigned(c *wkhttp.Context) {
+	filename := c.Query("filename")
+	if strings.TrimSpace(filename) == "" {
+		c.ResponseError(errors.New("filename 不能为空"))
+		return
+	}
+	filename = filepath.Base(filename)
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" || file.IsBlockedExtension(ext) || !file.IsAllowedExtension(ext) {
+		c.ResponseError(errors.New("不支持的文件类型"))
+		return
+	}
+
+	objectPath := fmt.Sprintf("chat/%d/%s/%s", time.Now().Unix(), util.GenerUUID(), url.PathEscape(filename))
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	expiry := 30 * time.Minute
+	uploadURL, downloadURL, err := rb.fileService.PresignedPutURL(objectPath, contentType, "", expiry)
+	if err != nil {
+		rb.Error("生成预签名上传URL失败", zap.Error(err))
+		c.ResponseError(errors.New("生成上传URL失败"))
+		return
+	}
+
+	c.Response(gin.H{
+		"method":      "PUT",
+		"uploadUrl":   uploadURL,
+		"downloadUrl": downloadURL,
+		"contentType": contentType,
+		"key":         objectPath,
+		"expiresIn":   int(expiry.Seconds()),
+		"expiredTime": time.Now().Add(expiry).Unix(),
 	})
 }
 

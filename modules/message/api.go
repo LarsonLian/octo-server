@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/channel"
@@ -33,6 +34,123 @@ import (
 	"github.com/sendgrid/rest"
 	"go.uber.org/zap"
 )
+
+// MaxSyncPayloadSize 同步接口返回的单条消息 payload 最大字节数，超过则截断。
+// 避免超大 payload 导致前端 SDK 递归解码栈溢出 (issue #1097)。
+// hardParsePayloadLimit 更高一级的硬上限：超过则不再尝试 JSON 解析，直接占位。
+const (
+	MaxSyncPayloadSize        = 10 * 1024
+	hardParsePayloadLimit     = 1 * 1024 * 1024
+	truncatedContentHeadBytes = 1024
+	truncatedContentSuffix    = "...[消息过大]"
+)
+
+// truncatedFallback 极端场景下（解析失败 / 无 content 字段 / 超过硬上限）的占位。
+func truncatedFallback(m map[string]interface{}) map[string]interface{} {
+	safe := map[string]interface{}{
+		"content": truncatedContentSuffix,
+	}
+	if t, ok := m["type"]; ok {
+		safe["type"] = t
+	} else {
+		safe["type"] = common.ContentError.Int()
+	}
+	if v, ok := m["visibles"]; ok {
+		safe["visibles"] = v
+	}
+	return safe
+}
+
+// TruncatedPayload 在 payload 字节长度超过阈值时，尽量保留原有 type / visibles 等元信息，
+// 只对 content 字段做前缀截取 + 占位后缀；解析失败或无 content 字段时回退为只含
+// type / visibles 的安全占位，确保超大 payload 一定被截断。
+// 导出供 search 等其他路径复用。
+func TruncatedPayload(raw []byte) map[string]interface{} {
+	if len(raw) > hardParsePayloadLimit {
+		return map[string]interface{}{
+			"type":    common.ContentError.Int(),
+			"content": truncatedContentSuffix,
+		}
+	}
+	var m map[string]interface{}
+	if err := util.ReadJsonByByte(raw, &m); err != nil || len(m) == 0 {
+		return map[string]interface{}{
+			"type":    common.ContentError.Int(),
+			"content": truncatedContentSuffix,
+		}
+	}
+	if _, exists := m["content"]; !exists {
+		// 无 content 字段但整体超大：只保留 type / visibles，丢弃其他未知大字段。
+		return truncatedFallback(m)
+	}
+	s := contentToString(m["content"])
+	m["content"] = truncateUTF8(s, truncatedContentHeadBytes) + truncatedContentSuffix
+	// 终检：截断 content 后，若其他未知字段仍把整体撑过阈值，回退到白名单只保留
+	// type / visibles / content，避免自定义扩展字段塞超大内容泄漏到前端。
+	if b, err := json.Marshal(m); err == nil && len(b) > MaxSyncPayloadSize {
+		fallback := truncatedFallback(m)
+		fallback["content"] = m["content"]
+		return fallback
+	}
+	return m
+}
+
+// CoerceTextPayloadContent 对 type=Text 的消息把 content 字段强制规约为字符串。
+// 正常客户端 content 本就是 string；兼容 bot 等误把嵌套 object 塞进 content
+// 的场景（见 issue #1097），避免前端按 string 解析时崩溃。
+func CoerceTextPayloadContent(m map[string]interface{}) {
+	if len(m) == 0 {
+		return
+	}
+	// 初始化为 -1 表示未识别类型，避免 common.Text 若为 0 时的隐式误匹配。
+	t := -1
+	switch v := m["type"].(type) {
+	case float64:
+		t = int(v)
+	case int:
+		t = v
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			t = int(i)
+		}
+	}
+	if t != common.Text.Int() {
+		return
+	}
+	c, exists := m["content"]
+	if !exists {
+		return
+	}
+	if _, ok := c.(string); ok {
+		return
+	}
+	m["content"] = contentToString(c)
+}
+
+func contentToString(v interface{}) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case nil:
+		return ""
+	default:
+		if b, err := json.Marshal(x); err == nil {
+			return string(b)
+		}
+		return ""
+	}
+}
+
+// truncateUTF8 按字节上限截断，回退到最近的合法 UTF-8 边界，避免在多字节字符中间切断。
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
 
 // Message 消息相关API
 type Message struct {
@@ -2008,16 +2126,20 @@ func newSyncChannelMessageResp(resp *config.SyncChannelMessageResp, loginUID str
 	if len(resp.Messages) > 0 {
 		messageIDs := make([]string, 0, len(resp.Messages))
 		for _, message := range resp.Messages {
-			var payloadMap map[string]interface{}
-			err := util.ReadJsonByByte(message.Payload, &payloadMap)
-			if err != nil {
-				log.Warn("负荷数据不是json格式！", zap.Error(err), zap.String("payload", string(message.Payload)))
-			}
-			if len(payloadMap) > 0 {
-				replyJson := payloadMap["reply"]
-				if replyMap, ok := replyJson.(map[string]interface{}); ok {
-					if msgId, ok := replyMap["message_id"].(string); ok {
-						messageIDs = append(messageIDs, msgId)
+			// 超大 payload 最终会被 TruncatedPayload 截断并丢失 reply 信息，
+			// 这里跳过解析避免对同一 []byte 反复反序列化。
+			if len(message.Payload) <= MaxSyncPayloadSize {
+				var payloadMap map[string]interface{}
+				err := util.ReadJsonByByte(message.Payload, &payloadMap)
+				if err != nil {
+					log.Warn("负荷数据不是json格式！", zap.Error(err), zap.String("payload", string(message.Payload)))
+				}
+				if len(payloadMap) > 0 {
+					replyJson := payloadMap["reply"]
+					if replyMap, ok := replyJson.(map[string]interface{}); ok {
+						if msgId, ok := replyMap["message_id"].(string); ok {
+							messageIDs = append(messageIDs, msgId)
+						}
 					}
 				}
 			}
@@ -2031,6 +2153,11 @@ func newSyncChannelMessageResp(resp *config.SyncChannelMessageResp, loginUID str
 		}
 		// 修改消息扩展字段
 		for _, message := range resp.Messages {
+			// 超大 payload 会走 TruncatedPayload 的白名单路径，reply 信息本就会丢失，
+			// 这里跳过避免再次反序列化同一 []byte 以及写回后又被截断的无用功。
+			if len(message.Payload) > MaxSyncPayloadSize {
+				continue
+			}
 			var payloadMap map[string]interface{}
 			err := util.ReadJsonByByte(message.Payload, &payloadMap)
 			if err != nil {
@@ -2263,27 +2390,37 @@ func (m *MsgSyncResp) from(msgResp *config.MessageResp, loginUID string, message
 		payloadMap = map[string]interface{}{
 			"type": common.SignalError.Int(),
 		}
+	} else if len(msgResp.Payload) > MaxSyncPayloadSize {
+		log.Warn("消息 payload 超过大小阈值，已截断",
+			zap.Int64("message_id", msgResp.MessageID),
+			zap.String("from_uid", msgResp.FromUID),
+			zap.String("channel_id", msgResp.ChannelID),
+			zap.Int("payload_size", len(msgResp.Payload)))
+		payloadMap = TruncatedPayload(msgResp.Payload)
 	} else {
 		err := util.ReadJsonByByte(msgResp.Payload, &payloadMap)
 		if err != nil {
 			log.Warn("负荷数据不是json格式！", zap.Error(err), zap.String("payload", string(msgResp.Payload)))
 		}
-		if len(payloadMap) > 0 {
-			visibles := payloadMap["visibles"]
-			if visiblesArray, ok := visibles.([]interface{}); ok && len(visiblesArray) > 0 {
-				m.IsDeleted = 1
-				for _, limitUID := range visiblesArray {
-					if limitUID == loginUID {
-						m.IsDeleted = 0
-					}
-				}
-			}
-		} else {
+		if len(payloadMap) == 0 {
 			payloadMap = map[string]interface{}{
 				"type": common.ContentError.Int(),
 			}
 		}
 	}
+
+	// visibles 白名单（截断 / 正常路径共用，避免超大消息绕过权限检查）。
+	if visiblesArray, ok := payloadMap["visibles"].([]interface{}); ok && len(visiblesArray) > 0 {
+		m.IsDeleted = 1
+		for _, limitUID := range visiblesArray {
+			if limitUID == loginUID {
+				m.IsDeleted = 0
+			}
+		}
+	}
+
+	// type=Text 的 content 强制 string 化，避免 bot 误发 object 导致前端按 string 解析失败。
+	CoerceTextPayloadContent(payloadMap)
 
 	if messageUserExtraM != nil {
 		if m.IsDeleted == 0 {

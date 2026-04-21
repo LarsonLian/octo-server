@@ -124,12 +124,12 @@ func (bf *BotFather) createUserBot(c *wkhttp.Context) {
 	// Check uniqueness
 	exists, _ := bf.db.existRobotByUsername(username)
 	if exists {
-		c.ResponseError(fmt.Errorf("username %s 已被占用", username))
+		c.ResponseErrorWithStatus(fmt.Errorf("username %s 已被占用", username), http.StatusConflict)
 		return
 	}
 	u, _ := bf.userService.GetUserWithUsername(username)
 	if u != nil {
-		c.ResponseError(fmt.Errorf("username %s 已被占用", username))
+		c.ResponseErrorWithStatus(fmt.Errorf("username %s 已被占用", username), http.StatusConflict)
 		return
 	}
 
@@ -323,11 +323,14 @@ func (bf *BotFather) listUserBots(c *wkhttp.Context) {
 			name = userResp.Name
 		}
 		list = append(list, &UserBotResp{
-			RobotID:     bot.RobotID,
-			Username:    bot.Username,
-			Name:        name,
-			Description: bot.Description,
-			BotToken:    bot.BotToken,
+			RobotID:       bot.RobotID,
+			Username:      bot.Username,
+			Name:          name,
+			Description:   bot.Description,
+			BotToken:      bot.BotToken,
+			AgentPlatform: bot.AgentPlatform,
+			AgentVersion:  bot.AgentVersion,
+			PluginVersion: bot.PluginVersion,
 		})
 	}
 	c.Response(list)

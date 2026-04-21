@@ -5,10 +5,10 @@ import (
 	"runtime/debug"
 	"strings"
 
-	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -81,9 +81,17 @@ func (u *User) emailRegister(c *wkhttp.Context) {
 		return
 	}
 
-	// 验证邮箱验证码（配置了测试验证码时可跳过）
-	testCode := strings.TrimSpace(u.ctx.GetConfig().SMSCode)
-	if testCode == "" {
+	// 验证邮箱验证码（仅非 release 模式且配置了 SMSCode 时走测试分支）
+	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
+		if strings.TrimSpace(req.Code) == "" {
+			c.ResponseError(errors.New("验证码不能为空"))
+			return
+		}
+		if !commonapi.MatchTestCode(u.ctx.GetConfig(), req.Code) {
+			c.ResponseError(errors.New("验证码错误"))
+			return
+		}
+	} else {
 		// 线上模式：必须提供验证码
 		if strings.TrimSpace(req.Code) == "" {
 			c.ResponseError(errors.New("验证码不能为空"))
@@ -94,10 +102,6 @@ func (u *User) emailRegister(c *wkhttp.Context) {
 			c.ResponseError(err)
 			return
 		}
-	} else if strings.TrimSpace(req.Code) != "" && req.Code != testCode {
-		// 测试模式：提供了验证码但不匹配
-		c.ResponseError(errors.New("验证码错误"))
-		return
 	}
 
 	// 检查邮箱是否已注册
@@ -206,6 +210,14 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 		c.ResponseError(errors.New("验证码或密码不能为空"))
 		return
 	}
+	// 仅密码登录走 guard；验证码登录有独立的发送频控 + 验证次数限制，不纳入 guard 计数。
+	if req.Password != "" {
+		if err := u.loginGuard.Check(req.Email); err != nil {
+			u.Warn("邮箱登录被临时锁定", zap.String("email", req.Email), zap.Error(err))
+			c.ResponseError(err)
+			return
+		}
+	}
 
 	loginSpan := u.ctx.Tracer().StartSpan(
 		"user.emailLogin",
@@ -221,10 +233,22 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 		return
 	}
 	if userInfo == nil {
+		// 密码登录路径统一返回通用错误消息避免枚举；验证码登录路径不涉及密码，保留原提示。
+		if req.Password != "" {
+			u.loginGuard.RecordFailureLogged(req.Email)
+			c.ResponseError(errors.New("邮箱或密码错误"))
+			return
+		}
 		c.ResponseError(errors.New("该邮箱未注册"))
 		return
 	}
 	if userInfo.IsDestroy == 1 || userInfo.Status == 0 {
+		// 密码路径同样泄露账号状态，统一为通用错误 + 计入失败计数
+		if req.Password != "" {
+			u.loginGuard.RecordFailureLogged(req.Email)
+			c.ResponseError(errors.New("邮箱或密码错误"))
+			return
+		}
 		c.ResponseError(errors.New("该账号已注销或被禁用"))
 		return
 	}
@@ -239,9 +263,11 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 	} else {
 		matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 		if !matched {
-			c.ResponseError(errors.New("密码不正确！"))
+			u.loginGuard.RecordFailureLogged(req.Email)
+			c.ResponseError(errors.New("邮箱或密码错误"))
 			return
 		}
+		u.loginGuard.ResetLogged(req.Email)
 		if needsMigration {
 			if newHash, hashErr := HashPassword(req.Password); hashErr == nil {
 				_ = u.db.updatePassword(newHash, userInfo.UID)

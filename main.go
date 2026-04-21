@@ -1,20 +1,25 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 
 	_ "github.com/Mininglamp-OSS/octo-server/internal"
+	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	"github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/module"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/server"
 	"github.com/gin-gonic/gin"
+	rd "github.com/go-redis/redis"
 	"github.com/judwhite/go-svc"
 	"github.com/robfig/cron"
 	"github.com/spf13/viper"
@@ -51,6 +56,11 @@ func main() {
 	cfg := config.New()
 	cfg.Version = Version
 	cfg.ConfigureWithViper(vp)
+
+	// 安全校验：release 模式下禁止配置 smsCode（万能验证码后门）
+	if err := commonapi.ValidateTestCodeConfig(cfg); err != nil {
+		panic(err)
+	}
 
 	// 初始化context
 	ctx := config.NewContext(cfg)
@@ -91,6 +101,34 @@ func runAPI(ctx *config.Context) {
 		}
 		gin.Logger()(c)
 	})
+	rps := 200.0
+	burst := 300
+	if v := os.Getenv("DM_API_RATELIMIT_RPS"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n > 0 {
+			rps = n
+		}
+	}
+	if v := os.Getenv("DM_API_RATELIMIT_BURST"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			burst = n
+		}
+	}
+	// 限流状态存 Redis，多副本共享配额；与 dmwork-lib 的 GetRedisConn 指向同一实例。
+	// 独立构造 client 的原因：lib 的 redis.Conn 未暴露 Eval/Script 接口，
+	// 而令牌桶需要 Lua 脚本保证原子性。
+	// 生命周期：跟随进程存续，不显式 Close——与 lib 自身的 redis.Conn 处理方式一致。
+	rlRedis := rd.NewClient(&rd.Options{
+		Addr:       ctx.GetConfig().DB.RedisAddr,
+		Password:   ctx.GetConfig().DB.RedisPass,
+		MaxRetries: 1,
+	})
+	s.GetRoute().UseGin(wkhttp.RateLimitMiddleware(context.Background(), rlRedis, rps, burst, "/v1/ping"))
+	// CORS 白名单覆盖：dmwork-lib 的 server.New 默认注入 "*" + Credentials:true，
+	// 本中间件在其后执行，按 DM_CORS_ALLOWED_ORIGINS 重写/剥离 Allow-Origin/Credentials。
+	// 未配置时等价于禁用跨域（剥离所有 CORS 响应头），仅允许同源调用。
+	s.GetRoute().UseGin(wkhttp.SecureCORSOverrideMiddleware(
+		wkhttp.ParseAllowedOrigins(os.Getenv("DM_CORS_ALLOWED_ORIGINS")),
+	))
 	// 模块安装
 	err := module.Setup(ctx)
 	if err != nil {

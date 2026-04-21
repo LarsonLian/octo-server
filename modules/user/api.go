@@ -2,7 +2,6 @@ package user
 
 import (
 	"context"
-	"runtime/debug"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,25 +10,24 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/model"
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
-	"github.com/Mininglamp-OSS/octo-lib/config"
-	"github.com/Mininglamp-OSS/octo-lib/model"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
+	rd "github.com/go-redis/redis"
 	"github.com/gocraft/dbr/v2"
 	"github.com/opentracing/opentracing-go"
 	"github.com/opentracing/opentracing-go/ext"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
-	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
-	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
-	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/network"
@@ -37,6 +35,10 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
+	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/gin-gonic/gin"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -88,6 +90,7 @@ type User struct {
 	deviceFlagsOnce          sync.Once
 	deviceFlagsErr           error
 	appService               app.IService
+	loginGuard               *LoginGuard
 }
 
 // New New
@@ -118,6 +121,7 @@ func New(ctx *config.Context) *User {
 		githubDB:                 newGithubDB(ctx),
 		commonService:            common2.NewService(ctx),
 		appService:               app.NewService(ctx),
+		loginGuard:               NewLoginGuard(ctx.GetRedisConn(), loginGuardThresholdFromEnv(), loginGuardWindowFromEnv()),
 	}
 	u.updateSystemUserToken()
 	source.SetUserProvider(u)
@@ -126,6 +130,22 @@ func New(ctx *config.Context) *User {
 
 // Route 路由配置
 func (u *User) Route(r *wkhttp.WKHttp) {
+	// 端点级严格 per-IP 限流：防暴力破解 / 撞库 / 手机号枚举 / SMS 费用 DoS
+	// 同类端点共享一个限流器实例，使同一 IP 的总配额受控，避免攻击者跨端点分散
+	rlCtx := context.Background()
+	// 限流状态存 Redis，多副本共享配额；生命周期跟随进程，与 main.go 的做法一致
+	rlRedis := rd.NewClient(&rd.Options{
+		Addr:       u.ctx.GetConfig().DB.RedisAddr,
+		Password:   u.ctx.GetConfig().DB.RedisPass,
+		MaxRetries: 1,
+	})
+	// burst 取小值：人类正常重试容忍 + 不给攻击者初始白嫖窗口
+	// tag 用稳定字符串分离 keyspace；注意 register 和 sms 参数相同但语义不同，必须分开
+	loginLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "login", 10.0/60, 5)      // 10 req/min, burst 5
+	registerLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "register", 5.0/60, 3) // 5 req/min, burst 3
+	smsLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "sms", 5.0/60, 3)           // 5 req/min, burst 3
+	searchLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "search", 30.0/60, 15)   // 30 req/min, burst 15
+
 	auth := r.Group("/v1", u.ctx.AuthMiddleware(r))
 	{
 
@@ -133,6 +153,7 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		// 获取用户的会话信息
 		// auth.GET("/users/:uid/conversation", u.userConversationInfoGet)
 
+		auth.GET("/user/search", searchLimit, u.search)
 		auth.POST("/users/:uid/avatar", u.uploadAvatar)              //上传用户头像
 		auth.PUT("/users/:uid/setting", u.setting.userSettingUpdate) // 更新用户设置
 	}
@@ -178,30 +199,29 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	v := r.Group("/v1")
 	{
 
-		v.POST("/user/register", u.register)                 //用户注册
-		v.POST("/user/login", u.login)                       // 用户登录
-		v.POST("/user/usernamelogin", u.usernameLogin)       // 用户名登录
-		v.POST("/user/usernameregister", u.usernameRegister) // 用户名注册
-		v.POST("/user/emaillogin", u.emailLogin)              // 邮箱登录
-		v.POST("/user/emailregister", u.emailRegister)        // 邮箱注册
-		v.POST("/user/email/sendcode", u.emailSendCode)       // 发送邮箱验证码
-		v.POST("/user/email/forgetpwd", u.emailForgetPwd)     // 邮箱忘记密码
+		v.POST("/user/register", registerLimit, u.register)                 //用户注册
+		v.POST("/user/login", loginLimit, u.login)                          // 用户登录
+		v.POST("/user/usernamelogin", loginLimit, u.usernameLogin)          // 用户名登录
+		v.POST("/user/usernameregister", registerLimit, u.usernameRegister) // 用户名注册
+		v.POST("/user/emaillogin", loginLimit, u.emailLogin)                // 邮箱登录
+		v.POST("/user/emailregister", registerLimit, u.emailRegister)       // 邮箱注册
+		v.POST("/user/email/sendcode", smsLimit, u.emailSendCode)           // 发送邮箱验证码
+		v.POST("/user/email/forgetpwd", loginLimit, u.emailForgetPwd)       // 邮箱忘记密码
 
 		v.POST("/user/pwdforget_web3", u.resetPwdWithWeb3PublicKey) // 通过web3公钥重置密码
 		v.GET("/user/web3verifytext", u.getVerifyText)              // 获取验证字符串
 		v.POST("/user/web3verifysign", u.web3verifySignature)       // 验证签名
 		//v.POST("user/wxlogin", u.wxLogin)
-		v.POST("/user/sms/forgetpwd", u.getForgetPwdSMS) //获取忘记密码验证码
-		v.POST("/user/pwdforget", u.pwdforget)           //重置登录密码
-		v.GET("/user/search", u.search)                  // 搜索用户
+		v.POST("/user/sms/forgetpwd", smsLimit, u.getForgetPwdSMS) //获取忘记密码验证码
+		v.POST("/user/pwdforget", loginLimit, u.pwdforget) //重置登录密码
 		v.GET("/users/:uid/avatar", u.UserAvatar)        // 用户头像
 		v.GET("/users/:uid/im", u.userIM)                // 获取用户所在IM节点信息
 		v.GET("/user/loginuuid", u.getLoginUUID)         // 获取扫描用的登录uuid
 		v.GET("/user/loginstatus", u.getloginStatus)
-		v.POST("/user/sms/registercode", u.sendRegisterCode)             //获取注册短信验证码
-		v.POST("/user/login_authcode/:auth_code", u.loginWithAuthCode)   // 通过认证码登录
-		v.POST("/user/sms/login_check_phone", u.sendLoginCheckPhoneCode) //发送登录设备验证验证码
-		v.POST("/user/login/check_phone", u.loginCheckPhone)             //登录验证设备手机号
+		v.POST("/user/sms/registercode", smsLimit, u.sendRegisterCode)             //获取注册短信验证码
+		v.POST("/user/login_authcode/:auth_code", loginLimit, u.loginWithAuthCode) // 通过认证码登录
+		v.POST("/user/sms/login_check_phone", smsLimit, u.sendLoginCheckPhoneCode) //发送登录设备验证验证码
+		v.POST("/user/login/check_phone", loginLimit, u.loginCheckPhone) //登录验证设备手机号
 
 		// #################### 第三方授权 ####################
 		v.GET("/user/thirdlogin/authcode", u.thirdAuthcode)     // 第三方授权码获取
@@ -473,7 +493,7 @@ func (u *User) uploadAvatar(c *wkhttp.Context) {
 		return
 	}
 	avatarID := crc32.ChecksumIEEE([]byte(targetUID)) % uint32(u.ctx.GetConfig().Avatar.Partition)
-	_, err = u.fileService.UploadFile(fmt.Sprintf("avatar/%d/%s.png", avatarID, targetUID), "image/png", func(w io.Writer) error {
+	_, err = u.fileService.UploadFile(fmt.Sprintf("avatar/%d/%s.png", avatarID, targetUID), "image/png", "", func(w io.Writer) error {
 		_, err := io.Copy(w, file)
 		return err
 	})
@@ -991,7 +1011,7 @@ func (u *User) wxLogin(c *wkhttp.Context) {
 			cancel()
 			if imgReader != nil {
 				avatarID := crc32.ChecksumIEEE([]byte(uid)) % uint32(u.ctx.GetConfig().Avatar.Partition)
-				_, err = u.fileService.UploadFile(fmt.Sprintf("avatar/%d/%s.png", avatarID, uid), "image/png", func(w io.Writer) error {
+				_, err = u.fileService.UploadFile(fmt.Sprintf("avatar/%d/%s.png", avatarID, uid), "image/png", "", func(w io.Writer) error {
 					_, err := io.Copy(w, imgReader)
 					return err
 				})
@@ -1020,6 +1040,11 @@ func (u *User) login(c *wkhttp.Context) {
 		c.ResponseError(err)
 		return
 	}
+	if err := u.loginGuard.Check(req.Username); err != nil {
+		u.Warn("登录被临时锁定", zap.String("username", req.Username), zap.Error(err))
+		c.ResponseError(err)
+		return
+	}
 	loginSpan := u.ctx.Tracer().StartSpan(
 		"login",
 		opentracing.ChildOf(c.GetSpanContext()),
@@ -1035,18 +1060,24 @@ func (u *User) login(c *wkhttp.Context) {
 		return
 	}
 	if userInfo == nil || userInfo.IsDestroy == 1 {
-		c.ResponseError(errors.New("用户不存在"))
+		u.loginGuard.RecordFailureLogged(req.Username)
+		// 统一错误消息，避免攻击者通过响应差异枚举有效账号
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 	if userInfo.Password == "" {
-		c.ResponseError(errors.New("此账号不允许登录"))
+		// 同样走失败计数 + 通用错误消息，避免攻击者区分"账号不允许登录"与"密码错误"
+		u.loginGuard.RecordFailureLogged(req.Username)
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 	if !matched {
-		c.ResponseError(errors.New("密码不正确！"))
+		u.loginGuard.RecordFailureLogged(req.Username)
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
+	u.loginGuard.ResetLogged(req.Username)
 	// 自动迁移 MD5 密码到 bcrypt
 	if needsMigration {
 		if newHash, err := HashPassword(req.Password); err == nil {
@@ -1312,9 +1343,9 @@ func (u *User) register(c *wkhttp.Context) {
 		c.ResponseError(errors.New("该用户已存在"))
 		return
 	}
-	//测试模式
-	if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != "" {
-		if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != req.Code {
+	//测试模式（仅非 release 生效）
+	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
+		if !commonapi.MatchTestCode(u.ctx.GetConfig(), req.Code) {
 			c.ResponseError(errors.New("验证码错误"))
 			return
 		}
@@ -2397,9 +2428,9 @@ func (u *User) destroyAccount(c *wkhttp.Context) {
 		c.ResponseError(errors.New("登录用户不存在"))
 		return
 	}
-	//测试模式
-	if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != "" {
-		if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != code {
+	//测试模式（仅非 release 生效）
+	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
+		if !commonapi.MatchTestCode(u.ctx.GetConfig(), code) {
 			c.ResponseError(errors.New("验证码错误"))
 			return
 		}
@@ -2673,9 +2704,9 @@ func (u *User) pwdforget(c *wkhttp.Context) {
 		c.ResponseError(errors.New("该账号不存在"))
 		return
 	}
-	//测试模式
-	if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != "" {
-		if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != req.Code {
+	//测试模式（仅非 release 生效）
+	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
+		if !commonapi.MatchTestCode(u.ctx.GetConfig(), req.Code) {
 			c.ResponseError(errors.New("验证码错误"))
 			return
 		}

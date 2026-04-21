@@ -484,6 +484,16 @@ func (w *Webhook) pushTo(msgResp msgOfflineNotify, toUids []string) error {
 		} else if groupInfo != nil {
 			msgResp.SpaceID = groupInfo.SpaceID
 		}
+	} else if msgResp.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+		groupNo, _, ok := parseThreadChannelID(msgResp.ChannelID)
+		if ok {
+			groupInfo, err := w.groupService.GetGroupWithGroupNo(groupNo)
+			if err != nil {
+				w.Warn("获取子区父群 space_id 失败，继续推送", zap.Error(err), zap.String("channelID", msgResp.ChannelID))
+			} else if groupInfo != nil {
+				msgResp.SpaceID = groupInfo.SpaceID
+			}
+		}
 	} else if msgResp.ChannelType == common.ChannelTypePerson.Uint8() {
 		spaceID, _ := spacepkg.ParseChannelID(msgResp.ChannelID)
 		msgResp.SpaceID = spaceID

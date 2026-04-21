@@ -173,9 +173,9 @@ func (s *EmailService) Verify(ctx context.Context, email, code string, codeType 
 		return errors.New("验证失败次数过多，请10分钟后再试")
 	}
 
-	// 支持测试验证码（与短信验证码逻辑一致）
-	testCode := s.ctx.GetConfig().SMSCode
-	if testCode != "" && code == testCode {
+	// 支持测试验证码（仅限非 release 模式；release 下即便配置了 SMSCode 也不会匹配）
+	if MatchTestCode(s.ctx.GetConfig(), code) {
+		log.Warn("email verify passed via test SMSCode", zap.String("email", maskEmail(email)))
 		return nil
 	}
 

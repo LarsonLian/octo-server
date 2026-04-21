@@ -3,10 +3,14 @@ package thread
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"go.uber.org/zap"
@@ -94,12 +98,16 @@ func (t *Thread) Route(r *wkhttp.WKHttp) {
 		threads.POST("", t.createThread)
 		threads.GET("", t.listThreads)
 		threads.GET("/:short_id", t.getThread)
+		threads.PUT("/:short_id", t.updateThread)
 		threads.GET("/:short_id/members", t.listMembers)
 		threads.POST("/:short_id/join", t.joinThread)
 		threads.POST("/:short_id/leave", t.leaveThread)
 		threads.POST("/:short_id/archive", t.archiveThread)
 		threads.POST("/:short_id/unarchive", t.unarchiveThread)
 		threads.DELETE("/:short_id", t.deleteThread)
+		threads.GET("/:short_id/md", t.threadMdGet)
+		threads.PUT("/:short_id/md", t.threadMdUpdate)
+		threads.DELETE("/:short_id/md", t.threadMdDelete)
 	}
 
 	// 简化路由（不需要 group_no，通过 short_id 查询）
@@ -165,6 +173,40 @@ func (t *Thread) createThread(c *wkhttp.Context) {
 		return
 	}
 	c.Response(resp)
+}
+
+// updateThread 修改子区信息
+// PUT /v1/groups/:group_no/threads/:short_id
+func (t *Thread) updateThread(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	shortID := c.Param("short_id")
+	loginUID := c.GetLoginUID()
+
+	if !IsValidGroupNo(groupNo) {
+		c.ResponseError(errors.New("invalid group_no format"))
+		return
+	}
+	if !IsValidShortID(shortID) {
+		c.ResponseError(errors.New("invalid short_id format"))
+		return
+	}
+
+	var req struct {
+		Name string `json:"name" binding:"required,max=100"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		t.Error("参数错误", zap.Error(err))
+		c.ResponseError(errors.New("invalid request: name is required and must not exceed 100 characters"))
+		return
+	}
+
+	err := t.service.UpdateName(groupNo, shortID, loginUID, req.Name)
+	if err != nil {
+		t.Error("修改子区名称失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
+		c.ResponseError(err)
+		return
+	}
+	c.ResponseOK()
 }
 
 // listThreads 列出子区
@@ -404,6 +446,249 @@ func (t *Thread) deleteThread(c *wkhttp.Context) {
 		return
 	}
 	c.ResponseOK()
+}
+
+// ==================== 子区 GROUP.md ====================
+
+// threadMdResp 子区 GROUP.md 响应
+type threadMdResp struct {
+	Content   string     `json:"content"`
+	Version   int64      `json:"version"`
+	UpdatedAt *time.Time `json:"updated_at"`
+	UpdatedBy string     `json:"updated_by"`
+}
+
+// threadMdGet 获取子区 GROUP.md
+func (t *Thread) threadMdGet(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	shortID := c.Param("short_id")
+	loginUID := c.GetLoginUID()
+
+	if !IsValidGroupNo(groupNo) {
+		c.ResponseError(errors.New("invalid group_no format"))
+		return
+	}
+	if !IsValidShortID(shortID) {
+		c.ResponseError(errors.New("invalid short_id format"))
+		return
+	}
+
+	// 权限：必须是父群成员
+	isMember, err := t.groupService.ExistMember(groupNo, loginUID)
+	if err != nil {
+		t.Error("check group member failed", zap.Error(err))
+		c.ResponseError(errors.New("check group member failed"))
+		return
+	}
+	if !isMember {
+		c.ResponseError(errors.New("no permission"))
+		return
+	}
+
+	result, err := t.service.GetThreadMd(groupNo, shortID)
+	if err != nil {
+		t.Error("query thread GROUP.md failed", zap.Error(err))
+		c.ResponseError(errors.New("query thread GROUP.md failed"))
+		return
+	}
+	if result == nil {
+		c.Response(threadMdResp{
+			Content:   "",
+			Version:   0,
+			UpdatedAt: nil,
+			UpdatedBy: "",
+		})
+		return
+	}
+	c.Response(threadMdResp{
+		Content:   result.Content,
+		Version:   result.Version,
+		UpdatedAt: result.UpdatedAt,
+		UpdatedBy: result.UpdatedBy,
+	})
+}
+
+// threadMdUpdate 更新子区 GROUP.md
+func (t *Thread) threadMdUpdate(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	shortID := c.Param("short_id")
+	loginUID := c.GetLoginUID()
+
+	if !IsValidGroupNo(groupNo) {
+		c.ResponseError(errors.New("invalid group_no format"))
+		return
+	}
+	if !IsValidShortID(shortID) {
+		c.ResponseError(errors.New("invalid short_id format"))
+		return
+	}
+
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("invalid request body"))
+		return
+	}
+
+	// 校验空内容
+	if strings.TrimSpace(req.Content) == "" {
+		c.ResponseError(errors.New("content must not be empty"))
+		return
+	}
+
+	maxSize := group.GetGroupMdMaxSize()
+	if len(req.Content) > maxSize {
+		c.ResponseError(fmt.Errorf("GROUP.md content exceeds max size %d bytes", maxSize))
+		return
+	}
+
+	// 先检查子区是否存在，避免 canOperate 对不存在子区返回 "no permission"
+	existThread, err := t.service.ExistThread(groupNo, shortID)
+	if err != nil {
+		t.Error("check thread existence failed", zap.Error(err))
+		c.ResponseError(errors.New("check thread existence failed"))
+		return
+	}
+	if !existThread {
+		c.ResponseError(errors.New("thread not found"))
+		return
+	}
+
+	// 权限检查在 API Handler 层完成
+	canEdit, err := t.service.CanEditThreadMd(groupNo, shortID, loginUID)
+	if err != nil {
+		t.Error("check edit permission failed", zap.Error(err))
+		c.ResponseError(errors.New("check edit permission failed"))
+		return
+	}
+	if !canEdit {
+		c.ResponseError(errors.New("no permission to edit thread GROUP.md"))
+		return
+	}
+
+	// Service 层：纯数据操作透传
+	newVersion, err := t.service.UpdateThreadMd(groupNo, shortID, req.Content, loginUID)
+	if err != nil {
+		t.Error("update thread GROUP.md failed", zap.Error(err))
+		c.ResponseError(errors.New("update thread GROUP.md failed"))
+		return
+	}
+
+	// 异步发送通知
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Error("sendThreadMdNotification panic", zap.Any("recover", r))
+			}
+		}()
+		t.sendThreadMdNotification(groupNo, shortID, loginUID, newVersion, "thread_md_updated", "Thread GROUP.md updated")
+	}()
+
+	c.Response(map[string]interface{}{
+		"version": newVersion,
+	})
+}
+
+// threadMdDelete 删除子区 GROUP.md
+func (t *Thread) threadMdDelete(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	shortID := c.Param("short_id")
+	loginUID := c.GetLoginUID()
+
+	if !IsValidGroupNo(groupNo) {
+		c.ResponseError(errors.New("invalid group_no format"))
+		return
+	}
+	if !IsValidShortID(shortID) {
+		c.ResponseError(errors.New("invalid short_id format"))
+		return
+	}
+
+	// 先检查子区是否存在，避免 canOperate 对不存在子区返回 "no permission"
+	existThread, err := t.service.ExistThread(groupNo, shortID)
+	if err != nil {
+		t.Error("check thread existence failed", zap.Error(err))
+		c.ResponseError(errors.New("check thread existence failed"))
+		return
+	}
+	if !existThread {
+		c.ResponseError(errors.New("thread not found"))
+		return
+	}
+
+	// 权限检查在 API Handler 层完成
+	canEdit, err := t.service.CanEditThreadMd(groupNo, shortID, loginUID)
+	if err != nil {
+		t.Error("check edit permission failed", zap.Error(err))
+		c.ResponseError(errors.New("check edit permission failed"))
+		return
+	}
+	if !canEdit {
+		c.ResponseError(errors.New("no permission to delete thread GROUP.md"))
+		return
+	}
+
+	// Service 层：纯数据操作透传
+	newVersion, err := t.service.DeleteThreadMd(groupNo, shortID, loginUID)
+	if err != nil {
+		t.Error("delete thread GROUP.md failed", zap.Error(err))
+		c.ResponseError(errors.New("delete thread GROUP.md failed"))
+		return
+	}
+
+	// 异步发送通知
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Error("sendThreadMdNotification panic", zap.Any("recover", r))
+			}
+		}()
+		t.sendThreadMdNotification(groupNo, shortID, loginUID, newVersion, "thread_md_deleted", "Thread GROUP.md deleted")
+	}()
+
+	c.ResponseOK()
+}
+
+// sendThreadMdNotification 发送子区 GROUP.md 变更通知
+func (t *Thread) sendThreadMdNotification(groupNo, shortID, updatedBy string, version int64, eventType, contentText string) {
+	// 查询父群内所有 Bot 成员
+	botUIDs, err := t.groupService.GetBotMemberUIDs(groupNo)
+	if err != nil {
+		t.Error("query bot member UIDs failed", zap.Error(err))
+		return
+	}
+
+	payload := map[string]interface{}{
+		"type":    common.Text,
+		"content": contentText,
+		"event": map[string]interface{}{
+			"type":       eventType,
+			"version":    version,
+			"updated_by": updatedBy,
+			"group_no":   groupNo,
+			"short_id":   shortID,
+		},
+	}
+	if len(botUIDs) > 0 {
+		payload["mention"] = map[string]interface{}{
+			"uids": botUIDs,
+		}
+	}
+
+	channelID := BuildChannelID(groupNo, shortID)
+	err = t.ctx.SendMessage(&config.MsgSendReq{
+		Header: config.MsgHeader{
+			RedDot: 0,
+		},
+		ChannelID:   channelID,
+		ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
+		FromUID:     updatedBy,
+		Payload:     []byte(util.ToJson(payload)),
+	})
+	if err != nil {
+		t.Error("send thread GROUP.md notification failed", zap.Error(err))
+	}
 }
 
 // ========== 简化路由（通过 short_id 查询 group_no）==========

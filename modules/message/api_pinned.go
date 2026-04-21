@@ -229,11 +229,16 @@ func (m *Message) pinnedMessage(c *wkhttp.Context) {
 	}
 	if isSendSystemMsg {
 		var payloadMap map[string]interface{}
-		err := util.ReadJsonByByte(message.Payload, &payloadMap)
-		if err != nil {
-			m.Warn("负荷数据不是json格式！", zap.Error(err), zap.String("payload", string(message.Payload)))
-			c.ResponseOK()
-			return
+		if len(message.Payload) > MaxSyncPayloadSize {
+			// 置顶系统消息拼接只需 type / content 等字段，超大 payload 走截断避免完整反序列化
+			payloadMap = TruncatedPayload(message.Payload)
+		} else {
+			err := util.ReadJsonByByte(message.Payload, &payloadMap)
+			if err != nil {
+				m.Warn("负荷数据不是json格式！", zap.Error(err), zap.String("payload", string(message.Payload)))
+				c.ResponseOK()
+				return
+			}
 		}
 		var contentType int = 0
 		var content string = ""

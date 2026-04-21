@@ -3,6 +3,7 @@ package webhook
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
@@ -22,8 +23,9 @@ const EventOnlineStatus = "user.onlinestatus"
 const EventMsgNotify = "msg.notify"
 
 const (
-	nameCachePrefix      string = "name:"
-	groupNameCachePrefix string = "groupName:"
+	nameCachePrefix       string = "name:"
+	groupNameCachePrefix  string = "groupName:"
+	threadTitleCachePrefix string = "threadTitle:"
 )
 
 type PayloadInfo struct {
@@ -85,6 +87,14 @@ func ParsePushInfo(msgResp msgOfflineNotify, ctx *config.Context, toUser *user.R
 
 	if msgResp.ChannelType == common.ChannelTypePerson.Uint8() {
 		payloadInfo.Title = fromName
+	} else if msgResp.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+		threadTitle, err := getAndCacheThreadTitle(msgResp, ctx)
+		if err != nil {
+			log.Error("获取子区推送标题失败", zap.Error(err), zap.String("channel_id", msgResp.ChannelID))
+			return nil, err
+		}
+		payloadInfo.Title = threadTitle
+		content = fmt.Sprintf("%s：%s", fromName, content)
 	} else {
 		var groupName string
 		groupName, err = getAndCacheGroupName(msgResp, ctx)
@@ -263,6 +273,67 @@ func getAndCacheGroupName(msgResp msgOfflineNotify, ctx *config.Context) (string
 		}
 	}
 	return groupName, nil
+}
+
+// parseThreadChannelID 解析子区 ChannelID，格式：groupNo____shortID
+func parseThreadChannelID(channelID string) (groupNo, shortID string, ok bool) {
+	parts := strings.SplitN(channelID, "____", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// BuildThreadTitle 构建子区推送标题，格式：#子区名,群名
+func BuildThreadTitle(channelID, threadName, groupName string) string {
+	if threadName != "" && groupName != "" {
+		return fmt.Sprintf("#%s,%s", threadName, groupName)
+	} else if threadName != "" {
+		return fmt.Sprintf("#%s", threadName)
+	} else if groupName != "" {
+		return groupName
+	}
+	return channelID
+}
+
+// getAndCacheThreadTitle 获取子区推送标题，格式：#子区名,群名
+func getAndCacheThreadTitle(msgResp msgOfflineNotify, ctx *config.Context) (string, error) {
+	key := fmt.Sprintf("%s%s", threadTitleCachePrefix, msgResp.ChannelID)
+	title, err := ctx.GetRedisConn().GetString(key)
+	if err != nil {
+		return "", err
+	}
+	if title != "" {
+		return title, nil
+	}
+
+	groupNo, shortID, ok := parseThreadChannelID(msgResp.ChannelID)
+	if !ok {
+		return msgResp.ChannelID, nil
+	}
+
+	db := getWebhookDB(ctx)
+
+	threadName, err := db.GetThreadName(groupNo, shortID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get thread name: %w", err)
+	}
+
+	groupName, err := db.GetGroupName(groupNo)
+	if err != nil {
+		return "", fmt.Errorf("failed to get group name: %w", err)
+	}
+
+	title = BuildThreadTitle(msgResp.ChannelID, threadName, groupName)
+
+	if err = ctx.GetRedisConn().Set(key, title); err != nil {
+		return "", err
+	}
+	if err = ctx.GetRedisConn().Expire(key, ctx.GetConfig().Cache.NameCacheExpire); err != nil {
+		log.Warn("设置子区标题过期时间失败", zap.String("key", key), zap.Error(err))
+	}
+
+	return title, nil
 }
 
 func getUserBadge(uid string, ctx *config.Context) (int, error) {

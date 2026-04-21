@@ -1423,29 +1423,65 @@ func (m *Message) mutualDelete(c *wkhttp.Context) {
 		c.ResponseError(errors.New("消息不存在"))
 		return
 	}
-	isCanDelete := true
-	if req.ChannelType == common.ChannelTypePerson.Uint8() {
-		// 私聊：验证是对话参与者且是消息发送者
-		if resp.Messages[0].FromUID != loginUID {
-			isCanDelete = false
-		}
-	} else if req.ChannelType == common.ChannelTypeGroup.Uint8() {
-		isManager, err := m.groupService.IsCreatorOrManager(req.ChannelID, loginUID)
+	var (
+		isGroupMember        bool
+		isGroupManager       bool
+		isParentGroupMember  bool
+		isParentGroupManager bool
+	)
+	switch req.ChannelType {
+	case common.ChannelTypeGroup.Uint8():
+		isGroupMember, err = m.groupService.ExistMember(req.ChannelID, loginUID)
 		if err != nil {
-			m.Error("查询登录用户群内权限错误", zap.Error(err))
-			c.ResponseError(errors.New("查询登录用户群内权限错误"))
+			m.Error("查询群成员关系失败", zap.Error(err))
+			c.ResponseError(errors.New("查询群成员关系失败"))
 			return
 		}
-		if resp.Messages[0].FromUID != loginUID && !isManager {
-			isCanDelete = false
+		if isGroupMember {
+			isGroupManager, err = m.groupService.IsCreatorOrManager(req.ChannelID, loginUID)
+			if err != nil {
+				m.Error("查询登录用户群内权限错误", zap.Error(err))
+				c.ResponseError(errors.New("查询登录用户群内权限错误"))
+				return
+			}
+		}
+	case common.ChannelTypeCommunityTopic.Uint8():
+		parentGroupNo, _, perr := thread.ParseChannelID(req.ChannelID)
+		if perr != nil {
+			m.Error("解析子区频道ID失败", zap.Error(perr), zap.String("channelID", req.ChannelID))
+			c.ResponseError(errors.New("用户无权删除此消息"))
+			return
+		}
+		isParentGroupMember, err = m.groupService.ExistMember(parentGroupNo, loginUID)
+		if err != nil {
+			m.Error("查询父群成员关系失败", zap.Error(err))
+			c.ResponseError(errors.New("查询父群成员关系失败"))
+			return
+		}
+		if isParentGroupMember {
+			isParentGroupManager, err = m.groupService.IsCreatorOrManager(parentGroupNo, loginUID)
+			if err != nil {
+				m.Error("查询父群管理员身份失败", zap.Error(err))
+				c.ResponseError(errors.New("查询父群管理员身份失败"))
+				return
+			}
 		}
 	}
-	if !isCanDelete {
-		c.ResponseError(errors.New("用户无权删除此消息"))
+	if err := authorizeMutualDelete(
+		req.ChannelType,
+		resp.Messages[0].FromUID,
+		loginUID,
+		isGroupMember,
+		isGroupManager,
+		isParentGroupMember,
+		isParentGroupManager,
+	); err != nil {
+		c.ResponseError(err)
 		return
 	}
 	// TOCTOU 交叉校验：确保权限检查的消息与待删除的消息是同一条
-	if req.MessageID != strconv.FormatInt(resp.Messages[0].MessageID, 10) {
+	resolvedMessageID := strconv.FormatInt(resp.Messages[0].MessageID, 10)
+	if req.MessageID != resolvedMessageID {
 		c.ResponseError(errors.New("消息ID与消息序号不匹配"))
 		return
 	}
@@ -1456,7 +1492,7 @@ func (m *Message) mutualDelete(c *wkhttp.Context) {
 		return
 	}
 	err = m.messageExtraDB.insertOrUpdateDeleted(&messageExtraModel{
-		MessageID:   req.MessageID,
+		MessageID:   resolvedMessageID,
 		ChannelID:   fakeChannelID,
 		ChannelType: req.ChannelType,
 		IsDeleted:   1,
@@ -1878,6 +1914,20 @@ func (m *Message) revoke(c *wkhttp.Context) {
 		return
 	}
 	syncMsg := syncMsgs.Messages[0]
+	// TOCTOU 交叉校验：若用户传入了 message_id，必须与 clientMsgNo 反查到的 messageID 一致，
+	// 防止通过自己消息的 clientMsgNo 配合他人消息的 messageID 撤回任意消息（issue #1048）。
+	if err := verifyRevokeMessageID(messageID, syncMsg.MessageID); err != nil {
+		c.ResponseError(err)
+		return
+	}
+	// 下游操作统一改用 IM 反查到的可信 channelID / channelType，
+	// 防止 clientMsgNo 跨频道非唯一时把撤回广播发到错误频道。
+	channelID = syncMsg.ChannelID
+	channelTypeI = uint64(syncMsg.ChannelType)
+	fakeChannelID = channelID
+	if uint8(channelTypeI) == common.ChannelTypePerson.Uint8() {
+		fakeChannelID = common.GetFakeChannelIDWith(channelID, loginUID)
+	}
 	message := &messageModel{
 		ChannelID:   syncMsg.ChannelID,
 		ChannelType: syncMsg.ChannelType,
@@ -1912,7 +1962,9 @@ func (m *Message) revoke(c *wkhttp.Context) {
 
 	m.cancelMentionReminderIfNeed(message)
 
-	messageExtra, err := m.messageExtraDB.queryWithMessageID(messageID)
+	// 使用服务端反查到的真实 messageID，而非用户输入，避免后续数据库操作作用于不相关消息。
+	messageIDStr := strconv.FormatInt(message.MessageID, 10)
+	messageExtra, err := m.messageExtraDB.queryWithMessageID(messageIDStr)
 	if err != nil {
 		m.Error("查询消息扩展错误", zap.Error(err))
 		c.ResponseError(errors.New("查询消息扩展错误"))
@@ -1930,7 +1982,6 @@ func (m *Message) revoke(c *wkhttp.Context) {
 			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 		}
 	}()
-	messageIDStr := strconv.FormatInt(message.MessageID, 10)
 	version, err := m.genMessageExtraSeq(fakeChannelID)
 	if err != nil {
 		m.Error("生成消息扩展序列号失败！", zap.Error(err), zap.String("channelID", fakeChannelID))

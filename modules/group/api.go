@@ -845,6 +845,17 @@ func (g *Group) memberAdd(c *wkhttp.Context) {
 		c.ResponseError(err)
 		return
 	}
+	// 校验操作者是群成员,防止任意用户向任意群添加成员(issue#1018)
+	isMember, err := g.db.ExistMember(operator, groupNo)
+	if err != nil {
+		g.Error("查询群成员关系失败", zap.Error(err))
+		c.ResponseError(errors.New("查询群成员关系失败"))
+		return
+	}
+	if !isMember {
+		c.ResponseError(errors.New("非群成员不能添加群成员"))
+		return
+	}
 	// 判断是否允许系统账号进入群聊
 	appConfig, err := g.commonService.GetAppConfig()
 	if err != nil {

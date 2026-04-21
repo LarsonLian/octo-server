@@ -280,6 +280,15 @@ func TestGroupMemberAdd(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
+	// operator 必须是群成员,否则会被拒绝(issue#1018)
+	err = f.db.InsertMember(&MemberModel{
+		GroupNo: "1",
+		UID:     testutil.UID,
+		Role:    MemberRoleCreator,
+		Version: 1,
+	})
+	assert.NoError(t, err)
+
 	w := httptest.NewRecorder()
 	req, err := http.NewRequest("POST", "/v1/groups/1/members", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
 		"members": []string{"10009", "10010"},
@@ -290,6 +299,110 @@ func TestGroupMemberAdd(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
+}
+
+// TestGroupMemberAdd_NonMemberForbidden 回归测试 issue#1018:
+// 非群成员的任意用户不能向 Invite==0 的群添加成员
+func TestGroupMemberAdd_NonMemberForbidden(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	err = f.userDB.Insert(&user.Model{UID: "victim_a", Name: "A", ShortNo: "sa1"})
+	assert.NoError(t, err)
+	err = f.userDB.Insert(&user.Model{UID: "victim_b", Name: "B", ShortNo: "sb1"})
+	assert.NoError(t, err)
+	err = f.userDB.Insert(&user.Model{UID: "group_owner", Name: "Owner", ShortNo: "so1"})
+	assert.NoError(t, err)
+
+	// 创建群,群主是 group_owner,operator(testutil.UID) 不是成员
+	err = f.db.Insert(&Model{
+		GroupNo: "g_victim",
+		Name:    "victim_group",
+		Creator: "group_owner",
+		Status:  1,
+		Invite:  0,
+	})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{
+		GroupNo: "g_victim",
+		UID:     "group_owner",
+		Role:    MemberRoleCreator,
+		Version: 1,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("POST", "/v1/groups/g_victim/members", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"members": []string{"victim_a", "victim_b"},
+	}))))
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+
+	// 应该被拒绝
+	assert.NotEqual(t, http.StatusOK, w.Code, "非群成员不应能添加群成员")
+
+	// 被攻击的用户不应被实际写入
+	exist, err := f.db.ExistMember("victim_a", "g_victim")
+	assert.NoError(t, err)
+	assert.False(t, exist, "victim_a 不应被加入群")
+}
+
+// TestGroupMemberAdd_KickedMemberForbidden 回归测试 issue#1018:
+// 曾经是群成员但已被移除(is_deleted=1)的用户,不能再通过 memberAdd 添加他人
+func TestGroupMemberAdd_KickedMemberForbidden(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	err = f.userDB.Insert(&user.Model{UID: "victim_c", Name: "C", ShortNo: "sc1"})
+	assert.NoError(t, err)
+	err = f.userDB.Insert(&user.Model{UID: "owner_k", Name: "OwnerK", ShortNo: "sok1"})
+	assert.NoError(t, err)
+
+	err = f.db.Insert(&Model{
+		GroupNo: "g_kicked",
+		Name:    "kicked_group",
+		Creator: "owner_k",
+		Status:  1,
+		Invite:  0,
+	})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{
+		GroupNo: "g_kicked",
+		UID:     "owner_k",
+		Role:    MemberRoleCreator,
+		Version: 1,
+	})
+	assert.NoError(t, err)
+	// operator(testutil.UID) 是一个"已被踢出"的成员 —— is_deleted=1
+	err = f.db.InsertMember(&MemberModel{
+		GroupNo:   "g_kicked",
+		UID:       testutil.UID,
+		Role:      MemberRoleCommon,
+		Version:   2,
+		IsDeleted: 1,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("POST", "/v1/groups/g_kicked/members", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"members": []string{"victim_c"},
+	}))))
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.NotEqual(t, http.StatusOK, w.Code, "已被踢出的成员不应能添加群成员")
+
+	exist, err := f.db.ExistMember("victim_c", "g_kicked")
+	assert.NoError(t, err)
+	assert.False(t, exist, "victim_c 不应被加入群")
 }
 
 func TestGroupMemberRemove(t *testing.T) {

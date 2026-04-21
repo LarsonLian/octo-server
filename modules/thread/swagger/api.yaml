@@ -74,7 +74,7 @@ paths:
           default: 15
           minimum: 1
           maximum: 100
-          description: "每页条数，默认 15，最大 100。超出上限或非法值时夹回默认值"
+          description: "每页条数，默认 15，最大 100。超过 100 会被夹到 100；<=0 时取默认值 15"
       responses:
         200:
           description: "分页结果"

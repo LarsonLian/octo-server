@@ -367,7 +367,7 @@ func (s *Service) GetThreads(groupNo string, pageIndex, pageSize int64) ([]*Thre
 		pageSize = DefaultThreadPageSize
 	}
 	if pageSize > MaxThreadPageSize {
-		pageSize = DefaultThreadPageSize
+		pageSize = MaxThreadPageSize
 	}
 
 	total, err := s.db.CountByGroupNo(groupNo)

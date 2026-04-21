@@ -233,14 +233,15 @@ func TestListThreads_Pagination(t *testing.T) {
 	util.ReadJsonByByte(w.Body.Bytes(), &p3)
 	assert.Len(t, p3.List, 5)
 
-	// 场景 5：page_size 超上限（>100）夹回默认值
+	// 场景 5：page_size 超上限（>100）夹到最大值 100
+	// 此处仅创建了 25 条子区，所以实际返回 25 条
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads?page_size=9999", nil)
 	req.Header.Set("token", testutil.Token)
 	s.GetRoute().ServeHTTP(w, req)
 	var pOver threadListResp
 	util.ReadJsonByByte(w.Body.Bytes(), &pOver)
-	assert.Len(t, pOver.List, 15, "page_size>100 应被夹回默认值 15")
+	assert.Len(t, pOver.List, total, "page_size>100 应夹到 100，返回全部 25 条")
 }
 
 // TestListThreads_DBPagination 直接在 DB 层验证 offset/limit 参数

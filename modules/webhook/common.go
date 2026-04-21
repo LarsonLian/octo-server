@@ -6,10 +6,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"go.uber.org/zap"
 )
 
@@ -23,8 +23,8 @@ const EventOnlineStatus = "user.onlinestatus"
 const EventMsgNotify = "msg.notify"
 
 const (
-	nameCachePrefix       string = "name:"
-	groupNameCachePrefix  string = "groupName:"
+	nameCachePrefix        string = "name:"
+	groupNameCachePrefix   string = "groupName:"
 	threadTitleCachePrefix string = "threadTitle:"
 )
 
@@ -40,6 +40,11 @@ type PayloadInfo struct {
 	Operation   string
 
 	SpaceID string // 推送所属 Space
+
+	// 路由字段：客户端点击通知跳转到对应会话所需
+	ChannelID   string
+	ChannelType uint8
+	MessageSeq  uint32
 }
 
 func (p *PayloadInfo) toPayload() Payload {
@@ -107,6 +112,9 @@ func ParsePushInfo(msgResp msgOfflineNotify, ctx *config.Context, toUser *user.R
 	}
 	payloadInfo.Content = content
 	payloadInfo.SpaceID = msgResp.SpaceID
+	payloadInfo.ChannelID = msgResp.ChannelID
+	payloadInfo.ChannelType = msgResp.ChannelType
+	payloadInfo.MessageSeq = msgResp.MessageSeq
 
 	return payloadInfo, nil
 }

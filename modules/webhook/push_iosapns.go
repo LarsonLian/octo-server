@@ -6,10 +6,10 @@ import (
 	"os"
 	"sync"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/sideshow/apns2"
 	"github.com/sideshow/apns2/certificate"
 	"github.com/sideshow/apns2/token"
@@ -18,16 +18,40 @@ import (
 // IOSPayload iOS负载
 type IOSPayload struct {
 	Payload
-	spaceID string
+	spaceID     string
+	channelID   string
+	channelType uint8
+	messageSeq  uint32
 }
 
 // NewIOSPayload NewIOSPayload
 func NewIOSPayload(payloadInfo *PayloadInfo) Payload {
 
 	return &IOSPayload{
-		Payload: payloadInfo.toPayload(),
-		spaceID: payloadInfo.SpaceID,
+		Payload:     payloadInfo.toPayload(),
+		spaceID:     payloadInfo.SpaceID,
+		channelID:   payloadInfo.ChannelID,
+		channelType: payloadInfo.ChannelType,
+		messageSeq:  payloadInfo.MessageSeq,
 	}
+}
+
+// applyRouting 将 space_id 与会话路由字段附加到 APNs payload 顶层，
+// 供客户端点击通知时跳转到对应会话使用。
+func (p *IOSPayload) applyRouting(data map[string]interface{}) {
+	if p.spaceID != "" {
+		data["space_id"] = p.spaceID
+	}
+	if p.channelID == "" {
+		return
+	}
+	data["channel_id"] = p.channelID
+	// ChannelType 0 不是合法枚举值（1=单聊 2=群聊 5=子区），视为未设置跳过。
+	if p.channelType != 0 {
+		data["channel_type"] = p.channelType
+	}
+	// channel_id 存在时 message_seq 一起下发，避免客户端拿不到定位序号。
+	data["message_seq"] = p.messageSeq
 }
 
 // IOSPush IOSPush
@@ -142,9 +166,7 @@ func (p *IOSPush) Push(deviceToken string, payload Payload) error {
 			"call_type": rtcPayload.GetCallType(),
 			"from_uid":  rtcPayload.GetFromUID(),
 		}
-		if iosPayload.spaceID != "" {
-			data["space_id"] = iosPayload.spaceID
-		}
+		iosPayload.applyRouting(data)
 		notification.Payload = []byte(util.ToJson(data))
 	} else {
 		data := map[string]interface{}{
@@ -157,9 +179,7 @@ func (p *IOSPush) Push(deviceToken string, payload Payload) error {
 				"sound": "default",
 			},
 		}
-		if iosPayload.spaceID != "" {
-			data["space_id"] = iosPayload.spaceID
-		}
+		iosPayload.applyRouting(data)
 		notification.Payload = []byte(util.ToJson(data))
 	}
 

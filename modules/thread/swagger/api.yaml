@@ -50,8 +50,13 @@ paths:
     get:
       tags:
         - "thread"
-      summary: "分页列出群下的子区"
-      description: "按 created_at 降序分页返回群下的活跃子区。调用者必须是该群成员。"
+      summary: "列出群下的子区（兼容模式）"
+      description: |
+        按 created_at 降序返回群下的活跃子区。调用者必须是该群成员。
+
+        响应格式依据是否携带分页参数分流（向后兼容旧客户端）：
+        - **未传** `page_index` / `page_size`：返回裸数组 `[threadResp, ...]`，最多 100 条（等同旧行为）。
+        - **传入任一分页参数**：返回分页信封 `{count, list}`。
       produces:
         - "application/json"
       parameters:
@@ -66,7 +71,7 @@ paths:
           required: false
           default: 1
           minimum: 1
-          description: "页码，从 1 开始，默认 1"
+          description: "页码，从 1 开始，默认 1（传入即触发信封格式）"
         - in: "query"
           name: "page_size"
           type: integer
@@ -74,21 +79,15 @@ paths:
           default: 15
           minimum: 1
           maximum: 100
-          description: "每页条数，默认 15，最大 100。超过 100 会被夹到 100；<=0 时取默认值 15"
+          description: "每页条数，默认 15，最大 100。超过 100 会被夹到 100；<=0 时取默认值 15（传入即触发信封格式）"
       responses:
         200:
-          description: "分页结果"
-          schema:
-            type: object
-            properties:
-              count:
-                type: integer
-                format: int64
-                description: "该群活跃子区总数"
-              list:
-                type: array
-                items:
-                  $ref: "#/definitions/threadResp"
+          description: |
+            列表结果。响应格式依据是否携带分页参数分流：
+            - 未传 page_index / page_size：返回裸数组 `[threadResp, ...]`，最多 100 条（向后兼容旧客户端）。
+            - 传入任一分页参数：返回分页信封 `{count: int64, list: [threadResp, ...]}`。
+
+            注意：Swagger 2.0 无法表达两种结构的 oneOf，此处仅用文字说明，schema 约束留给调用方按实际参数处理。
         400:
           description: "参数错误或非群成员"
           schema:

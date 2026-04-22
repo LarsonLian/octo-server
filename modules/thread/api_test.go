@@ -159,7 +159,7 @@ func TestListThreads(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 	}
 
-	// 列出子区
+	// 列出子区（不传分页参数 → 兼容旧格式：裸数组）
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads", nil)
 	req.Header.Set("token", testutil.Token)
@@ -167,10 +167,9 @@ func TestListThreads(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var resp threadListResp
-	util.ReadJsonByByte(w.Body.Bytes(), &resp)
-	assert.Equal(t, int64(2), resp.Count)
-	assert.Len(t, resp.List, 2)
+	var list []*ThreadResp
+	util.ReadJsonByByte(w.Body.Bytes(), &list)
+	assert.Len(t, list, 2)
 	assert.Contains(t, w.Body.String(), `"话题A"`)
 	assert.Contains(t, w.Body.String(), `"话题B"`)
 }
@@ -186,16 +185,16 @@ func TestListThreads_Pagination(t *testing.T) {
 		createThreadViaAPI(t, s, groupNo, fmt.Sprintf("话题%02d", i))
 	}
 
-	// 场景 1：默认分页（不传参），page_size 默认 15
+	// 场景 1：传 page_size=15，返回信封格式
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads", nil)
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads?page_size=15", nil)
 	req.Header.Set("token", testutil.Token)
 	s.GetRoute().ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 	var page1 threadListResp
 	util.ReadJsonByByte(w.Body.Bytes(), &page1)
 	assert.Equal(t, int64(total), page1.Count, "count 应为全部子区数")
-	assert.Len(t, page1.List, 15, "默认 page_size 应为 15")
+	assert.Len(t, page1.List, 15, "page_size 应为 15")
 
 	// 场景 2：page_size=10, page_index=1
 	w = httptest.NewRecorder()
@@ -242,6 +241,54 @@ func TestListThreads_Pagination(t *testing.T) {
 	var pOver threadListResp
 	util.ReadJsonByByte(w.Body.Bytes(), &pOver)
 	assert.Len(t, pOver.List, total, "page_size>100 应夹到 100，返回全部 25 条")
+}
+
+// TestListThreads_BackwardCompat_NoParams 不传分页参数时返回裸数组（向后兼容旧客户端）
+func TestListThreads_BackwardCompat_NoParams(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	for _, name := range []string{"A", "B", "C"} {
+		createThreadViaAPI(t, s, groupNo, name)
+	}
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	body := strings.TrimSpace(w.Body.String())
+	assert.True(t, strings.HasPrefix(body, "["), "不传分页参数时响应必须以数组开头，实际: %s", body)
+	assert.False(t, strings.HasPrefix(body, `{"count"`), "不传分页参数时响应不应为信封")
+
+	var list []*ThreadResp
+	util.ReadJsonByByte(w.Body.Bytes(), &list)
+	assert.Len(t, list, 3)
+}
+
+// TestListThreads_EnvelopeWithPageIndex 只传 page_index 也触发信封格式
+func TestListThreads_EnvelopeWithPageIndex(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	for i := 0; i < 3; i++ {
+		createThreadViaAPI(t, s, groupNo, fmt.Sprintf("t%d", i))
+	}
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads?page_index=1", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := strings.TrimSpace(w.Body.String())
+	assert.True(t, strings.HasPrefix(body, "{"), "传分页参数时响应应为信封")
+	var resp threadListResp
+	util.ReadJsonByByte(w.Body.Bytes(), &resp)
+	assert.Equal(t, int64(3), resp.Count)
+	assert.Len(t, resp.List, 3)
 }
 
 // TestListThreads_DBPagination 直接在 DB 层验证 offset/limit 参数
@@ -778,7 +825,7 @@ func TestListThreads_WithStats(t *testing.T) {
 		},
 	})
 
-	// 列出子区
+	// 列出子区（不传分页参数 → 裸数组）
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads", nil)
 	req.Header.Set("token", testutil.Token)
@@ -786,11 +833,11 @@ func TestListThreads_WithStats(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var resp threadListResp
-	util.ReadJsonByByte(w.Body.Bytes(), &resp)
-	assert.Len(t, resp.List, 1)
+	var list []*ThreadResp
+	util.ReadJsonByByte(w.Body.Bytes(), &list)
+	assert.Len(t, list, 1)
 
-	thread := resp.List[0]
+	thread := list[0]
 	assert.Equal(t, int64(1), thread.MessageCount)
 	assert.Equal(t, "你好世界", thread.LastMessageContent)
 	assert.NotEmpty(t, thread.LastMessageSenderName)
@@ -893,7 +940,7 @@ func TestGetThreads_MemberCountBatch(t *testing.T) {
 	shortID1 := createThreadViaAPI(t, s, groupNo, "话题1")
 	_ = createThreadViaAPI(t, s, groupNo, "话题2")
 
-	// 获取子区列表
+	// 获取子区列表（不传分页参数 → 裸数组）
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads", nil)
 	req.Header.Set("token", testutil.Token)
@@ -901,9 +948,8 @@ func TestGetThreads_MemberCountBatch(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var resp threadListResp
-	util.ReadJsonByByte(w.Body.Bytes(), &resp)
-	threads := resp.List
+	var threads []*ThreadResp
+	util.ReadJsonByByte(w.Body.Bytes(), &threads)
 
 	assert.Len(t, threads, 2)
 

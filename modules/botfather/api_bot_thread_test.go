@@ -160,6 +160,37 @@ func TestBotListThreads(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"话题B"`)
 }
 
+// TestBotListThreads_BackwardCompat_NoParams 不传分页参数时返回裸数组
+func TestBotListThreads_BackwardCompat_NoParams(t *testing.T) {
+	s, _, _, groupNo, botToken := setupBotThreadTestData(t)
+
+	createBotThread(t, s, groupNo, botToken, "A")
+	createBotThread(t, s, groupNo, botToken, "B")
+
+	w := botRequest(t, s, "GET", "/v1/bot/groups/"+groupNo+"/threads", botToken, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	body := strings.TrimSpace(w.Body.String())
+	assert.True(t, strings.HasPrefix(body, "["), "不传分页参数时响应必须以数组开头，实际: %s", body)
+}
+
+// TestBotListThreads_EnvelopeWithParams 传分页参数时返回 {count, list} 信封
+func TestBotListThreads_EnvelopeWithParams(t *testing.T) {
+	s, _, _, groupNo, botToken := setupBotThreadTestData(t)
+
+	createBotThread(t, s, groupNo, botToken, "A")
+	createBotThread(t, s, groupNo, botToken, "B")
+	createBotThread(t, s, groupNo, botToken, "C")
+
+	w := botRequest(t, s, "GET", "/v1/bot/groups/"+groupNo+"/threads?page_index=1&page_size=2", botToken, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	body := strings.TrimSpace(w.Body.String())
+	assert.True(t, strings.HasPrefix(body, "{"), "传分页参数时响应应为信封")
+	assert.Contains(t, body, `"count":3`)
+	assert.Contains(t, body, `"list":`)
+}
+
 // ==================== 获取子区详情 ====================
 
 func TestBotGetThread(t *testing.T) {

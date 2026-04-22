@@ -1018,21 +1018,31 @@ func (h *commandHandler) formatBotDisplay(robotID string) string {
 }
 
 func (h *commandHandler) tryCreateBotCore(creatorUID, name, username, botToken, robotID string) error {
+	// 检查 app 是否已存在（CreateApp 是幂等的，会返回已有 app）
+	existingApp, _ := h.appService.GetApp(robotID)
+	appCreatedByUs := existingApp == nil
+
 	appResp, err := h.appService.CreateApp(app.Req{AppID: robotID})
 	if err != nil {
 		return fmt.Errorf("创建app失败: %w", err)
 	}
 
+	compensateApp := func() {
+		if appCreatedByUs {
+			_ = h.appService.DeleteApp(robotID)
+		}
+	}
+
 	tx, err := h.db.session.Begin()
 	if err != nil {
-		_ = h.appService.DeleteApp(robotID)
+		compensateApp()
 		return fmt.Errorf("开启事务失败: %w", err)
 	}
 
 	version, err := h.ctx.GenSeq(common.RobotSeqKey)
 	if err != nil {
 		tx.Rollback()
-		_ = h.appService.DeleteApp(robotID)
+		compensateApp()
 		return fmt.Errorf("GenSeq failed: %w", err)
 	}
 	err = h.db.insertRobotTx(&robotModel{
@@ -1047,12 +1057,12 @@ func (h *commandHandler) tryCreateBotCore(creatorUID, name, username, botToken, 
 	}, tx)
 	if err != nil {
 		tx.Rollback()
-		_ = h.appService.DeleteApp(robotID)
+		compensateApp()
 		return fmt.Errorf("插入机器人记录失败: %w", err)
 	}
 
 	if err = tx.Commit(); err != nil {
-		_ = h.appService.DeleteApp(robotID)
+		compensateApp()
 		return fmt.Errorf("提交事务失败: %w", err)
 	}
 
@@ -1067,7 +1077,7 @@ func (h *commandHandler) tryCreateBotCore(creatorUID, name, username, botToken, 
 		if delErr := h.db.deleteRobot(robotID); delErr != nil {
 			h.Error("回滚 robot 记录失败", zap.Error(delErr), zap.String("robot_id", robotID))
 		}
-		_ = h.appService.DeleteApp(robotID)
+		compensateApp()
 		return fmt.Errorf("创建用户失败: %w", err)
 	}
 	return nil

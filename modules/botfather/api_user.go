@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
 	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
@@ -122,72 +121,16 @@ func (bf *BotFather) createUserBot(c *wkhttp.Context) {
 		description = *req.Description
 	}
 
-	// Create App
-	appResp, err := bf.appService.CreateApp(app.Req{AppID: robotID})
-	if err != nil {
-		bf.Error("创建App失败", zap.Error(err))
+	// 复用 tryCreateBotCore 创建 App + robot + user（含碰撞重试和安全补偿）
+	if err = bf.cmdHandler.tryCreateBotCore(uid, name, username, botToken, robotID); err != nil {
+		bf.Error("创建Bot失败", zap.Error(err))
 		c.ResponseError(errors.New("创建失败"))
 		return
 	}
 
-	// Create robot record
-	tx, err := bf.db.session.Begin()
-	if err != nil {
-		bf.Error("开启事务失败", zap.Error(err))
-		c.ResponseError(errors.New("创建失败"))
-		return
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	version, err := bf.ctx.GenSeq(common.RobotSeqKey)
-	if err != nil {
-		tx.Rollback()
-		c.ResponseError(errors.New("创建失败"))
-		return
-	}
-	err = bf.db.insertRobotTx(&robotModel{
-		AppID:       appResp.AppID,
-		RobotID:     robotID,
-		Username:    username,
-		Token:       appResp.AppKey,
-		Version:     version,
-		Status:      1,
-		CreatorUID:  uid,
-		BotToken:    botToken,
-		Description: description,
-	}, tx)
-	if err != nil {
-		tx.Rollback()
-		bf.Error("插入机器人记录失败", zap.Error(err))
-		c.ResponseError(errors.New("创建失败"))
-		return
-	}
-	if err = tx.Commit(); err != nil {
-		bf.Error("提交事务失败", zap.Error(err))
-		c.ResponseError(errors.New("创建失败"))
-		return
-	}
-
-	// Create user
-	err = bf.userService.AddUser(&user.AddUserReq{
-		UID:      robotID,
-		Username: username,
-		Name:     name,
-		ShortNo:  username,
-		Robot:    1,
-	})
-	if err != nil {
-		// Rollback robot record
-		if delErr := bf.db.deleteRobot(robotID); delErr != nil {
-			bf.Error("回滚robot记录失败", zap.Error(delErr))
-		}
-		bf.Error("创建用户失败", zap.Error(err))
-		c.ResponseError(errors.New("创建失败"))
-		return
+	// 更新 description（tryCreateBotCore 不处理 description）
+	if description != "" {
+		bf.db.updateRobotDescription(robotID, description)
 	}
 
 	// Resolve Space ID: API Key binding takes authority; fall back to request

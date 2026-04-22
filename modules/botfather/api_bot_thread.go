@@ -106,11 +106,23 @@ func (bf *BotFather) botListThreads(c *wkhttp.Context) {
 		return
 	}
 
-	pageIndex, pageSize := c.GetPage()
+	// 向后兼容：未显式传 page_index/page_size 时，返回裸数组（旧调用方格式）。
+	hasPageParam := c.Query("page_index") != "" || c.Query("page_size") != ""
+	var pageIndex, pageSize int64
+	if hasPageParam {
+		pageIndex, pageSize = c.GetPage()
+	} else {
+		pageIndex, pageSize = 1, thread.MaxThreadPageSize
+	}
+
 	threads, total, err := bf.threadService.GetThreads(groupNo, pageIndex, pageSize)
 	if err != nil {
 		bf.Error("获取子区列表失败", zap.Error(err), zap.String("groupNo", groupNo))
 		c.ResponseError(err)
+		return
+	}
+	if !hasPageParam {
+		c.Response(threads)
 		return
 	}
 	c.Response(map[string]interface{}{

@@ -573,19 +573,19 @@ func (h *commandHandler) onBotSelection(fromUID string, input string) {
 		h.disconnectBot(fromUID, selectedBot)
 	case CmdSetName:
 		h.sm.SetState(fromUID, h.spaceID(fromUID), StateWaitingNewName, CmdSetName)
-		h.reply(fromUID, fmt.Sprintf("请输入 %s 的新名称：", selectedBot.RobotID))
+		h.reply(fromUID, fmt.Sprintf("请输入 %s 的新名称：", h.formatBotDisplay(selectedBot.RobotID)))
 	case CmdSetDescription:
 		h.sm.SetState(fromUID, h.spaceID(fromUID), StateWaitingDescription, CmdSetDescription)
-		h.reply(fromUID, fmt.Sprintf("请输入 %s 的新描述：", selectedBot.RobotID))
+		h.reply(fromUID, fmt.Sprintf("请输入 %s 的新描述：", h.formatBotDisplay(selectedBot.RobotID)))
 	case CmdDeleteBot:
 		h.sm.SetState(fromUID, h.spaceID(fromUID), StateWaitingDeleteConfirm, CmdDeleteBot)
-		h.reply(fromUID, fmt.Sprintf("确定要删除 %s 吗？输入 \"Yes, delete it\" 确认：", selectedBot.RobotID))
+		h.reply(fromUID, fmt.Sprintf("确定要删除 %s 吗？输入 \"Yes, delete it\" 确认：", h.formatBotDisplay(selectedBot.RobotID)))
 	case CmdToken:
 		h.sm.Clear(fromUID, h.spaceID(fromUID))
-		h.reply(fromUID, fmt.Sprintf("机器人 **%s** 的 Token：\n\n`%s`\n\n请妥善保管，不要泄露。", selectedBot.RobotID, selectedBot.BotToken))
+		h.reply(fromUID, fmt.Sprintf("机器人 **%s** 的 Token：\n\n`%s`\n\n请妥善保管，不要泄露。", h.formatBotDisplay(selectedBot.RobotID), selectedBot.BotToken))
 	case CmdRevoke:
 		h.sm.SetState(fromUID, h.spaceID(fromUID), StateWaitingRevokeConfirm, CmdRevoke)
-		h.reply(fromUID, fmt.Sprintf("确定要重置 %s 的 Token 吗？输入 \"Yes, revoke it\" 确认：", selectedBot.RobotID))
+		h.reply(fromUID, fmt.Sprintf("确定要重置 %s 的 Token 吗？输入 \"Yes, revoke it\" 确认：", h.formatBotDisplay(selectedBot.RobotID)))
 	default:
 		h.sm.Clear(fromUID, h.spaceID(fromUID))
 		h.reply(fromUID, "操作异常，已取消。")
@@ -1018,19 +1018,15 @@ func (h *commandHandler) formatBotDisplay(robotID string) string {
 }
 
 func (h *commandHandler) tryCreateBotCore(creatorUID, name, username, botToken, robotID string) error {
-	// 检查 app 是否已存在（CreateApp 是幂等的，会返回已有 app）
-	existingApp, _ := h.appService.GetApp(robotID)
-	appCreatedByUs := existingApp == nil
-
+	// robot_id 是自动生成的唯一值，app_id = robot_id 不会命中已有 app，
+	// 所以 CreateApp 一定是新建，失败时可安全删除。
 	appResp, err := h.appService.CreateApp(app.Req{AppID: robotID})
 	if err != nil {
 		return fmt.Errorf("创建app失败: %w", err)
 	}
 
 	compensateApp := func() {
-		if appCreatedByUs {
-			_ = h.appService.DeleteApp(robotID)
-		}
+		_ = h.appService.DeleteApp(robotID)
 	}
 
 	tx, err := h.db.session.Begin()

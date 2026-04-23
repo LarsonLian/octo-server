@@ -223,11 +223,13 @@ func (s *Space) createSpaceCore(p createSpaceParams) (*createSpaceResult, error)
 	}
 
 	result := &createSpaceResult{SpaceID: spaceId}
-	if code, inviteErr := s.insertInvitationWithRetry(&InvitationModel{
+	inviteModel := &InvitationModel{
 		SpaceId: spaceId,
 		Creator: p.Creator,
 		Status:  1,
-	}); inviteErr == nil {
+	}
+	applyAutoInviteDefaults(inviteModel, time.Now())
+	if code, inviteErr := s.insertInvitationWithRetry(inviteModel); inviteErr == nil {
 		result.InviteCode = code
 	} else {
 		s.Warn("创建默认邀请码失败", zap.Error(inviteErr), zap.String("spaceId", spaceId))
@@ -684,11 +686,13 @@ func (s *Space) createInvite(c *wkhttp.Context) {
 		return
 	}
 
-	inviteCode, err := s.insertInvitationWithRetry(&InvitationModel{
+	inviteModel := &InvitationModel{
 		SpaceId: spaceId,
 		Creator: loginUID,
 		Status:  1,
-	})
+	}
+	applyAutoInviteDefaults(inviteModel, time.Now())
+	inviteCode, err := s.insertInvitationWithRetry(inviteModel)
 	if err != nil {
 		s.Error("创建邀请链接失败", zap.Error(err), zap.String("spaceId", spaceId))
 		c.ResponseError(errors.New("创建邀请链接失败"))

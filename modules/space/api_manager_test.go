@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-server/pkg/db"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
@@ -559,6 +560,32 @@ func TestManager_CreateInvite_WithOverrides(t *testing.T) {
 	assert.Equal(t, "2030-01-01 00:00:00", resp.ExpiresAt)
 }
 
+// TestManager_CreateInvite_ExplicitZeroMaxUses 管理端显式传 max_uses=0 应透传为"不限"，
+// 即使 DM_SPACE_INVITE_DEFAULT_MAX_USES 设了非零默认也不被覆盖。（review #1 回归）
+func TestManager_CreateInvite_ExplicitZeroMaxUses(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+	token := adminToken(t)
+	t.Setenv(envInviteDefaultMaxUses, "50") // 非零默认
+
+	seedSpace(t, "mgr-inv-zero", "zero max", "u-owner", SpaceStatusNormal)
+
+	body := `{"max_uses":0}`
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/manager/spaces/mgr-inv-zero/invites", bytes.NewBufferString(body))
+	req.Header.Set("token", token)
+	req.Header.Set("Content-Type", "application/json")
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		MaxUses    int    `json:"max_uses"`
+		InviteCode string `json:"invite_code"`
+	}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 0, resp.MaxUses, "显式 0 应保留，不被环境变量默认值覆盖")
+}
+
 func TestManager_CreateInvite_NonExistentSpace(t *testing.T) {
 	s, _, err := setup(t)
 	assert.NoError(t, err)
@@ -642,6 +669,32 @@ func TestManager_UpdateInvite_CodeNotFound(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	s.GetRoute().ServeHTTP(w, req)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// TestGetInvitePreview_ExpiredCodeNotFound 公开预览端点遇过期码应视为无效，
+// 避免通过"有效/无效"差异确认码曾经有效。（review #5 回归）
+func TestGetInvitePreview_ExpiredCodeNotFound(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+
+	seedSpace(t, "sp-expired-inv", "expired code", "u-owner", SpaceStatusNormal)
+
+	// 过期时间为 1 小时前
+	past := db.Time(time.Now().Add(-1 * time.Hour))
+	err = testSpaceDB.insertInvitation(&InvitationModel{
+		SpaceId:    "sp-expired-inv",
+		InviteCode: "expired-code-x",
+		Creator:    "u-owner",
+		Status:     1,
+		ExpiresAt:  &past,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/space/invite/expired-code-x/preview", nil)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "过期码应等价于无效码")
+	assert.NotContains(t, w.Body.String(), "sp-expired-inv", "不应泄露 space_id")
 }
 
 // TestGetSpace_NoInviteCodeInResponse 用户侧 GET /v1/space/:id 不再返回 invite_code。

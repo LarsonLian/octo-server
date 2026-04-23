@@ -349,6 +349,10 @@ func (d *managerDB) disableInvitation(spaceId, code string) (int64, error) {
 
 // updateInvitationAdmin 管理端可修改 max_uses / expires_at / status，nil 字段不变更。
 // 返回 affected rows，0 表示记录不存在。
+//
+// 有意设计：WHERE 不限制 status，管理员可以对已禁用（status=0）的邀请码执行 PUT，
+// 包括通过 {"status": 1} 重新启用——这是管理操作的必要能力（如误禁恢复）。
+// 若要禁止重新启用，应在 API 层决策，不在此函数加 AND status=1。
 func (d *managerDB) updateInvitationAdmin(spaceId, code string, maxUses *int, expiresAt *time.Time, status *int) (int64, error) {
 	builder := d.session.Update("space_invitation")
 	changed := false

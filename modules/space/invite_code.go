@@ -26,7 +26,8 @@ const (
 	inviteDefaultTTL = 72 * time.Hour
 )
 
-// generateInviteCodeFn 包级函数变量，便于测试注入碰撞场景。
+// generateInviteCodeFn 包级函数变量，测试通过直接赋值注入碰撞场景。
+// 非线程安全：测试用例**禁止**使用 t.Parallel()，修改需配合 defer 恢复原值。
 var generateInviteCodeFn = defaultGenerateInviteCode
 
 func defaultGenerateInviteCode() (string, error) {
@@ -65,9 +66,13 @@ func inviteDefaults(now time.Time) (int, *time.Time) {
 	return maxUses, expiresAt
 }
 
-// applyInviteDefaultsIfNeeded 若调用方未显式设置，填充默认 max_uses / expires_at。
-// 已设置的字段保持不变，便于管理端 API 透传用户指定的值。
-func applyInviteDefaultsIfNeeded(model *InvitationModel, now time.Time) {
+// applyAutoInviteDefaults 为"无用户输入"的自动路径（createSpaceCore、用户侧 createInvite）
+// 填充默认 max_uses / expires_at。
+//
+// 仅当字段为零值时才填充——MaxUses==0 对这些调用方等价于"未设置"。
+// **管理端路径禁止使用本函数**：管理端需要区分"用户显式传 max_uses=0（不限）"与"未传"，
+// 应由 handler 自行按 *int 的 nil 与否决定是否应用默认值。
+func applyAutoInviteDefaults(model *InvitationModel, now time.Time) {
 	defMaxUses, defExpiresAt := inviteDefaults(now)
 	if model.MaxUses == 0 {
 		model.MaxUses = defMaxUses
@@ -79,10 +84,9 @@ func applyInviteDefaultsIfNeeded(model *InvitationModel, now time.Time) {
 }
 
 // insertInvitationWithRetry 碰撞重试写入。成功返回最终 code；持续 Duplicate 则在耗尽重试后返回错误。
-// 调用方可预设 SpaceId/Creator/MaxUses/ExpiresAt/Status 等字段，InviteCode 字段由本函数覆盖。
+// 调用方需预先填好 SpaceId/Creator/MaxUses/ExpiresAt/Status 等字段（含默认值），InviteCode 由本函数覆盖。
+// 不再内部应用默认值——默认策略由调用方按语义决定。
 func (s *Space) insertInvitationWithRetry(model *InvitationModel) (string, error) {
-	applyInviteDefaultsIfNeeded(model, time.Now())
-
 	var lastErr error
 	for attempt := 0; attempt < inviteCodeMaxRetries; attempt++ {
 		code, err := generateInviteCode()

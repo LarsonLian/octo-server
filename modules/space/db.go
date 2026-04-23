@@ -239,10 +239,14 @@ func (d *DB) queryInvitationsBySpaceID(spaceID string) ([]*InvitationModel, erro
 	return models, err
 }
 
+// queryInvitationByCode 查询有效邀请码（status=1 且未过期）。
+// 过期码与不存在码同等处理，避免公开预览端点（getInviteInfo / getInvitePreview）
+// 通过 "有效/无效" 差异泄露"曾经有效"的码（issue #1000 枚举面收敛）。
 func (d *DB) queryInvitationByCode(code string) (*InvitationModel, error) {
 	var m InvitationModel
 	_, err := d.session.Select("*").From("space_invitation").
-		Where("invite_code=? and status=1", code).Load(&m)
+		Where("invite_code=? AND status=1 AND (expires_at IS NULL OR expires_at > ?)", code, time.Now()).
+		Load(&m)
 	if m.InviteCode == "" {
 		return nil, nil
 	}

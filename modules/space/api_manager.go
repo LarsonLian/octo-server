@@ -712,15 +712,23 @@ func (m *Manager) createInvite(c *wkhttp.Context) {
 		Creator: operator,
 		Status:  1,
 	}
+	// 按字段应用默认值：req 中未传的字段走环境变量默认，传了的（即使 0）透传用户意图。
+	// 这样 `{"max_uses": 0}` 能表达"不限使用"而不被默认值覆盖。
+	defMaxUses, defExpiresAt := inviteDefaults(time.Now())
 	if req.MaxUses != nil {
 		if *req.MaxUses < 0 {
 			c.ResponseError(errors.New("max_uses 不能为负"))
 			return
 		}
 		model.MaxUses = *req.MaxUses
+	} else {
+		model.MaxUses = defMaxUses
 	}
 	if expiresAt != nil {
 		t := db.Time(*expiresAt)
+		model.ExpiresAt = &t
+	} else if defExpiresAt != nil {
+		t := db.Time(*defExpiresAt)
 		model.ExpiresAt = &t
 	}
 
@@ -737,9 +745,11 @@ func (m *Manager) createInvite(c *wkhttp.Context) {
 		zap.String("operator", operator),
 	)
 
+	// 显式 Format 保证响应格式与 parseInviteExpiresAt 接受的输入格式一致，
+	// 避免客户端拿到响应后回传被 parse 拒绝。
 	expiresStr := ""
 	if model.ExpiresAt != nil {
-		expiresStr = model.ExpiresAt.String()
+		expiresStr = time.Time(*model.ExpiresAt).Format(inviteTimeLayout)
 	}
 	c.Response(map[string]interface{}{
 		"invite_code": code,
@@ -806,13 +816,18 @@ func (m *Manager) updateInvite(c *wkhttp.Context) {
 	c.ResponseOK()
 }
 
+// inviteTimeLayout 管理端邀请码 API 的 expires_at 时间格式。
+// 与用户侧 updateInvite (api.go) 保持一致，客户端请求与响应均使用服务器本地时区。
+const inviteTimeLayout = "2006-01-02 15:04:05"
+
 // parseInviteExpiresAt 解析管理端 expires_at 字符串，空字符串视为未传。
-// 格式固定为 "2006-01-02 15:04:05"。
+// 时区采用服务器 time.Local，与用户侧 s.updateInvite 解析行为一致；
+// 这意味着部署环境应显式设置 TZ，避免客户端/服务器时区漂移。
 func parseInviteExpiresAt(raw *string) (*time.Time, error) {
 	if raw == nil || *raw == "" {
 		return nil, nil
 	}
-	t, err := time.ParseInLocation("2006-01-02 15:04:05", *raw, time.Local)
+	t, err := time.ParseInLocation(inviteTimeLayout, *raw, time.Local)
 	if err != nil {
 		return nil, errors.New("过期时间格式错误，请使用 2006-01-02 15:04:05 格式")
 	}

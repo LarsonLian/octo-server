@@ -1475,10 +1475,6 @@ func (bf *BotFather) botMessageEdit(c *wkhttp.Context) {
 		c.ResponseError(errors.New("message_id 不能为空"))
 		return
 	}
-	if req.MessageSeq == 0 {
-		c.ResponseError(errors.New("message_seq 不能为空"))
-		return
-	}
 	if req.ChannelID == "" {
 		c.ResponseError(errors.New("channel_id 不能为空"))
 		return
@@ -1495,18 +1491,55 @@ func (bf *BotFather) botMessageEdit(c *wkhttp.Context) {
 	}
 
 	// 权限检查：只允许 Bot 编辑自己发送的消息
-	messageSeqs := []uint32{req.MessageSeq}
-	resp, err := bf.ctx.IMGetWithChannelAndSeqs(req.ChannelID, req.ChannelType, robotID, messageSeqs)
-	if err != nil {
-		bf.Error("查询消息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询消息错误"))
-		return
+	var msgFromUID string
+	if req.MessageSeq > 0 {
+		resp, err := bf.ctx.IMGetWithChannelAndSeqs(req.ChannelID, req.ChannelType, robotID, []uint32{req.MessageSeq})
+		if err != nil {
+			bf.Error("查询消息错误", zap.Error(err))
+			c.ResponseError(errors.New("查询消息错误"))
+			return
+		}
+		if resp == nil || len(resp.Messages) == 0 {
+			c.ResponseError(errors.New("消息不存在"))
+			return
+		}
+		// TOCTOU cross-check: ensure message_id matches message_seq (align with message/api.go:428)
+		if req.MessageID != strconv.FormatInt(resp.Messages[0].MessageID, 10) {
+			c.ResponseError(errors.New("消息ID与消息序号不匹配"))
+			return
+		}
+		msgFromUID = resp.Messages[0].FromUID
+	} else {
+		// message_seq unknown, look up by message_id via WuKongIM API
+		msgIDInt, parseErr := strconv.ParseInt(req.MessageID, 10, 64)
+		if parseErr != nil {
+			bf.Error("message_id格式错误", zap.String("message_id", req.MessageID), zap.Error(parseErr))
+			c.ResponseError(errors.New("message_id格式错误"))
+			return
+		}
+		syncResp, err := bf.ctx.IMSearchMessages(&config.MsgSearchReq{
+			ChannelID:   req.ChannelID,
+			ChannelType: req.ChannelType,
+			MessageIds:  []int64{msgIDInt},
+			LoginUID:    robotID,
+		})
+		if err != nil {
+			bf.Error("查询消息错误", zap.Error(err))
+			c.ResponseError(errors.New("查询消息错误"))
+			return
+		}
+		if syncResp == nil || len(syncResp.Messages) == 0 {
+			c.ResponseError(errors.New("消息不存在"))
+			return
+		}
+		if syncResp.Messages[0].MessageSeq == 0 {
+			c.ResponseError(errors.New("消息尚未投递完成，请稍后重试"))
+			return
+		}
+		msgFromUID = syncResp.Messages[0].FromUID
+		req.MessageSeq = syncResp.Messages[0].MessageSeq
 	}
-	if resp == nil || len(resp.Messages) == 0 {
-		c.ResponseError(errors.New("消息不存在"))
-		return
-	}
-	if resp.Messages[0].FromUID != robotID {
+	if msgFromUID != robotID {
 		c.ResponseError(errors.New("只能编辑自己发送的消息"))
 		return
 	}
@@ -1516,7 +1549,7 @@ func (bf *BotFather) botMessageEdit(c *wkhttp.Context) {
 	contentMD5 := util.MD5(contentEdit)
 
 	var existCount int
-	err = bf.ctx.DB().Select("count(*)").From("message_extra").Where("message_id=? and content_edit_hash=?", req.MessageID, contentMD5).LoadOne(&existCount)
+	err := bf.ctx.DB().Select("count(*)").From("message_extra").Where("message_id=? and content_edit_hash=?", req.MessageID, contentMD5).LoadOne(&existCount)
 	if err != nil {
 		bf.Error("查询是否存在相同正文失败！", zap.Error(err))
 		c.ResponseError(errors.New("查询是否存在相同正文失败！"))

@@ -724,17 +724,9 @@ func (s *Space) joinSpace(c *wkhttp.Context) {
 		return
 	}
 	if invitation == nil {
+		// queryInvitationByCode 已在 SQL 层过滤 status!=1 与已过期，命中即有效。
 		c.ResponseError(errors.New("邀请码无效或已过期"))
 		return
-	}
-
-	// 检查是否过期
-	if invitation.ExpiresAt != nil {
-		expiresAt := time.Time(*invitation.ExpiresAt)
-		if !expiresAt.IsZero() && expiresAt.Before(time.Now()) {
-			c.ResponseError(errors.New("邀请码已过期"))
-			return
-		}
 	}
 
 	// 检查空间是否存在

@@ -258,10 +258,20 @@ func (d *DB) incrementInviteUsedCount(code string) error {
 	return err
 }
 
-// incrementInviteUsedCountAtomic atomically increments the used_count only if the limit has not been reached.
-// Returns true if the increment was successful (i.e., usage was allowed), false if the limit was already reached.
+// incrementInviteUsedCountAtomic atomically increments used_count iff the invite is
+// still valid (status=1, not expired, under max_uses). Filter conditions must stay in
+// sync with queryInvitationByCode so the read→write path keeps the same validity view,
+// closing TOCTOU windows where an admin disables the code (PUT status=0) or TTL elapses
+// between SELECT and UPDATE.
+// Returns true if the increment was applied, false if the row no longer qualifies.
 func (d *DB) incrementInviteUsedCountAtomic(code string) (bool, error) {
-	result, err := d.session.UpdateBySql("UPDATE space_invitation SET used_count=used_count+1 WHERE invite_code=? AND (max_uses=0 OR used_count<max_uses)", code).Exec()
+	result, err := d.session.UpdateBySql(
+		"UPDATE space_invitation SET used_count=used_count+1 "+
+			"WHERE invite_code=? AND status=1 "+
+			"AND (max_uses=0 OR used_count<max_uses) "+
+			"AND (expires_at IS NULL OR expires_at > ?)",
+		code, time.Now(),
+	).Exec()
 	if err != nil {
 		return false, err
 	}

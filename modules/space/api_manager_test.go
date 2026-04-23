@@ -671,6 +671,48 @@ func TestManager_UpdateInvite_CodeNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+// TestIncrementInviteUsedCountAtomic_StatusAndExpiryGuard
+// 原子消耗过滤必须与 queryInvitationByCode 同步：禁用（status=0）或已过期的邀请码
+// 即使 max_uses 未到也不得递增。（review #1 回归：TOCTOU gap）
+func TestIncrementInviteUsedCountAtomic_StatusAndExpiryGuard(t *testing.T) {
+	_, _, err := setup(t)
+	assert.NoError(t, err)
+
+	seedSpace(t, "sp-atomic", "atomic guard", "u-owner", SpaceStatusNormal)
+
+	t.Run("disabled code rejected", func(t *testing.T) {
+		err := testSpaceDB.insertInvitation(&InvitationModel{
+			SpaceId: "sp-atomic", InviteCode: "atomic-disabled", Creator: "u-owner", MaxUses: 10, Status: 0,
+		})
+		assert.NoError(t, err)
+		allowed, err := testSpaceDB.incrementInviteUsedCountAtomic("atomic-disabled")
+		assert.NoError(t, err)
+		assert.False(t, allowed, "status=0 不得放行")
+	})
+
+	t.Run("expired code rejected", func(t *testing.T) {
+		past := db.Time(time.Now().Add(-1 * time.Hour))
+		err := testSpaceDB.insertInvitation(&InvitationModel{
+			SpaceId: "sp-atomic", InviteCode: "atomic-expired", Creator: "u-owner", MaxUses: 10, Status: 1, ExpiresAt: &past,
+		})
+		assert.NoError(t, err)
+		allowed, err := testSpaceDB.incrementInviteUsedCountAtomic("atomic-expired")
+		assert.NoError(t, err)
+		assert.False(t, allowed, "过期码不得放行")
+	})
+
+	t.Run("valid code allowed", func(t *testing.T) {
+		future := db.Time(time.Now().Add(1 * time.Hour))
+		err := testSpaceDB.insertInvitation(&InvitationModel{
+			SpaceId: "sp-atomic", InviteCode: "atomic-valid", Creator: "u-owner", MaxUses: 10, Status: 1, ExpiresAt: &future,
+		})
+		assert.NoError(t, err)
+		allowed, err := testSpaceDB.incrementInviteUsedCountAtomic("atomic-valid")
+		assert.NoError(t, err)
+		assert.True(t, allowed, "有效码应放行")
+	})
+}
+
 // TestGetInvitePreview_ExpiredCodeNotFound 公开预览端点遇过期码应视为无效，
 // 避免通过"有效/无效"差异确认码曾经有效。（review #5 回归）
 func TestGetInvitePreview_ExpiredCodeNotFound(t *testing.T) {

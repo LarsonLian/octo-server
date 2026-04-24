@@ -587,6 +587,9 @@ func (s *Service) DeleteThread(groupNo, shortID, operatorUID string) error {
 		s.Warn("通知 WuKongIM 禁用已删除子区频道失败", zap.String("channelID", channelID), zap.Error(err))
 	}
 
+	// 清理所有用户对该子区的置顶
+	user.RemovePinnedForChannel(channelID, common.ChannelTypeCommunityTopic.Uint8())
+
 	return nil
 }
 

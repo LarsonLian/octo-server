@@ -72,6 +72,8 @@ type User struct {
 	onlineService *OnlineService
 	giteeDB       *giteeDB
 	githubDB      *githubDB
+	pinnedDB *PinnedDB
+	pinned   *Pinned
 
 	setting *Setting
 	log.Log
@@ -122,7 +124,10 @@ func New(ctx *config.Context) *User {
 		commonService:            common2.NewService(ctx),
 		appService:               app.NewService(ctx),
 		loginGuard:               NewLoginGuard(ctx.GetRedisConn(), loginGuardThresholdFromEnv(), loginGuardWindowFromEnv()),
+		pinnedDB:                 NewPinnedDB(ctx),
 	}
+	u.pinned = NewPinned(u.pinnedDB, u.friendDB)
+	InitGlobalPinnedDB(ctx) // 初始化全局 PinnedDB 供其他模块调用
 	u.updateSystemUserToken()
 	source.SetUserProvider(u)
 	return u
@@ -197,6 +202,15 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		// #################### 用户红点 ####################
 		user.GET("/reddot/:category", u.getRedDot)      // 获取用户红点
 		user.DELETE("/reddot/:category", u.clearRedDot) // 清除红点
+	}
+
+	// #################### 用户置顶频道（需要 Space 隔离）####################
+	pinned := r.Group("/v1/user/pinned", u.ctx.AuthMiddleware(r), spacepkg.SpaceMiddleware(u.ctx))
+	{
+		pinned.POST("", u.pinned.Add)           // 添加置顶
+		pinned.DELETE("", u.pinned.Remove)      // 移除置顶
+		pinned.GET("", u.pinned.List)           // 获取置顶列表
+		pinned.PUT("/sort", u.pinned.UpdateSort) // 更新排序
 	}
 	v := r.Group("/v1")
 	{

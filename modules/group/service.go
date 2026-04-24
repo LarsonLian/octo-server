@@ -1319,9 +1319,11 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 			},
 		})
 
-		// 移除被踢用户在该群所有子区的成员身份（直接 SQL 查 thread 表）
+		// 移除被踢用户在该群所有子区的成员身份和置顶（直接 SQL 查 thread 表）
 		for _, uid := range removedUIDs {
-			s.removeUserFromGroupThreads(req.GroupNo, uid)
+			s.removeUserFromGroupThreads(req.GroupNo, uid, groupModel.SpaceID)
+			// 清理用户在该群的置顶（按 Space 隔离）
+			user.RemovePinnedForUserInSpace(uid, groupModel.SpaceID, req.GroupNo, common.ChannelTypeGroup.Uint8())
 		}
 	}
 
@@ -1474,8 +1476,8 @@ func beginAvatarUpdateEvent(ctx *config.Context, db *DB, groupNo string, memberU
 	return eventID, nil
 }
 
-// removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录和 IM 订阅（直接 SQL）
-func (s *Service) removeUserFromGroupThreads(groupNo, uid string) {
+// removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录、IM 订阅和置顶（直接 SQL）
+func (s *Service) removeUserFromGroupThreads(groupNo, uid, spaceID string) {
 	type threadInfo struct {
 		ShortID string `db:"short_id"`
 	}
@@ -1502,7 +1504,7 @@ func (s *Service) removeUserFromGroupThreads(groupNo, uid string) {
 		return
 	}
 
-	// 移除 IM 订阅
+	// 移除 IM 订阅和置顶
 	for _, t := range threads {
 		channelID := groupNo + "____" + t.ShortID
 		if rmErr := s.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
@@ -1512,6 +1514,8 @@ func (s *Service) removeUserFromGroupThreads(groupNo, uid string) {
 		}); rmErr != nil {
 			s.Error("remove thread IM subscriber failed", zap.Error(rmErr), zap.String("channelID", channelID), zap.String("uid", uid))
 		}
+		// 清理用户在该子区的置顶
+		user.RemovePinnedForUserInSpace(uid, spaceID, channelID, common.ChannelTypeCommunityTopic.Uint8())
 	}
 }
 

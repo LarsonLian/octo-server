@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -22,6 +23,8 @@ func init() {
 	register.AddModule(func(ctx interface{}) register.Module {
 
 		api := New(ctx.(*config.Context))
+		// 注册群成员检查函数，供 user 模块置顶校验使用
+		user.RegisterGroupMemberChecker(api.groupService.ExistMember)
 		return register.Module{
 			Name: "group",
 			SetupAPI: func() register.APIRouter {

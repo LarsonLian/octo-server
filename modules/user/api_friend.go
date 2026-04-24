@@ -274,6 +274,10 @@ func (f *Friend) delete(c *wkhttp.Context) {
 		f.Error("发送删除好友的cmd失败！", zap.Error(err))
 	}
 
+	// 清理双方的好友置顶
+	RemovePinnedForUser(loginUID, uid, common.ChannelTypePerson.Uint8())
+	RemovePinnedForUser(uid, loginUID, common.ChannelTypePerson.Uint8())
+
 	c.ResponseOK()
 }
 

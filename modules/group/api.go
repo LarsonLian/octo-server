@@ -2430,8 +2430,8 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 	if groupAvatarEventID != 0 {
 		g.ctx.EventCommit(groupAvatarEventID)
 	}
-	// 移除用户在该群所有子区的成员身份
-	g.removeUserFromGroupThreads(groupNo, loginUID)
+	// 移除用户在该群所有子区的成员身份和置顶
+	g.removeUserFromGroupThreads(groupNo, loginUID, groupInfo.SpaceID)
 	// 发送群成员更新命令
 	err = g.ctx.SendCMD(config.MsgCMDReq{
 		ChannelID:   groupNo,
@@ -2458,12 +2458,14 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 			g.Error("发送成员退出群聊错误", zap.Error(err))
 		}
 	}
+	// 清理用户在该群的置顶（按 Space 隔离）
+	user.RemovePinnedForUserInSpace(loginUID, groupInfo.SpaceID, groupNo, common.ChannelTypeGroup.Uint8())
 	c.ResponseOK()
 
 }
 
-// removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录和 IM 订阅
-func (g *Group) removeUserFromGroupThreads(groupNo, uid string) {
+// removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录、IM 订阅和置顶
+func (g *Group) removeUserFromGroupThreads(groupNo, uid, spaceID string) {
 	// 查询用户在该群加入的所有子区（shortID 用于构建 IM channelID）
 	type threadInfo struct {
 		ShortID string `db:"short_id"`
@@ -2491,7 +2493,7 @@ func (g *Group) removeUserFromGroupThreads(groupNo, uid string) {
 		return
 	}
 
-	// 移除 IM 订阅
+	// 移除 IM 订阅和置顶
 	for _, t := range threads {
 		// 子区 channelID 格式: {groupNo}____{shortID} (与 thread.BuildChannelID 一致)
 		channelID := groupNo + "____" + t.ShortID
@@ -2502,6 +2504,8 @@ func (g *Group) removeUserFromGroupThreads(groupNo, uid string) {
 		}); rmErr != nil {
 			g.Error("移除子区IM订阅者失败", zap.Error(rmErr), zap.String("channelID", channelID), zap.String("uid", uid))
 		}
+		// 清理用户在该子区的置顶
+		user.RemovePinnedForUserInSpace(uid, spaceID, channelID, common.ChannelTypeCommunityTopic.Uint8())
 	}
 }
 

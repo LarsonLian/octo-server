@@ -599,3 +599,131 @@ func TestGroupInviteAuthorize_ExternalBlocked(t *testing.T) {
 	_, authCodeExists := resp["auth_code"]
 	assert.False(t, authCodeExists, "external_blocked 场景不应返回 auth_code")
 }
+
+// 跨 Space 用户扫 AllowExternal=0 群邀请码：authorize 短路返回 external_blocked。
+// 这显式覆盖「登录用户不是该 Space 成员」的分支（回归 YUJ-38 修复）。
+func TestGroupInviteAuthorize_ExternalBlocked_NonSpaceMember(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-yuj38-cross"
+	// 只给其他用户授予 space_member，当前登录用户（testutil.UID）不是成员。
+	_, err = ctx.DB().InsertInto("space").
+		Columns("space_id", "name", "creator", "status").
+		Values(spaceID, "空间 A", "10001", 1).Exec()
+	assert.NoError(t, err)
+	_, err = ctx.DB().InsertInto("space_member").
+		Columns("space_id", "uid", "role", "status").
+		Values(spaceID, "10001", 0, 1).Exec()
+	assert.NoError(t, err)
+
+	groupNo := "g-invite-auth-cross-space"
+	err = f.db.Insert(&Model{
+		GroupNo:       groupNo,
+		Name:          "Space 内部群",
+		Creator:       "10001",
+		Status:        1,
+		Invite:        0,
+		SpaceID:       spaceID,
+		AllowExternal: 0,
+	})
+	assert.NoError(t, err)
+
+	code := "test-auth-cross-space-code"
+	err = ctx.GetRedisConn().SetAndExpire(
+		fmt.Sprintf("%s%s", common.QRCodeCachePrefix, code),
+		util.ToJson(common.NewQRCodeModel(common.QRCodeTypeGroup, map[string]interface{}{
+			"group_no":  groupNo,
+			"generator": "10001",
+		})),
+		time.Hour,
+	)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/group/invite/authorize?code="+code, nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "external_blocked", resp["status"])
+	assert.Equal(t, groupNo, resp["group_no"])
+	_, authCodeExists := resp["auth_code"]
+	assert.False(t, authCodeExists, "跨 Space 用户不应拿到 auth_code")
+}
+
+// 同 Space 成员扫 AllowExternal=0 群邀请码：authorize 不再误杀为 external_blocked，
+// 应继续走正常流程并生成 auth_code（回归 YUJ-38 Critical 修复）。
+func TestGroupInviteAuthorize_SameSpaceMemberNotBlocked(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	spaceID := "space-yuj38-same"
+	_, err = ctx.DB().InsertInto("space").
+		Columns("space_id", "name", "creator", "status").
+		Values(spaceID, "空间 A", "10001", 1).Exec()
+	assert.NoError(t, err)
+	// 当前登录用户 testutil.UID 以及群主 10001 都是该 Space 成员。
+	for _, uid := range []string{testutil.UID, "10001"} {
+		_, err = ctx.DB().InsertInto("space_member").
+			Columns("space_id", "uid", "role", "status").
+			Values(spaceID, uid, 0, 1).Exec()
+		assert.NoError(t, err)
+	}
+
+	groupNo := "g-invite-auth-same-space"
+	err = f.db.Insert(&Model{
+		GroupNo:       groupNo,
+		Name:          "Space 内部群",
+		Creator:       "10001",
+		Status:        1,
+		Invite:        0,
+		SpaceID:       spaceID,
+		AllowExternal: 0,
+	})
+	assert.NoError(t, err)
+
+	code := "test-auth-same-space-code"
+	err = ctx.GetRedisConn().SetAndExpire(
+		fmt.Sprintf("%s%s", common.QRCodeCachePrefix, code),
+		util.ToJson(common.NewQRCodeModel(common.QRCodeTypeGroup, map[string]interface{}{
+			"group_no":  groupNo,
+			"generator": "10001",
+		})),
+		time.Hour,
+	)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/group/invite/authorize?code="+code, nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	// 同 Space 成员不应该被 external_blocked 误杀。
+	if status, ok := resp["status"].(string); ok {
+		assert.NotEqual(t, "external_blocked", status, "同 Space 成员不应被 external_blocked")
+	}
+	assert.Equal(t, groupNo, resp["group_no"])
+	authCode, _ := resp["auth_code"].(string)
+	assert.NotEmpty(t, authCode, "同 Space 成员应拿到 auth_code 正常入群")
+
+	// 校验 auth_code 写入 Redis（与 TestGroupInviteAuthorize_OK 同样的 shape）。
+	cached, err := ctx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode))
+	assert.NoError(t, err)
+	var payload map[string]interface{}
+	assert.NoError(t, json.Unmarshal([]byte(cached), &payload))
+	assert.Equal(t, groupNo, payload["group_no"])
+	assert.Equal(t, testutil.UID, payload["scaner"])
+	assert.Equal(t, string(common.AuthCodeTypeJoinGroup), payload["type"])
+}

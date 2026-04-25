@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
-	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -39,7 +39,6 @@ type QRCode struct {
 	ctx *config.Context
 	log.Log
 	groupDB     *group.DB
-	spaceDB     *space.DB
 	userService user.IService
 }
 
@@ -49,7 +48,6 @@ func New(ctx *config.Context) *QRCode {
 		ctx:         ctx,
 		Log:         log.NewTLog("QRCode"),
 		groupDB:     group.NewDB(ctx),
-		spaceDB:     space.NewDB(ctx),
 		userService: user.NewService(ctx),
 	}
 }
@@ -218,8 +216,10 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 	// 扫码预检仅拦截「群禁止外部成员且扫码者非 Space 成员」的场景。
 	// 外部群（is_external_group=1）和 allow_external=1（默认）场景下，预检放行，
 	// 真正的入群鉴权（外部成员识别 / allow_external / invite 审批等）由 groupScanJoin 完成。
+	// 用 spacepkg.CheckMembership 保持和 groupScanJoin、H5 authorize 预检的语义一致
+	// （同时校验 space.status=1：Space 被禁用时一律按非成员处理）。
 	if groupModel.SpaceID != "" && groupModel.AllowExternal == 0 {
-		isMember, err := q.spaceDB.IsMember(groupModel.SpaceID, loginUID)
+		isMember, err := spacepkg.CheckMembership(q.ctx.DB(), groupModel.SpaceID, loginUID)
 		if err != nil {
 			q.Error("查询空间成员失败", zap.Error(err))
 			return nil, errors.New("校验空间成员失败，请稍后重试")

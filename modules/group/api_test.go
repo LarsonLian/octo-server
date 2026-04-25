@@ -3,7 +3,9 @@ package group
 import (
 	"bytes"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +22,14 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// common.Setup 需要 OCTO_MASTER_KEY 存在才能初始化 IM 私钥加密（见
+	// modules/common/key_encryption.go）。testutil.NewTestServer 会间接调用 common.Setup，
+	// 所以本 package 所有测试都必须设置。
+	if os.Getenv("OCTO_MASTER_KEY") == "" {
+		key := make([]byte, 16)
+		_, _ = rand.Read(key)
+		os.Setenv("OCTO_MASTER_KEY", hex.EncodeToString(key))
+	}
 	db, err := sql.Open("mysql", "root:demo@tcp(127.0.0.1:3306)/test?charset=utf8mb4&parseTime=true")
 	if err == nil {
 		defer db.Close()

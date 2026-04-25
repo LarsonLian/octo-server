@@ -3628,8 +3628,9 @@ func (g *Group) groupInviteDetail(c *wkhttp.Context) {
 //
 // 但以下三类情况会在此端点提前短路，避免让 H5 用户看到一条令人困惑的错误
 // 或无谓往 Redis 写 30min TTL 的 auth_code（对齐 qrcode/api.go handleJoinGroup 的预检）：
+//   - 群属于某 Space 且 allow_external=0 且扫码者不是 Space 成员：返回 {status: "external_blocked", group_no}
+//     （同 Space 成员继续走正常流程，避免误杀）
 //   - invite=1：返回 HTTP 400「邀请模式」错误（与 groupScanJoin 拒绝文案一致）
-//   - 群属于某 Space 且 allow_external=0：返回 {status: "external_blocked", group_no}
 //   - 已经在群内：返回 {already_member: true, group_no}
 func (g *Group) groupInviteAuthorize(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
@@ -3685,20 +3686,32 @@ func (g *Group) groupInviteAuthorize(c *wkhttp.Context) {
 		c.ResponseError(errors.New("群不存在或已解散"))
 		return
 	}
+	// 群属于某 Space 且 allow_external=0：提前拦截，和 handleJoinGroup 的预检保持一致。
+	// 注意：external_blocked 判定必须放在 invite 判定之前，与 groupInviteDetail 的优先级对齐
+	// （detail 那边也是 external_blocked 赋值覆盖 invite_required）。
+	// 同 Space 成员即使群禁止外部、开启邀请审批，也应继续走正常 authorize 流程，
+	// 由 groupScanJoin 负责最终的邀请模式判定。
+	if groupModel.SpaceID != "" && groupModel.AllowExternal == 0 {
+		inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), groupModel.SpaceID, loginUID)
+		if checkErr != nil {
+			g.Error("检查 Space 成员失败", zap.Error(checkErr), zap.String("group_no", groupNo))
+			c.ResponseError(errors.New("检查成员关系失败"))
+			return
+		}
+		if !inSpace {
+			// 跨 Space 用户：H5 拦截，与 detail/qrcode 预检行为一致。
+			c.Response(gin.H{
+				"status":   groupInviteStatusExternalBlocked,
+				"group_no": groupNo,
+			})
+			return
+		}
+		// 同 Space 成员：继续走正常流程（可能落到 invite_required 或直接生成 auth_code）。
+	}
 	if groupModel.Invite == 1 {
 		// 与 groupScanJoin 保持一致：开启邀请审批的群不支持直接扫码入群，
 		// 也不在 H5 落地页生成 auth_code（避免后续 scanjoin 失败时的语义含糊）。
 		c.ResponseError(errors.New("群开启了邀请模式，不能直接加入群聊"))
-		return
-	}
-	// 群属于某 Space 且 allow_external=0：提前拦截，和 handleJoinGroup 的预检保持一致。
-	// 让 H5 在点击「加入群聊」（理论上已经被 detail 的 external_blocked 状态藏掉）
-	// 的兜底路径也能拿到明确语义，而不是白白写一条 30min TTL 的 auth_code。
-	if groupModel.SpaceID != "" && groupModel.AllowExternal == 0 {
-		c.Response(gin.H{
-			"status":   groupInviteStatusExternalBlocked,
-			"group_no": groupNo,
-		})
 		return
 	}
 	// 已经在群内：与 qrcode/api.go handleJoinGroup 对齐，返回 already_member=true，

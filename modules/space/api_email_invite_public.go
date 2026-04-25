@@ -1,0 +1,282 @@
+package space
+
+import (
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"go.uber.org/zap"
+)
+
+// emailInvitePreviewResp 公开预览响应。owner 与 member 类型共用结构，按 invite_type 取不同字段：
+//   - owner：planned_* 字段非空，space_id 为空
+//   - member：space_id / space_name / space_logo / member_count 非空
+type emailInvitePreviewResp struct {
+	InviteType  int    `json:"invite_type"`
+	Email       string `json:"email"`
+	Status      int    `json:"status"`
+	ExpiresAt   string `json:"expires_at,omitempty"`
+	Role        int    `json:"role,omitempty"`
+	InviterName string `json:"inviter_name,omitempty"`
+
+	// owner-only
+	PlannedName        string `json:"planned_name,omitempty"`
+	PlannedDescription string `json:"planned_description,omitempty"`
+	PlannedLogo        string `json:"planned_logo,omitempty"`
+	PlannedMaxUsers    int    `json:"planned_max_users,omitempty"`
+	PlannedJoinMode    int    `json:"planned_join_mode,omitempty"`
+
+	// member-only
+	SpaceId     string `json:"space_id,omitempty"`
+	SpaceName   string `json:"space_name,omitempty"`
+	SpaceLogo   string `json:"space_logo,omitempty"`
+	MemberCount int    `json:"member_count,omitempty"`
+	JoinMode    int    `json:"join_mode,omitempty"`
+}
+
+// previewEmailInvite 公开预览接口。响应总是 200，凡是无效（不存在/已过期/已消费/已撤销）
+// 都通过 status 字段表达，避免给攻击者返回 4xx 做枚举区分。
+func (s *Space) previewEmailInvite(c *wkhttp.Context) {
+	rawToken := c.Param("token")
+	if rawToken == "" {
+		c.ResponseError(errors.New("token 不能为空"))
+		return
+	}
+	inv, err := s.db.queryEmailInviteByTokenHash(hashEmailInviteToken(rawToken))
+	if err != nil {
+		s.Error("查询邮件邀请失败", zap.Error(err))
+		c.ResponseError(errors.New("查询邀请失败"))
+		return
+	}
+	if inv == nil {
+		c.JSON(http.StatusOK, &emailInvitePreviewResp{Status: EmailInviteStatusRevoked})
+		return
+	}
+
+	resp := &emailInvitePreviewResp{
+		InviteType: inv.InviteType,
+		Email:      inv.Email,
+		Status:     liveStatus(inv),
+		Role:       inv.Role,
+	}
+	if inv.ExpiresAt != nil {
+		resp.ExpiresAt = inv.ExpiresAt.String()
+	}
+	if name, _ := s.db.queryUserName(inv.CreatedBy); name != "" {
+		resp.InviterName = name
+	}
+
+	switch inv.InviteType {
+	case EmailInviteTypeOwner:
+		resp.PlannedName = inv.PlannedName
+		resp.PlannedDescription = inv.PlannedDescription
+		resp.PlannedLogo = inv.PlannedLogo
+		resp.PlannedMaxUsers = inv.PlannedMaxUsers
+		resp.PlannedJoinMode = inv.PlannedJoinMode
+	case EmailInviteTypeMember:
+		space, sErr := s.db.querySpaceByID(inv.SpaceId)
+		if sErr == nil && space != nil {
+			resp.SpaceId = space.SpaceId
+			resp.SpaceName = space.Name
+			resp.SpaceLogo = space.Logo
+			resp.JoinMode = space.JoinMode
+			if cnt, cErr := s.db.queryActiveMemberCount(inv.SpaceId); cErr == nil {
+				resp.MemberCount = cnt
+			}
+		}
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// acceptEmailInvite 已登录用户接受邮件邀请。
+//   - owner：在同一事务内消费 token + createSpaceCoreTx，提交后跑 PostCommit 副作用。
+//   - member：先消费 token，再 executeJoinSpace；失败则回滚 token 状态到 pending。
+//
+// 不受 DM_SPACE_DISABLE_USER_CREATE 全局开关影响（管理员邀请视为显式授权）。
+func (s *Space) acceptEmailInvite(c *wkhttp.Context) {
+	loginUID := c.GetLoginUID()
+	rawToken := c.Param("token")
+	if rawToken == "" {
+		c.ResponseError(errors.New("token 不能为空"))
+		return
+	}
+
+	inv, err := s.db.queryEmailInviteByTokenHash(hashEmailInviteToken(rawToken))
+	if err != nil {
+		s.Error("查询邮件邀请失败", zap.Error(err))
+		c.ResponseError(errors.New("查询邀请失败"))
+		return
+	}
+	if inv == nil {
+		c.ResponseError(errors.New("邀请无效"))
+		return
+	}
+	if inv.Status != EmailInviteStatusPending {
+		c.ResponseError(errors.New("邀请已被处理或已撤销"))
+		return
+	}
+	if inv.ExpiresAt != nil && time.Time(*inv.ExpiresAt).Before(time.Now()) {
+		c.ResponseError(errors.New("邀请已过期"))
+		return
+	}
+
+	loginEmail, err := s.db.queryUserEmail(loginUID)
+	if err != nil {
+		s.Error("查询登录用户邮箱失败", zap.Error(err), zap.String("loginUID", loginUID))
+		c.ResponseError(errors.New("校验邮箱失败"))
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(loginEmail), inv.Email) {
+		c.ResponseError(errors.New("当前登录账号邮箱与邀请目标不一致"))
+		return
+	}
+
+	switch inv.InviteType {
+	case EmailInviteTypeOwner:
+		s.acceptOwnerInvite(c, inv, loginUID)
+	case EmailInviteTypeMember:
+		s.acceptMemberInvite(c, inv, loginUID)
+	default:
+		c.ResponseError(errors.New("邀请类型未知"))
+	}
+}
+
+func (s *Space) acceptOwnerInvite(c *wkhttp.Context, inv *spaceEmailInviteModel, loginUID string) {
+	tx, err := s.ctx.DB().Begin()
+	if err != nil {
+		s.Error("开启事务失败", zap.Error(err))
+		c.ResponseError(errors.New("接受邀请失败"))
+		return
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	affected, err := s.db.consumeEmailInviteTx(tx, inv.Id, loginUID)
+	if err != nil {
+		s.Error("消费 token 失败", zap.Error(err), zap.Int64("inviteID", inv.Id))
+		c.ResponseError(errors.New("接受邀请失败"))
+		return
+	}
+	if affected == 0 {
+		c.ResponseError(errors.New("邀请已被处理或已过期"))
+		return
+	}
+
+	params := createSpaceParams{
+		Creator:     loginUID,
+		Name:        inv.PlannedName,
+		Description: inv.PlannedDescription,
+		Logo:        inv.PlannedLogo,
+		JoinMode:    inv.PlannedJoinMode,
+		MaxUsers:    inv.PlannedMaxUsers,
+	}
+	spaceId, err := s.createSpaceCoreTx(tx, params)
+	if err != nil {
+		s.Error("创建空间失败", zap.Error(err), zap.Int64("inviteID", inv.Id))
+		c.ResponseError(errors.New("创建空间失败"))
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		s.Error("提交事务失败", zap.Error(err), zap.Int64("inviteID", inv.Id))
+		c.ResponseError(errors.New("接受邀请失败"))
+		return
+	}
+
+	result := s.createSpaceCorePostCommit(spaceId, params)
+	c.Response(map[string]interface{}{
+		"space_id":    result.SpaceID,
+		"invite_code": result.InviteCode,
+	})
+}
+
+func (s *Space) acceptMemberInvite(c *wkhttp.Context, inv *spaceEmailInviteModel, loginUID string) {
+	space, err := s.db.querySpaceByID(inv.SpaceId)
+	if err != nil {
+		s.Error("查询空间失败", zap.Error(err), zap.String("spaceId", inv.SpaceId))
+		c.ResponseError(errors.New("查询空间失败"))
+		return
+	}
+	if space == nil {
+		c.ResponseError(errors.New("空间不存在或已解散"))
+		return
+	}
+
+	// 1) 在独立事务内消费 token；2) 提交后调用 executeJoinSpace（其内部有自己的 FOR UPDATE 事务）。
+	// 失败则把 token 状态回滚到 pending —— 这与 approveJoinApply 现有模式一致，避免嵌套事务。
+	tx, err := s.ctx.DB().Begin()
+	if err != nil {
+		s.Error("开启事务失败", zap.Error(err))
+		c.ResponseError(errors.New("接受邀请失败"))
+		return
+	}
+	affected, err := s.db.consumeEmailInviteTx(tx, inv.Id, loginUID)
+	if err != nil {
+		_ = tx.Rollback()
+		s.Error("消费 token 失败", zap.Error(err), zap.Int64("inviteID", inv.Id))
+		c.ResponseError(errors.New("接受邀请失败"))
+		return
+	}
+	if affected == 0 {
+		_ = tx.Rollback()
+		c.ResponseError(errors.New("邀请已被处理或已过期"))
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		s.Error("提交 token 消费失败", zap.Error(err), zap.Int64("inviteID", inv.Id))
+		c.ResponseError(errors.New("接受邀请失败"))
+		return
+	}
+
+	if err := s.executeJoinSpace(loginUID, inv.SpaceId, space); err != nil {
+		s.rollbackConsumedInvite(inv.Id, loginUID)
+		if errors.Is(err, ErrSpaceFull) {
+			c.ResponseError(errors.New("空间已满，无法加入"))
+			return
+		}
+		if errors.Is(err, ErrAlreadyMember) {
+			// 幂等：已是成员视为成功，但保留消费状态（成员关系已存在）
+			s.markAcceptedAlreadyMember(inv.Id)
+			c.Response(map[string]interface{}{"space_id": inv.SpaceId})
+			return
+		}
+		s.Error("加入空间失败", zap.Error(err), zap.String("spaceId", inv.SpaceId))
+		c.ResponseError(errors.New("加入空间失败"))
+		return
+	}
+
+	if inv.Role == EmailInviteRoleAdmin {
+		if rErr := s.db.updateMemberRole(inv.SpaceId, loginUID, 1); rErr != nil {
+			s.Warn("提升为管理员失败，成员关系仍生效", zap.Error(rErr),
+				zap.String("spaceId", inv.SpaceId), zap.String("uid", loginUID))
+		}
+	}
+
+	c.Response(map[string]interface{}{"space_id": inv.SpaceId})
+}
+
+// rollbackConsumedInvite 把已 consumed 的邀请回滚到 pending，并清空 consumed_by/consumed_at。
+// 仅用于 member accept 路径在 join 失败时的最终一致性补偿。
+func (s *Space) rollbackConsumedInvite(id int64, consumedBy string) {
+	if _, err := s.db.session.UpdateBySql(
+		"UPDATE space_email_invite SET status=?, consumed_by='', consumed_at=NULL, updated_at=NOW() "+
+			"WHERE id=? AND status=? AND consumed_by=?",
+		EmailInviteStatusPending, id, EmailInviteStatusConsumed, consumedBy,
+	).Exec(); err != nil {
+		s.Error("回滚邮件邀请状态失败", zap.Error(err), zap.Int64("id", id))
+	}
+}
+
+// markAcceptedAlreadyMember 仅做日志记录占位，已 consumed 的邀请保持 consumed 状态即可。
+func (s *Space) markAcceptedAlreadyMember(id int64) {
+	s.Info("接受邀请时用户已是成员", zap.Int64("inviteID", id))
+}
+
+// liveStatus 用过期时间动态推导邀请的展示状态：pending 且已过期则展示 expired。
+func liveStatus(inv *spaceEmailInviteModel) int {
+	if inv.Status == EmailInviteStatusPending && inv.ExpiresAt != nil &&
+		time.Time(*inv.ExpiresAt).Before(time.Now()) {
+		return EmailInviteStatusExpired
+	}
+	return inv.Status
+}

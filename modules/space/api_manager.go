@@ -87,6 +87,11 @@ func (m *Manager) Route(r *wkhttp.WKHttp) {
 		auth.PUT("/spaces/:space_id/invites/:code", m.updateInvite)     // 修改 max_uses / expires_at / status
 		auth.DELETE("/spaces/:space_id/invites/:code", m.disableInvite) // 软禁用（等价 PUT status=0）
 
+		// Space-owner 邮件邀请（lazy-create，接受时创建空间并设为 owner）
+		auth.POST("/spaces/invites", m.createSpaceOwnerEmailInvite)
+		auth.GET("/spaces/invites", m.listSpaceOwnerEmailInvites)
+		auth.DELETE("/spaces/invites/:id", m.revokeSpaceOwnerEmailInvite)
+
 		// 加入申请
 		auth.GET("/spaces/:space_id/join-applies", m.listJoinApplies)               // 列表
 		auth.POST("/spaces/:space_id/join-applies/:id/approve", m.approveJoinApply) // 通过

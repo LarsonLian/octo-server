@@ -71,6 +71,47 @@ type spaceJoinApplyDetailModel struct {
 	ApplicantName string // 申请人名称
 }
 
+// EmailInvite 类型常量
+const (
+	EmailInviteTypeOwner  = 1 // 邀请成为新空间的 owner（lazy-create）
+	EmailInviteTypeMember = 2 // 邀请加入已有空间作为成员/管理员
+)
+
+// EmailInvite 状态常量
+const (
+	EmailInviteStatusPending  = 0
+	EmailInviteStatusConsumed = 1
+	EmailInviteStatusExpired  = 2
+	EmailInviteStatusRevoked  = 3
+)
+
+// EmailInvite 角色常量（仅 member 类型）
+const (
+	EmailInviteRoleMember = 0
+	EmailInviteRoleAdmin  = 1
+)
+
+// spaceEmailInviteModel 邮件邀请表模型
+type spaceEmailInviteModel struct {
+	Id                 int64    // 主键
+	TokenHash          string   // SHA-256 hex
+	InviteType         int      // 1=owner 2=member
+	Email              string   // 收件邮箱
+	SpaceId            string   // member 类型关联空间ID
+	Role               int      // member 角色
+	PlannedName        string   // owner 类型计划空间名
+	PlannedDescription string   // owner 类型计划描述
+	PlannedLogo        string   // owner 类型计划 logo
+	PlannedMaxUsers    int      // owner 类型计划最大成员数
+	PlannedJoinMode    int      // owner 类型计划加入模式
+	Status             int      // 0=pending 1=consumed 2=expired 3=revoked
+	ExpiresAt          *db.Time // 过期时间
+	CreatedBy          string   // 发起人UID
+	ConsumedBy         string   // 接受人UID
+	ConsumedAt         *db.Time // 接受时间
+	db.BaseModel
+}
+
 // ---------- Request Models ----------
 
 type createSpaceReq struct {

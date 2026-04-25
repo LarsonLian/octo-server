@@ -20,6 +20,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/gocraft/dbr/v2"
 	rd "github.com/go-redis/redis"
 	"go.uber.org/zap"
 )
@@ -85,6 +86,10 @@ func (s *Space) Route(r *wkhttp.WKHttp) {
 		auth.GET("/:space_id/join-applies", s.joinApplies)
 		auth.POST("/:space_id/join-applies/:id/approve", s.approveJoinApply)
 		auth.POST("/:space_id/join-applies/:id/reject", s.rejectJoinApply)
+
+		auth.POST("/:space_id/email-invites", s.createMemberEmailInvite)
+		auth.GET("/:space_id/email-invites", s.listMemberEmailInvites)
+		auth.DELETE("/:space_id/email-invites/:id", s.revokeMemberEmailInvite)
 	}
 
 	// 邀请码预览端点（公开无认证）严格 per-IP 限流：防枚举 + 暴破（issue #1000）。
@@ -103,9 +108,16 @@ func (s *Space) Route(r *wkhttp.WKHttp) {
 	{
 		open.GET("/invite/:invite_code", invitePreviewLimit, s.getInviteInfo)
 		open.GET("/invite/:invite_code/preview", invitePreviewLimit, s.getInvitePreview)
+		open.GET("/email-invite/:token", invitePreviewLimit, s.previewEmailInvite)
 		open.GET("/join-approve", s.joinApprovePage)
 		open.GET("/join-approve/detail", s.joinApproveDetail)
 		open.POST("/join-approve/sure", s.joinApproveSure)
+	}
+
+	// 已登录的接受端点：复用 auth 中间件 + 同一 invitePreviewLimit（防穷举 token 撞库）。
+	authAccept := r.Group("/v1/space", invitePreviewLimit, s.ctx.AuthMiddleware(r))
+	{
+		authAccept.POST("/email-invite/:token/accept", s.acceptEmailInvite)
 	}
 }
 
@@ -192,14 +204,27 @@ func (s *Space) createSpace(c *wkhttp.Context) {
 // 事务内写 space + owner 成员；事务外建邀请码、BotFather 入驻、刷新 ParseChannelID 缓存、
 // 触发 SpaceMemberJoin 事件。与原先 createSpace 行为保持一致。
 func (s *Space) createSpaceCore(p createSpaceParams) (*createSpaceResult, error) {
-	spaceId := util.GenerUUID()
-
 	tx, err := s.ctx.DB().Begin()
 	if err != nil {
 		return nil, fmt.Errorf("开启事务失败: %w", err)
 	}
 	defer tx.RollbackUnlessCommitted()
 
+	spaceId, err := s.createSpaceCoreTx(tx, p)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交事务失败: %w", err)
+	}
+	return s.createSpaceCorePostCommit(spaceId, p), nil
+}
+
+// createSpaceCoreTx 在传入事务内写入 space 行 + owner 成员行；不提交、不触发事务外副作用。
+// 调用方负责提交事务并随后调用 createSpaceCorePostCommit 完成默认邀请码、BotFather、缓存与事件。
+// 用于 email-invite accept 路径在同一事务内完成 token 消费与空间创建（issue #1138）。
+func (s *Space) createSpaceCoreTx(tx *dbr.Tx, p createSpaceParams) (string, error) {
+	spaceId := util.GenerUUID()
 	model := &SpaceModel{
 		SpaceId:        spaceId,
 		Name:           p.Name,
@@ -211,21 +236,23 @@ func (s *Space) createSpaceCore(p createSpaceParams) (*createSpaceResult, error)
 		PresetGroupIds: p.PresetGroupIds,
 		Status:         SpaceStatusNormal,
 	}
-	if err = s.db.insertSpace(model, tx); err != nil {
-		return nil, fmt.Errorf("创建空间失败: %w", err)
+	if err := s.db.insertSpace(model, tx); err != nil {
+		return "", fmt.Errorf("创建空间失败: %w", err)
 	}
-	if err = s.db.insertMember(&MemberModel{
+	if err := s.db.insertMember(&MemberModel{
 		SpaceId: spaceId,
 		UID:     p.Creator,
 		Role:    2, // owner
 		Status:  1,
 	}, tx); err != nil {
-		return nil, fmt.Errorf("添加空间成员失败: %w", err)
+		return "", fmt.Errorf("添加空间成员失败: %w", err)
 	}
-	if err = tx.Commit(); err != nil {
-		return nil, fmt.Errorf("提交事务失败: %w", err)
-	}
+	return spaceId, nil
+}
 
+// createSpaceCorePostCommit 完成事务外副作用：创建默认邀请码、BotFather 入驻、刷新缓存、触发事件。
+// 失败不会向上传播（默认邀请码失败仅记 warn）。
+func (s *Space) createSpaceCorePostCommit(spaceId string, p createSpaceParams) *createSpaceResult {
 	result := &createSpaceResult{SpaceID: spaceId}
 	inviteModel := &InvitationModel{
 		SpaceId: spaceId,
@@ -239,7 +266,6 @@ func (s *Space) createSpaceCore(p createSpaceParams) (*createSpaceResult, error)
 		s.Warn("创建默认邀请码失败", zap.Error(inviteErr), zap.String("spaceId", spaceId))
 	}
 
-	// BotFather 自动加入新 Space
 	_ = s.db.insertMemberIgnore(&MemberModel{
 		SpaceId: spaceId,
 		UID:     "botfather",
@@ -247,13 +273,10 @@ func (s *Space) createSpaceCore(p createSpaceParams) (*createSpaceResult, error)
 		Status:  1,
 	})
 
-	// 刷新 ParseChannelID 缓存
 	go s.loadKnownSpaceIDs()
-
-	// 触发 SpaceMemberJoin 事件（创建者）
 	go s.fireSpaceMemberJoinEvent(p.Creator, spaceId)
 
-	return result, nil
+	return result
 }
 
 // getSpace 获取空间详情

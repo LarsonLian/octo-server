@@ -23,6 +23,7 @@ import (
 	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
 	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
+	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
@@ -247,6 +248,7 @@ func (g *Group) membersGet(c *wkhttp.Context) {
 			resps = append(resps, resp.from(memberModel))
 		}
 	}
+	g.fillSourceSpaceNames(resps)
 
 	c.Response(resps)
 }
@@ -433,6 +435,7 @@ func (g *Group) syncMembers(c *wkhttp.Context) {
 		resp := memberDetailResp{}
 		resps = append(resps, resp.from(memberModel))
 	}
+	g.fillSourceSpaceNames(resps)
 	c.Response(resps)
 }
 
@@ -892,8 +895,19 @@ func (g *Group) memberAdd(c *wkhttp.Context) {
 		}
 	}
 
-	// Bot Space 隔离检查：如果群属于某个 Space，Bot 成员必须也在该 Space 中
+	// Bot Space 隔离检查：如果群属于某个 Space，Bot 必须在邀请人的有效 Space 中
+	// （内部成员：群的 Space；外部成员：来源 Space）
 	if group.SpaceID != "" {
+		inviterSpaceID := group.SpaceID
+		operatorMember, opErr := g.db.QueryMemberWithUID(operator, groupNo)
+		if opErr != nil {
+			g.Error("查询操作者群成员失败", zap.Error(opErr))
+			c.ResponseError(errors.New("查询操作者群成员失败"))
+			return
+		}
+		if operatorMember != nil && operatorMember.IsExternal == 1 && operatorMember.SourceSpaceID != "" {
+			inviterSpaceID = operatorMember.SourceSpaceID
+		}
 		for _, memberUID := range req.Members {
 			var isBot int
 			err = g.ctx.DB().SelectBySql("SELECT COALESCE((SELECT robot FROM `user` WHERE uid=? LIMIT 1), 0)", memberUID).LoadOne(&isBot)
@@ -903,14 +917,14 @@ func (g *Group) memberAdd(c *wkhttp.Context) {
 				return
 			}
 			if isBot == 1 {
-				inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), group.SpaceID, memberUID)
+				inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), inviterSpaceID, memberUID)
 				if checkErr != nil {
 					g.Error("检查Bot Space成员失败", zap.Error(checkErr))
 					c.ResponseError(errors.New("检查Bot Space成员失败"))
 					return
 				}
 				if !inSpace {
-					c.ResponseError(errors.New("该 Bot 不属于当前 Space"))
+					c.ResponseError(errors.New("该 Bot 不属于你的 Space"))
 					return
 				}
 			}
@@ -1716,14 +1730,32 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 		return
 	}
 
+	// 外部成员检测：群属于某个 Space 且扫码者不在该 Space 时，标记为外部成员
+	isExternal := 0
+	sourceSpaceID := ""
+	if group.SpaceID != "" {
+		inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), group.SpaceID, scaner)
+		if checkErr != nil {
+			g.Error("检查 Space 成员失败", zap.Error(checkErr))
+			c.ResponseError(errors.New("检查成员关系失败"))
+			return
+		}
+		if !inSpace {
+			isExternal = 1
+			sourceSpaceID = spacemod.GetUserDefaultSpaceID(g.ctx, scaner)
+		}
+	}
+
 	memberModel := &MemberModel{
-		GroupNo:   groupNo,
-		UID:       scaner,
-		Role:      MemberRoleCommon,
-		Version:   version,
-		Status:    int(common.GroupMemberStatusNormal),
-		InviteUID: generator,
-		Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
+		GroupNo:       groupNo,
+		UID:           scaner,
+		Role:          MemberRoleCommon,
+		Version:       version,
+		Status:        int(common.GroupMemberStatusNormal),
+		InviteUID:     generator,
+		Vercode:       fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
+		IsExternal:    isExternal,
+		SourceSpaceID: sourceSpaceID,
 	}
 
 	tx, err := g.db.session.Begin()
@@ -1741,12 +1773,15 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 	eventID, err := g.ctx.EventBegin(&wkevent.Data{
 		Event: event.GroupMemberScanJoin,
 		Type:  wkevent.Message,
-		Data: config.MsgGroupMemberScanJoin{
-			GroupNo:       groupNo,
-			Generator:     generatorInfo.UID,
-			GeneratorName: generatorInfo.Name,
-			Scaner:        scanerInfo.UID,
-			ScanerName:    scanerInfo.Name,
+		Data: MsgGroupMemberScanJoinExt{
+			MsgGroupMemberScanJoin: config.MsgGroupMemberScanJoin{
+				GroupNo:       groupNo,
+				Generator:     generatorInfo.UID,
+				GeneratorName: generatorInfo.Name,
+				Scaner:        scanerInfo.UID,
+				ScanerName:    scanerInfo.Name,
+			},
+			IsExternal: isExternal,
 		},
 	}, tx)
 	if err != nil {
@@ -1811,11 +1846,27 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 		return
 	}
 
+	// 首个外部成员加入时在同一事务内将群标记为外部群，确保成员/群标记一致提交
+	markedExternal := false
+	if isExternal == 1 && group.IsExternalGroup == 0 {
+		if updateErr := g.db.UpdateIsExternalGroupTx(groupNo, 1, tx); updateErr != nil {
+			tx.Rollback()
+			g.Error("更新 is_external_group 失败", zap.Error(updateErr), zap.String("group_no", groupNo))
+			c.ResponseError(errors.New("更新群外部标记失败！"))
+			return
+		}
+		markedExternal = true
+	}
+
 	if err := tx.Commit(); err != nil {
 		tx.Rollback()
 		g.Error("提交事务失败！", zap.Error(err))
 		c.ResponseError(errors.New("提交事务失败！"))
 		return
+	}
+
+	if markedExternal {
+		g.ctx.SendChannelUpdateToGroup(groupNo)
 	}
 
 	// 调用IM的添加订阅者（在事务提交后执行，确保数据一致性）
@@ -2397,6 +2448,24 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 		c.ResponseError(errors.New("删除群成员失败！"))
 		return
 	}
+
+	// 若退群者是外部成员且当前群是外部群，检查是否需要恢复普通群
+	resetExternalGroup := false
+	if loginMember.IsExternal == 1 && groupInfo.IsExternalGroup == 1 {
+		externalCount, countErr := g.db.QueryExternalMemberCountTx(groupNo, tx)
+		if countErr != nil {
+			g.Error("查询外部成员数量失败", zap.Error(countErr))
+		} else if externalCount == 0 {
+			if updateErr := g.db.UpdateIsExternalGroupTx(groupNo, 0, tx); updateErr != nil {
+				tx.Rollback()
+				g.Error("更新 is_external_group 失败", zap.Error(updateErr))
+				c.ResponseError(errors.New("更新 is_external_group 失败"))
+				return
+			}
+			resetExternalGroup = true
+		}
+	}
+
 	groupSetting, err := g.settingDB.querySettingWithTx(groupNo, loginUID, tx)
 	if err != nil {
 		tx.Rollback()
@@ -2430,6 +2499,12 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 	if groupAvatarEventID != 0 {
 		g.ctx.EventCommit(groupAvatarEventID)
 	}
+
+	// 外部群标记发生变化时，通知成员刷新频道信息
+	if resetExternalGroup {
+		g.ctx.SendChannelUpdateToGroup(groupNo)
+	}
+
 	// 移除用户在该群所有子区的成员身份和置顶
 	g.removeUserFromGroupThreads(groupNo, loginUID, groupInfo.SpaceID)
 	// 发送群成员更新命令
@@ -3255,6 +3330,9 @@ type memberDetailResp struct {
 	Robot              int    `json:"robot"`                // 机器人
 	ForbiddenExpirTime int64  `json:"forbidden_expir_time"` // 禁言时长
 	BotAdmin           int    `json:"bot_admin"`            // Bot管理员
+	IsExternal         int    `json:"is_external"`          // 是否外部成员
+	SourceSpaceID      string `json:"source_space_id"`      // 来源 Space ID
+	SourceSpaceName    string `json:"source_space_name"`    // 来源 Space 名称
 	CreatedAt          string `json:"created_at"`
 	UpdatedAt          string `json:"updated_at"`
 }
@@ -3275,8 +3353,49 @@ func (r memberDetailResp) from(model *MemberDetailModel) memberDetailResp {
 		Robot:              model.Robot,
 		ForbiddenExpirTime: model.ForbiddenExpirTime,
 		BotAdmin:           model.BotAdmin,
+		IsExternal:         model.IsExternal,
+		SourceSpaceID:      model.SourceSpaceID,
 		CreatedAt:          model.CreatedAt.String(),
 		UpdatedAt:          model.UpdatedAt.String(),
+	}
+}
+
+// fillSourceSpaceNames 批量查询外部成员的来源 Space 名称，避免 N+1。
+func (g *Group) fillSourceSpaceNames(resps []memberDetailResp) {
+	if len(resps) == 0 {
+		return
+	}
+	idSet := make(map[string]struct{})
+	for _, m := range resps {
+		if m.IsExternal == 1 && m.SourceSpaceID != "" {
+			idSet[m.SourceSpaceID] = struct{}{}
+		}
+	}
+	if len(idSet) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	var rows []struct {
+		SpaceID string `db:"space_id"`
+		Name    string `db:"name"`
+	}
+	_, err := g.ctx.DB().Select("space_id", "name").From("space").
+		Where("space_id IN ?", ids).Load(&rows)
+	if err != nil {
+		g.Warn("查询来源 Space 名称失败", zap.Error(err))
+		return
+	}
+	nameMap := make(map[string]string, len(rows))
+	for _, r := range rows {
+		nameMap[r.SpaceID] = r.Name
+	}
+	for i := range resps {
+		if resps[i].IsExternal == 1 {
+			resps[i].SourceSpaceName = nameMap[resps[i].SourceSpaceID]
+		}
 	}
 }
 

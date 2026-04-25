@@ -263,13 +263,18 @@ func (m *Message) handleReadedMessageCount() {
 
 // 处理扫码入群
 func (m *Message) handleGroupMemberScanJoinEvent(data []byte, commit config.EventCommit) {
-	var req *config.MsgGroupMemberScanJoin
-	err := util.ReadJsonByByte(data, &req)
+	// 先尝试解析扩展字段，再 fallback 到基础结构（兼容旧事件数据）
+	var ext struct {
+		config.MsgGroupMemberScanJoin
+		IsExternal int `json:"is_external"`
+	}
+	err := util.ReadJsonByByte(data, &ext)
 	if err != nil {
 		m.Error("解析JSON失败！", zap.Error(err))
 		commit(err)
 		return
 	}
+	req := ext.MsgGroupMemberScanJoin
 	list := make([]*config.UserBaseVo, 0)
 	list = append(list, &config.UserBaseVo{
 		UID:  req.Scaner,
@@ -281,6 +286,24 @@ func (m *Message) handleGroupMemberScanJoinEvent(data []byte, commit config.Even
 		return
 	}
 	content := `“{0}”通过“{1}”的二维码加入群聊`
+	if ext.IsExternal == 1 {
+		content = `“{0}”以外部成员身份加入群聊`
+	}
+	payload := map[string]interface{}{
+		"content": content,
+		"extra": []config.UserBaseVo{
+			{
+				UID:  req.Scaner,
+				Name: req.ScanerName,
+			},
+			{
+				UID:  req.Generator,
+				Name: req.GeneratorName,
+			},
+		},
+		"type":        common.GroupMemberScanJoin,
+		"is_external": ext.IsExternal,
+	}
 	err = m.ctx.SendMessage(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			NoPersist: 0,
@@ -289,20 +312,7 @@ func (m *Message) handleGroupMemberScanJoinEvent(data []byte, commit config.Even
 		},
 		ChannelID:   req.GroupNo,
 		ChannelType: common.ChannelTypeGroup.Uint8(),
-		Payload: []byte(util.ToJson(map[string]interface{}{
-			"content": content,
-			"extra": []config.UserBaseVo{
-				{
-					UID:  req.Scaner,
-					Name: req.ScanerName,
-				},
-				{
-					UID:  req.Generator,
-					Name: req.GeneratorName,
-				},
-			},
-			"type": common.GroupMemberScanJoin,
-		}))})
+		Payload:     []byte(util.ToJson(payload))})
 	if err != nil {
 		commit(err)
 		return

@@ -236,11 +236,16 @@ func (s *Search) global(c *wkhttp.Context) {
 	// 加入的群（按 Space 过滤，membership 已由 SpaceMiddleware 校验）
 	groupResps := make([]*channelResp, 0)
 	searchSpaceID := spacepkg.GetSpaceID(c)
+	externalGroupMap, extErr := group.NewDB(s.ctx).QueryExternalGroupNosForUser(loginUID)
+	if extErr != nil {
+		s.Warn("查询外部群失败，外部群将在搜索中不可见", zap.Error(extErr))
+		externalGroupMap = map[string]string{}
+	}
 	if req.OnlyMessage == 0 && len(joinedGroups) > 0 {
 		for _, g := range joinedGroups {
 			// Space 过滤：仅当 searchSpaceID 非空且匹配时返回；为空时整批排除，
 			// 防止跨 Space 群列表混合泄漏。
-			if !shouldIncludeGroupForSpace(g.SpaceID, searchSpaceID) {
+			if !shouldIncludeGroupForSpace(g.SpaceID, searchSpaceID, g.GroupNo, externalGroupMap) {
 				continue
 			}
 			isAdd := false
@@ -483,11 +488,19 @@ type messageResp struct {
 // shouldIncludeGroupForSpace decides whether a group should appear in search
 // results for the given searchSpaceID. When searchSpaceID is empty (no Space
 // context), all groups are excluded to avoid leaking groups across Spaces.
-func shouldIncludeGroupForSpace(groupSpaceID, searchSpaceID string) bool {
+// External groups are visible in the source Space of the logged-in user's
+// external-member entry (externalGroupMap: groupNo -> sourceSpaceID).
+func shouldIncludeGroupForSpace(groupSpaceID, searchSpaceID string, groupNo string, externalGroupMap map[string]string) bool {
 	if searchSpaceID == "" {
 		return false
 	}
-	return groupSpaceID == searchSpaceID
+	if groupSpaceID == searchSpaceID {
+		return true
+	}
+	if sourceSpace, ok := externalGroupMap[groupNo]; ok && sourceSpace == searchSpaceID {
+		return true
+	}
+	return false
 }
 
 func collectChannelIDs(messages []*config.MessageResp) (groupIDs, uids, fromUIDs []string, threadParentMap map[string]string) {

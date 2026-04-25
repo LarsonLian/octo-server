@@ -13,17 +13,21 @@ func TestShouldIncludeGroupForSpace(t *testing.T) {
 		name          string
 		groupSpaceID  string
 		searchSpaceID string
+		groupNo       string
+		externalMap   map[string]string
 		want          bool
 	}{
-		{"no_space_context_excludes_all", "spaceA", "", false},
-		{"no_space_context_excludes_groups_without_space", "", "", false},
-		{"same_space_included", "spaceA", "spaceA", true},
-		{"different_space_excluded", "spaceB", "spaceA", false},
-		{"group_without_space_excluded_when_filtering", "", "spaceA", false},
+		{"no_space_context_excludes_all", "spaceA", "", "g1", nil, false},
+		{"no_space_context_excludes_groups_without_space", "", "", "g1", nil, false},
+		{"same_space_included", "spaceA", "spaceA", "g1", nil, true},
+		{"different_space_excluded", "spaceB", "spaceA", "g1", nil, false},
+		{"group_without_space_excluded_when_filtering", "", "spaceA", "g1", nil, false},
+		{"external_group_visible_in_source_space", "spaceA", "spaceB", "g1", map[string]string{"g1": "spaceB"}, true},
+		{"external_group_hidden_in_unrelated_space", "spaceA", "spaceC", "g1", map[string]string{"g1": "spaceB"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldIncludeGroupForSpace(tt.groupSpaceID, tt.searchSpaceID)
+			got := shouldIncludeGroupForSpace(tt.groupSpaceID, tt.searchSpaceID, tt.groupNo, tt.externalMap)
 			assert.Equal(t, tt.want, got)
 		})
 	}

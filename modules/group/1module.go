@@ -212,6 +212,9 @@ func newChannelRespWithGroupResp(groupResp *GroupResp) *model.ChannelResp {
 		extraMap["space_id"] = groupResp.SpaceID
 	}
 
+	// 外部群标记：前端 UI 需要根据此字段渲染「外部群」标签
+	extraMap["is_external_group"] = groupResp.IsExternalGroup
+
 	// GROUP.md fields
 	extraMap["has_group_md"] = groupResp.HasGroupMd
 	extraMap["group_md_version"] = groupResp.GroupMdVersion

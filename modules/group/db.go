@@ -192,12 +192,14 @@ func (d *DB) UpdateMemberTx(member *MemberModel, tx *dbr.Tx) error {
 // recoverMemberTx 恢复成员信息
 func (d *DB) recoverMemberTx(member *MemberModel, tx *dbr.Tx) error {
 	_, err := tx.Update("group_member").SetMap(map[string]interface{}{
-		"remark":     member.Remark,
-		"role":       member.Role,
-		"version":    member.Version,
-		"is_deleted": 0,
-		"invite_uid": member.InviteUID,
-		"created_at": dbr.Expr("Now()"),
+		"remark":          member.Remark,
+		"role":            member.Role,
+		"version":         member.Version,
+		"is_deleted":      0,
+		"invite_uid":      member.InviteUID,
+		"is_external":     member.IsExternal,
+		"source_space_id": member.SourceSpaceID,
+		"created_at":      dbr.Expr("Now()"),
 	}).Where("group_no=? and uid=?", member.GroupNo, member.UID).Exec()
 	return err
 }
@@ -345,7 +347,7 @@ func (d *DB) QueryMemberWithUIDAndGroupNos(uid string, groupNos []string) ([]*Me
 func (d *DB) SyncMembers(groupNo string, version int64, limit uint64) ([]*MemberDetailModel, error) {
 
 	var details []*MemberDetailModel
-	builder := d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,IFNULL(user.name,'') name,IFNULL(user.username,'') username,group_member.is_deleted,group_member.robot,group_member.version,group_member.invite_uid,group_member.forbidden_expir_time,group_member.bot_admin,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").Where("group_member.group_no=?", groupNo).OrderDir("group_member.version", true)
+	builder := d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,IFNULL(user.name,'') name,IFNULL(user.username,'') username,group_member.is_deleted,group_member.robot,group_member.version,group_member.invite_uid,group_member.forbidden_expir_time,group_member.bot_admin,group_member.is_external,group_member.source_space_id,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").Where("group_member.group_no=?", groupNo).OrderDir("group_member.version", true)
 	var err error
 	if version <= 0 {
 		_, err = builder.Limit(limit).Load(&details)
@@ -361,9 +363,9 @@ func (d *DB) queryMembersWithKeyword(groupNo string, loginUID string, keyword st
 	var details []*MemberDetailModel
 	var builder *dbr.SelectStmt
 	if keyword != "" {
-		builder = d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,IFNULL(user.name,'') name,IFNULL(user.username,'') username,group_member.is_deleted,group_member.robot,group_member.version,group_member.invite_uid,group_member.forbidden_expir_time,group_member.bot_admin,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").LeftJoin("user_setting", dbr.Expr("user_setting.uid=? and user_setting.to_uid=group_member.uid", loginUID)).Where("group_member.group_no=? and group_member.is_deleted=0 and group_member.status=1 and (group_member.remark like ? or user.name like ? or user_setting.remark like ?)", groupNo, "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%").OrderAsc("group_member.created_at")
+		builder = d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,IFNULL(user.name,'') name,IFNULL(user.username,'') username,group_member.is_deleted,group_member.robot,group_member.version,group_member.invite_uid,group_member.forbidden_expir_time,group_member.bot_admin,group_member.is_external,group_member.source_space_id,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").LeftJoin("user_setting", dbr.Expr("user_setting.uid=? and user_setting.to_uid=group_member.uid", loginUID)).Where("group_member.group_no=? and group_member.is_deleted=0 and group_member.status=1 and (group_member.remark like ? or user.name like ? or user_setting.remark like ?)", groupNo, "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%").OrderAsc("group_member.created_at")
 	} else {
-		builder = d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,IFNULL(user.name,'') name,IFNULL(user.username,'') username,group_member.is_deleted,group_member.robot,group_member.version,group_member.invite_uid,group_member.forbidden_expir_time,group_member.bot_admin,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").Where("group_member.group_no=? and group_member.is_deleted=0 and group_member.status=1", groupNo).OrderDesc(fmt.Sprintf("group_member.role=%d", MemberRoleCreator)).OrderDesc(fmt.Sprintf("group_member.role=%d", MemberRoleManager)).OrderAsc("group_member.created_at")
+		builder = d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,IFNULL(user.name,'') name,IFNULL(user.username,'') username,group_member.is_deleted,group_member.robot,group_member.version,group_member.invite_uid,group_member.forbidden_expir_time,group_member.bot_admin,group_member.is_external,group_member.source_space_id,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").Where("group_member.group_no=? and group_member.is_deleted=0 and group_member.status=1", groupNo).OrderDesc(fmt.Sprintf("group_member.role=%d", MemberRoleCreator)).OrderDesc(fmt.Sprintf("group_member.role=%d", MemberRoleManager)).OrderAsc("group_member.created_at")
 	}
 	var err error
 	_, err = builder.Offset((page - 1) * limit).Limit(limit).Load(&details)
@@ -379,13 +381,13 @@ func (d *DB) queryManagersWithGroupNos(groupNos []string) ([]*MemberDetailModel,
 
 func (d *DB) queryMembersWithGroupNo(groupNo string) ([]*MemberDetailModel, error) {
 	var details []*MemberDetailModel
-	_, err := d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,IFNULL(user.name,'') name,group_member.is_deleted,group_member.version,group_member.forbidden_expir_time,group_member.bot_admin,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").Where("group_member.group_no=? and group_member.is_deleted=0", groupNo).Load(&details)
+	_, err := d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,IFNULL(user.name,'') name,group_member.is_deleted,group_member.version,group_member.forbidden_expir_time,group_member.bot_admin,group_member.is_external,group_member.source_space_id,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").Where("group_member.group_no=? and group_member.is_deleted=0", groupNo).Load(&details)
 	return details, err
 }
 
 func (d *DB) queryMemberWithGroupNoAndUID(groupNo, uid string) (*MemberDetailModel, error) {
 	var detail *MemberDetailModel
-	_, err := d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,group_member.invite_uid,IFNULL(user.name,'') name,group_member.is_deleted,group_member.version,group_member.forbidden_expir_time,group_member.bot_admin,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").Where("group_member.group_no=? and group_member.uid=? and group_member.is_deleted=0", groupNo, uid).Load(&detail)
+	_, err := d.session.Select("group_member.id,group_member.vercode,group_member.uid,group_member.status,group_member.group_no,group_member.remark,group_member.role,group_member.invite_uid,IFNULL(user.name,'') name,group_member.is_deleted,group_member.version,group_member.forbidden_expir_time,group_member.bot_admin,group_member.is_external,group_member.source_space_id,group_member.created_at,group_member.updated_at").From("group_member").LeftJoin("user", "group_member.uid=user.uid").Where("group_member.group_no=? and group_member.uid=? and group_member.is_deleted=0", groupNo, uid).Load(&detail)
 	return detail, err
 }
 func (d *DB) queryBlacklistMemberUIDsWithGroupNo(groupNo string) ([]string, error) {
@@ -541,6 +543,7 @@ type Model struct {
 	AllowMemberPinnedMessage int        // 是否允许群成员置顶消息
 	Category                 string     // 群分类
 	SpaceID                  string     // Space ID
+	IsExternalGroup          int        // 外部群 0.否 1.是（自动维护）
 	GroupMd                  *string    // GROUP.md content
 	GroupMdVersion           int64      // GROUP.md version
 	GroupMdUpdatedAt         *time.Time // GROUP.md last update time
@@ -561,6 +564,8 @@ type MemberModel struct {
 	InviteUID          string // 邀请者
 	Robot              int    // 机器人
 	ForbiddenExpirTime int64  // 禁言时长
+	IsExternal         int    // 外部成员 0.否 1.是
+	SourceSpaceID      string // 来源 Space ID（外部成员使用）
 	db.BaseModel
 }
 
@@ -577,9 +582,11 @@ type MemberDetailModel struct {
 	IsDeleted          int    // 是否删除
 	Status             int    // 1.正常 2.黑名单
 	Username           string
-	Robot              int   // 机器人标识0.否1.是
-	ForbiddenExpirTime int64 // 禁言时长
-	BotAdmin           int   // Bot管理员 0.否 1.是
+	Robot              int    // 机器人标识0.否1.是
+	ForbiddenExpirTime int64  // 禁言时长
+	BotAdmin           int    // Bot管理员 0.否 1.是
+	IsExternal         int    // 外部成员 0.否 1.是
+	SourceSpaceID      string // 来源 Space ID（外部成员使用）
 	db.BaseModel
 }
 
@@ -669,6 +676,72 @@ func (d *DB) QueryBotMemberUIDs(groupNo string) ([]string, error) {
 	var uids []string
 	_, err := d.session.Select("uid").From("group_member").Where("group_no=? and is_deleted=0 and robot=1", groupNo).Load(&uids)
 	return uids, err
+}
+
+// QueryExternalMemberCountTx 事务内查询群内外部成员数量（FOR UPDATE 行锁防并发）
+func (d *DB) QueryExternalMemberCountTx(groupNo string, tx *dbr.Tx) (int64, error) {
+	var count int64
+	_, err := tx.SelectBySql(
+		"SELECT COUNT(*) FROM group_member WHERE group_no=? AND is_external=1 AND is_deleted=0 FOR UPDATE",
+		groupNo,
+	).Load(&count)
+	return count, err
+}
+
+// QueryExternalGroupNosForUser 查询用户作为外部成员加入的群列表，返回 groupNo -> sourceSpaceID
+func (d *DB) QueryExternalGroupNosForUser(uid string) (map[string]string, error) {
+	result := make(map[string]string)
+	if uid == "" {
+		return result, nil
+	}
+	var rows []struct {
+		GroupNo       string `db:"group_no"`
+		SourceSpaceID string `db:"source_space_id"`
+	}
+	_, err := d.session.SelectBySql(
+		"SELECT group_no, source_space_id FROM group_member WHERE uid=? AND is_external=1 AND is_deleted=0",
+		uid,
+	).Load(&rows)
+	if err != nil {
+		return result, err
+	}
+	for _, r := range rows {
+		result[r.GroupNo] = r.SourceSpaceID
+	}
+	return result, nil
+}
+
+// UpdateIsExternalGroup 更新群的 is_external_group 标记
+func (d *DB) UpdateIsExternalGroup(groupNo string, value int) error {
+	_, err := d.session.Update("group").
+		Set("is_external_group", value).
+		Where("group_no=?", groupNo).Exec()
+	return err
+}
+
+// UpdateIsExternalGroupTx 事务内更新群的 is_external_group 标记
+func (d *DB) UpdateIsExternalGroupTx(groupNo string, value int, tx *dbr.Tx) error {
+	_, err := tx.Update("group").
+		Set("is_external_group", value).
+		Where("group_no=?", groupNo).Exec()
+	return err
+}
+
+// QuerySourceSpaceIDForMember 查询某用户作为外部成员在指定群的 source_space_id
+// 非外部成员或不存在时返回空字符串
+func (d *DB) QuerySourceSpaceIDForMember(groupNo, uid string) (string, error) {
+	if groupNo == "" || uid == "" {
+		return "", nil
+	}
+	var sourceSpaceID string
+	err := d.session.SelectBySql(
+		"SELECT source_space_id FROM group_member WHERE group_no=? AND uid=? AND is_external=1 AND is_deleted=0",
+		groupNo, uid,
+	).LoadOne(&sourceSpaceID)
+	if err != nil && err != dbr.ErrNotFound {
+		return "", err
+	}
+	return sourceSpaceID, nil
 }
 
 type CategoryRow struct {

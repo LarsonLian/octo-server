@@ -14,6 +14,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/gocraft/dbr/v2"
@@ -222,11 +223,19 @@ func (s *Service) GetGroupDetails(groupNos []string, uid string) ([]*GroupResp, 
 		return nil, err
 	}
 	groupResps := make([]*GroupResp, 0)
-	if len(groupDetails) > 0 {
-		for _, groupDetail := range groupDetails {
-			groupResp := &GroupResp{}
-			groupResps = append(groupResps, groupResp.from(groupDetail))
-		}
+	if len(groupDetails) == 0 {
+		return groupResps, nil
+	}
+	externalMap, err := s.db.QueryExternalGroupNosForUser(uid)
+	if err != nil {
+		s.Error("query external group nos failed", zap.Error(err), zap.String("uid", uid))
+		externalMap = nil
+	}
+	for _, groupDetail := range groupDetails {
+		groupResp := &GroupResp{}
+		groupResp = groupResp.from(groupDetail)
+		groupResp.SetEffectiveSpaceIDFromMap(externalMap)
+		groupResps = append(groupResps, groupResp)
 	}
 	return groupResps, nil
 }
@@ -266,6 +275,7 @@ func (s *Service) GetGroupDetail(groupNo string, uid string) (*GroupResp, error)
 		groupResp.CanEditGroupMd = isManagerOrCreator
 		groupResp.CanManageBotAdmin = isManagerOrCreator
 	}
+	groupResp.SetEffectiveSpaceID(uid, s.db)
 	return groupResp, nil
 }
 
@@ -471,8 +481,9 @@ type InfoResp struct {
 	AllowViewHistoryMsg int       `json:"allow_view_history_msg"` // 是否允许新成员查看历史记录
 	CreatedAt           string    `json:"created_at"`
 	UpdatedAt           string    `json:"updated_at"`
-	Version             int64     `json:"version"`   // 群数据版本
-	SpaceID             string    `json:"space_id"`  // Space ID
+	Version             int64     `json:"version"`           // 群数据版本
+	SpaceID             string    `json:"space_id"`          // Space ID
+	IsExternalGroup     int       `json:"is_external_group"` // 是否外部群
 }
 
 func toInfoResp(m *Model) *InfoResp {
@@ -491,6 +502,7 @@ func toInfoResp(m *Model) *InfoResp {
 		UpdatedAt:           m.UpdatedAt.String(),
 		Version:             m.Version,
 		SpaceID:             m.SpaceID,
+		IsExternalGroup:     m.IsExternalGroup,
 	}
 }
 
@@ -596,6 +608,7 @@ type GroupResp struct {
 	CanEditGroupMd           bool      `json:"can_edit_group_md"`           // 是否可编辑GROUP.md
 	CanManageBotAdmin        bool      `json:"can_manage_bot_admin"`        // 是否可管理Bot管理员
 	SpaceID                  string    `json:"space_id"`                    // Space ID
+	IsExternalGroup          int       `json:"is_external_group"`           // 是否外部群 0.否 1.是
 	CreatedAt                string    `json:"created_at"`
 	UpdatedAt                string    `json:"updated_at"`
 	Version                  int64     `json:"version"` // 群数据版本
@@ -628,6 +641,7 @@ func (g *GroupResp) from(model *DetailModel) *GroupResp {
 		AllowViewHistoryMsg:      model.AllowViewHistoryMsg,
 		AllowMemberPinnedMessage: model.AllowMemberPinnedMessage,
 		SpaceID:                  model.SpaceID,
+		IsExternalGroup:          model.IsExternalGroup,
 		HasGroupMd:               model.GroupMd != nil && *model.GroupMd != "",
 		GroupMdVersion:           model.GroupMdVersion,
 		CreatedAt:                model.CreatedAt.String(),
@@ -654,6 +668,7 @@ func (g *GroupResp) fromModel(model *Model) *GroupResp {
 		AllowViewHistoryMsg:      model.AllowViewHistoryMsg,
 		AllowMemberPinnedMessage: model.AllowMemberPinnedMessage,
 		SpaceID:                  model.SpaceID,
+		IsExternalGroup:          model.IsExternalGroup,
 		HasGroupMd:               model.GroupMd != nil && *model.GroupMd != "",
 		GroupMdVersion:           model.GroupMdVersion,
 		CreatedAt:                model.CreatedAt.String(),
@@ -664,6 +679,30 @@ func (g *GroupResp) fromModel(model *Model) *GroupResp {
 		resp.GroupMdUpdatedAt = &t
 	}
 	return resp
+}
+
+// SetEffectiveSpaceID 对外部群的外部成员替换 SpaceID 为其来源 Space，
+// 这样 Web 端依赖 space_id 的会话过滤逻辑无需修改即可自然匹配。
+func (g *GroupResp) SetEffectiveSpaceID(loginUID string, db *DB) {
+	if g == nil || g.IsExternalGroup == 0 || loginUID == "" {
+		return
+	}
+	sourceSpaceID, err := db.QuerySourceSpaceIDForMember(g.GroupNo, loginUID)
+	if err != nil || sourceSpaceID == "" {
+		return
+	}
+	g.SpaceID = sourceSpaceID
+}
+
+// SetEffectiveSpaceIDFromMap 与 SetEffectiveSpaceID 等价，但使用调用方预先批量查询的
+// groupNo -> sourceSpaceID 映射，避免列表场景下的 N+1 查询。
+func (g *GroupResp) SetEffectiveSpaceIDFromMap(externalMap map[string]string) {
+	if g == nil || g.IsExternalGroup == 0 || len(externalMap) == 0 {
+		return
+	}
+	if sourceSpaceID, ok := externalMap[g.GroupNo]; ok && sourceSpaceID != "" {
+		g.SpaceID = sourceSpaceID
+	}
 }
 
 // GetGroupMdMaxSize returns the max GROUP.md size from env or default (10240)
@@ -1048,23 +1087,33 @@ func (s *Service) AddGroupMembers(req *AddGroupMembersServiceReq) (*AddGroupMemb
 		return nil, errors.New("no valid members after deduplication")
 	}
 
-	// Space 成员校验：若群属于某个 Space，待加入成员必须也在该 Space 内
+	// Space 成员校验：群属于某个 Space 时，不在 Space 的成员标记为外部成员。
+	// source_space_id 的确定规则：
+	//   - 若操作者是外部成员，沿用其 source_space_id（同源 Space 邀请）
+	//   - 否则使用被邀请人的默认 Space
+	externalMap := make(map[string]bool)
+	sourceSpaceMap := make(map[string]string)
 	if groupModel.SpaceID != "" {
-		var validUIDs []string
+		var operatorMember *MemberModel
+		if req.OperatorUID != "" {
+			operatorMember, _ = s.db.QueryMemberWithUID(req.OperatorUID, req.GroupNo)
+		}
 		for _, uid := range uniqueUIDs {
 			ok, err := spacepkg.CheckMembership(s.ctx.DB(), groupModel.SpaceID, uid)
 			if err != nil {
 				s.Error("check space membership failed", zap.Error(err), zap.String("uid", uid))
-				continue
+				return nil, errors.New("failed to check space membership")
 			}
 			if ok {
-				validUIDs = append(validUIDs, uid)
+				continue
+			}
+			externalMap[uid] = true
+			if operatorMember != nil && operatorMember.IsExternal == 1 && operatorMember.SourceSpaceID != "" {
+				sourceSpaceMap[uid] = operatorMember.SourceSpaceID
+			} else {
+				sourceSpaceMap[uid] = spacemod.GetUserDefaultSpaceID(s.ctx, uid)
 			}
 		}
-		if len(validUIDs) == 0 {
-			return nil, errors.New("none of the members belong to the group's space")
-		}
-		uniqueUIDs = validUIDs
 	}
 
 	// 查询用户信息
@@ -1104,6 +1153,7 @@ func (s *Service) AddGroupMembers(req *AddGroupMembersServiceReq) (*AddGroupMemb
 
 	var addedUIDs []string
 	var addedVos []*config.UserBaseVo
+	hasNewExternal := false
 	for _, memberUser := range memberUsers {
 		if memberUser.IsDestroy == 1 {
 			continue
@@ -1117,17 +1167,26 @@ func (s *Service) AddGroupMembers(req *AddGroupMembersServiceReq) (*AddGroupMemb
 			return nil, err
 		}
 
+		isExt := 0
+		srcSpaceID := ""
+		if externalMap[memberUser.UID] {
+			isExt = 1
+			srcSpaceID = sourceSpaceMap[memberUser.UID]
+		}
+
 		// 检查是否之前被删除过（需要恢复）
 		existDelete, _ := s.db.ExistMemberDelete(memberUser.UID, req.GroupNo)
 		newMember := &MemberModel{
-			GroupNo:   req.GroupNo,
-			UID:       memberUser.UID,
-			Role:      MemberRoleCommon,
-			Version:   memberVersion,
-			Status:    int(common.GroupMemberStatusNormal),
-			InviteUID: req.OperatorUID,
-			Robot:     memberUser.Robot,
-			Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
+			GroupNo:       req.GroupNo,
+			UID:           memberUser.UID,
+			Role:          MemberRoleCommon,
+			Version:       memberVersion,
+			Status:        int(common.GroupMemberStatusNormal),
+			InviteUID:     req.OperatorUID,
+			Robot:         memberUser.Robot,
+			Vercode:       fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
+			IsExternal:    isExt,
+			SourceSpaceID: srcSpaceID,
 		}
 		if existDelete {
 			err = s.db.recoverMemberTx(newMember, tx)
@@ -1140,12 +1199,29 @@ func (s *Service) AddGroupMembers(req *AddGroupMembersServiceReq) (*AddGroupMemb
 		}
 		addedUIDs = append(addedUIDs, memberUser.UID)
 		addedVos = append(addedVos, &config.UserBaseVo{UID: memberUser.UID, Name: memberUser.Name})
+		if isExt == 1 {
+			hasNewExternal = true
+		}
+	}
+
+	// 首次出现外部成员时，在事务内将群标记为外部群，确保成员/群标记一致提交
+	markedExternal := false
+	if hasNewExternal && groupModel.IsExternalGroup == 0 {
+		if updateErr := s.db.UpdateIsExternalGroupTx(req.GroupNo, 1, tx); updateErr != nil {
+			s.Error("update is_external_group failed", zap.Error(updateErr), zap.String("group_no", req.GroupNo))
+			return nil, errors.New("failed to update external group flag")
+		}
+		markedExternal = true
 	}
 
 	// 提交事务
 	if err := tx.Commit(); err != nil {
 		s.Error("commit transaction failed", zap.Error(err))
 		return nil, errors.New("failed to commit transaction")
+	}
+
+	if markedExternal {
+		s.ctx.SendChannelUpdateToGroup(req.GroupNo)
 	}
 
 	// IM 操作（事务提交之后）
@@ -1244,6 +1320,7 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 
 	var removedUIDs []string
 	var removedVos []*config.UserBaseVo
+	removedExternal := false
 	for _, m := range removableMembers {
 		memberVersion, err := s.ctx.GenSeq(common.GroupMemberSeqKey)
 		if err != nil {
@@ -1256,6 +1333,9 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 			continue
 		}
 		removedUIDs = append(removedUIDs, m.UID)
+		if m.IsExternal == 1 {
+			removedExternal = true
+		}
 		// 查询用户名
 		memberUser, _ := s.userDB.QueryByUID(m.UID)
 		name := m.UID
@@ -1263,6 +1343,21 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 			name = memberUser.Name
 		}
 		removedVos = append(removedVos, &config.UserBaseVo{UID: m.UID, Name: name})
+	}
+
+	// 若移除了外部成员且当前群是外部群，检查剩余外部成员数；为 0 则恢复为普通群
+	resetExternalGroup := false
+	if removedExternal && groupModel.IsExternalGroup == 1 {
+		externalCount, countErr := s.db.QueryExternalMemberCountTx(req.GroupNo, tx)
+		if countErr != nil {
+			s.Error("query external member count failed", zap.Error(countErr))
+		} else if externalCount == 0 {
+			if updateErr := s.db.UpdateIsExternalGroupTx(req.GroupNo, 0, tx); updateErr != nil {
+				s.Error("update is_external_group failed", zap.Error(updateErr))
+				return nil, errors.New("failed to update is_external_group")
+			}
+			resetExternalGroup = true
+		}
 	}
 
 	// 生成群头像更新事件（best-effort，不阻塞踢人）
@@ -1280,6 +1375,11 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 	if err := tx.Commit(); err != nil {
 		s.Error("commit transaction failed", zap.Error(err))
 		return nil, errors.New("failed to commit transaction")
+	}
+
+	// 外部群标记发生变化时，通知成员刷新频道信息
+	if resetExternalGroup {
+		s.ctx.SendChannelUpdateToGroup(req.GroupNo)
 	}
 
 	// 提交头像生成事件

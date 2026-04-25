@@ -17,7 +17,7 @@ func TestFilterConversationsBySpace_DirectMatch(t *testing.T) {
 	}
 
 	// 所有会话都有 SpaceID，不触发 bareGroupNos / bareDMUIDs 逻辑
-	result := filterConversationsCore(convs, "spaceA", "spaceA", nil, nil, nil, false, false)
+	result := filterConversationsCore(convs, "spaceA", "spaceA", nil, nil, nil, nil, false, false)
 	assert.Len(t, result, 2)
 	assert.Equal(t, "g1", result[0].ChannelID)
 	assert.Equal(t, "u1", result[1].ChannelID)
@@ -37,7 +37,7 @@ func TestFilterConversationsBySpace_SystemBotsVisible(t *testing.T) {
 	// 传入 botSet 标记 custom_bot 为 Bot，且不在此 Space → 不显示
 	botSet := map[string]bool{"custom_bot": true}
 	botInSpace := map[string]bool{}
-	result := filterConversationsCore(convs, "spaceB", "spaceA", nil, botSet, botInSpace, false, false)
+	result := filterConversationsCore(convs, "spaceB", "spaceA", nil, nil, botSet, botInSpace, false, false)
 	// 系统 Bot 可见，custom_bot（Bot 不在此 Space）不可见
 	assert.Len(t, result, 3)
 	ids := []string{result[0].ChannelID, result[1].ChannelID, result[2].ChannelID}
@@ -54,11 +54,11 @@ func TestFilterConversationsBySpace_DefaultSpaceBareConvs(t *testing.T) {
 	}
 
 	// filterSpaceID == defaultSpaceID → 旧会话保留
-	result := filterConversationsCore(convs, "spaceA", "spaceA", nil, nil, nil, false, false)
+	result := filterConversationsCore(convs, "spaceA", "spaceA", nil, nil, nil, nil, false, false)
 	assert.Len(t, result, 2)
 
 	// filterSpaceID != defaultSpaceID → 无 Recents 匹配 → 不显示
-	result = filterConversationsCore(convs, "spaceB", "spaceA", nil, nil, nil, false, false)
+	result = filterConversationsCore(convs, "spaceB", "spaceA", nil, nil, nil, nil, false, false)
 	assert.Len(t, result, 0)
 }
 
@@ -81,7 +81,7 @@ func TestFilterConversationsBySpace_NonDefaultSpaceDMVisible(t *testing.T) {
 	botInSpace := map[string]bool{"bot_in_space": true}
 
 	// filterSpaceID=spaceB != defaultSpaceID=spaceA
-	result := filterConversationsCore(convs, "spaceB", "spaceA", nil, botSet, botInSpace, false, false)
+	result := filterConversationsCore(convs, "spaceB", "spaceA", nil, nil, botSet, botInSpace, false, false)
 
 	// user1（Recents 有 spaceB 消息）保留；user2（Recents 只有 spaceA）过滤；
 	// bot_in_space（Bot 在此 Space）保留；custom_bot（Bot 不在此 Space）不保留
@@ -113,7 +113,7 @@ func TestFilterConversationsBySpace_NewSpaceCleanSlate(t *testing.T) {
 		},
 	}
 
-	result := filterConversationsCore(convs, "spaceNew", "spaceA", nil, map[string]bool{}, map[string]bool{}, false, false)
+	result := filterConversationsCore(convs, "spaceNew", "spaceA", nil, nil, map[string]bool{}, map[string]bool{}, false, false)
 
 	// 新 Space 没有任何 DM 有匹配消息 → clean slate
 	assert.Len(t, result, 0)
@@ -152,7 +152,7 @@ func TestFilterConversationsBySpace_GroupSpaceMap(t *testing.T) {
 	}
 	groupMap := map[string]string{"g1": "spaceA", "g2": "spaceB"}
 
-	result := filterConversationsCore(convs, "spaceA", "spaceA", groupMap, nil, nil, false, false)
+	result := filterConversationsCore(convs, "spaceA", "spaceA", groupMap, nil, nil, nil, false, false)
 	assert.Len(t, result, 1)
 	assert.Equal(t, "g1", result[0].ChannelID)
 }
@@ -165,9 +165,44 @@ func TestFilterConversationsBySpace_SkipGroupFilter(t *testing.T) {
 		{ChannelID: "u1", ChannelType: common.ChannelTypePerson.Uint8(), SpaceID: "spaceA"},
 	}
 
-	result := filterConversationsCore(convs, "spaceA", "spaceA", nil, nil, nil, true, false)
+	result := filterConversationsCore(convs, "spaceA", "spaceA", nil, nil, nil, nil, true, false)
 	// g1, g2 保留（skipGroupFilter），u1 保留（直接匹配）
 	assert.Len(t, result, 3)
+}
+
+func TestFilterConversationsBySpace_ExternalGroupVisibleInSourceSpace(t *testing.T) {
+	// 外部群：用户作为 Space B 的外部成员加入 Space A 的群，
+	// 在 Space B 会话列表中应可见，在其他 Space 不应可见。
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "gExt", ChannelType: common.ChannelTypeGroup.Uint8(), SpaceID: "spaceA"},
+	}
+	externalMap := map[string]string{"gExt": "spaceB"}
+
+	// 在 source Space（B）下可见
+	result := filterConversationsCore(convs, "spaceB", "spaceB", nil, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 1)
+	assert.Equal(t, "gExt", result[0].ChannelID)
+
+	// 在群的原生 Space（A）下也可见
+	result = filterConversationsCore(convs, "spaceA", "spaceB", nil, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 1)
+
+	// 在无关 Space（C）下不可见
+	result = filterConversationsCore(convs, "spaceC", "spaceB", nil, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 0)
+}
+
+func TestFilterConversationsBySpace_ExternalGroupFallbackToDefault(t *testing.T) {
+	// 外部成员已离开 source Space 时，source_space_id 为空，
+	// 应 fallback 到默认 Space 显示。
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "gExt", ChannelType: common.ChannelTypeGroup.Uint8(), SpaceID: "spaceA"},
+	}
+	externalMap := map[string]string{"gExt": ""} // source Space 记录已失效
+
+	// defaultSpaceID=spaceB，fallback 后在 spaceB 可见
+	result := filterConversationsCore(convs, "spaceB", "spaceB", nil, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 1)
 }
 
 func TestGetBotUIDs_SkipsSystemBots(t *testing.T) {

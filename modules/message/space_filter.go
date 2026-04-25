@@ -62,10 +62,17 @@ func FilterConversationsBySpace(
 		skipGroupFilter = true
 	}
 
+	// 查询用户作为外部成员加入的群 → { groupNo: sourceSpaceID }
+	externalGroupMap, err := group.NewDB(ctx).QueryExternalGroupNosForUser(loginUID)
+	if err != nil {
+		log.Warn("查询外部群失败，跳过外部群过滤", zap.Error(err))
+		externalGroupMap = make(map[string]string)
+	}
+
 	// Bot DM 过滤
 	botSet, botInSpace, skipBotFilter := resolveBotFilter(ctx, filterSpaceID, bareDMUIDs)
 
-	return filterConversationsCore(conversations, filterSpaceID, defaultSpaceID, groupSpaceMap, botSet, botInSpace, skipGroupFilter, skipBotFilter)
+	return filterConversationsCore(conversations, filterSpaceID, defaultSpaceID, groupSpaceMap, externalGroupMap, botSet, botInSpace, skipGroupFilter, skipBotFilter)
 }
 
 // filterConversationsCore 是纯过滤逻辑，不依赖 DB/ctx，便于单元测试。
@@ -74,6 +81,7 @@ func filterConversationsCore(
 	filterSpaceID string,
 	defaultSpaceID string,
 	groupSpaceMap map[string]string,
+	externalGroupMap map[string]string,
 	botSet map[string]bool,
 	botInSpace map[string]bool,
 	skipGroupFilter bool,
@@ -94,6 +102,23 @@ func filterConversationsCore(
 
 		if spaceID == filterSpaceID {
 			filtered = append(filtered, conv)
+		} else if conv.ChannelType == common.ChannelTypeGroup.Uint8() {
+			// 外部群：用户作为外部成员加入的群，在其 source Space 下显示
+			if sourceSpace, ok := externalGroupMap[conv.ChannelID]; ok {
+				effectiveSource := sourceSpace
+				if effectiveSource == "" {
+					// fallback: 用户已离开 source Space 时，降级到默认 Space
+					effectiveSource = defaultSpaceID
+				}
+				if effectiveSource == filterSpaceID {
+					filtered = append(filtered, conv)
+					continue
+				}
+			}
+			if spaceID == "" {
+				// 旧群（无 space_id）在所有 Space 可见
+				filtered = append(filtered, conv)
+			}
 		} else if spaceID == "" && filterSpaceID == defaultSpaceID {
 			// 裸 UID 旧会话只在默认 Space 显示
 			// Bot DM：Bot 不在默认 Space 则排除（查询失败时不过滤，避免误删）
@@ -119,11 +144,6 @@ func filterConversationsCore(
 				}
 			}
 			// Bot 不在此 Space → 不显示
-		} else if spaceID == "" && conv.ChannelType == common.ChannelTypeGroup.Uint8() {
-			// 旧群（无 space_id）在所有 Space 可见
-			// 这些是 Space 功能上线前创建的群，无法确定归属
-			// 成员关系已由 groupVailds 兜底，不会泄漏给非成员
-			filtered = append(filtered, conv)
 		}
 	}
 	return filtered

@@ -116,6 +116,12 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 	{
 		authGroups.GET("/:group_no/scanjoin", g.groupScanJoin) // 扫码加入群（需要认证）
 	}
+	// H5 公开落地页配套的认证接口：把公开 code（二维码 UUID）换成当前登录用户的 auth_code。
+	// 之后前端直接调用 /v1/groups/:group_no/scanjoin?auth_code=xxx 完成入群。
+	authInviteGroup := r.Group("/v1/group", g.ctx.AuthMiddleware(r))
+	{
+		authInviteGroup.POST("/invite/authorize", g.groupInviteAuthorize)
+	}
 	// 公开邀请落地页（无需认证）严格 per-IP 限流：防枚举 + 暴破。
 	// 与 space 模块一致：10 req/min, burst 5；preview/detail 共享同一 limiter。
 	rlRedis := redis.NewClient(&redis.Options{
@@ -3590,5 +3596,95 @@ func (g *Group) groupInviteDetail(c *wkhttp.Context) {
 		"group_name":   groupModel.Name,
 		"avatar":       fmt.Sprintf("groups/%s/avatar", groupNo),
 		"member_count": memberCount,
+	})
+}
+
+// groupInviteAuthorize 把公开邀请码（二维码 UUID）换成当前登录用户的入群 auth_code。
+// 这是 Web H5 公开落地页「加入群聊」按钮的前置步骤：
+//
+//  1. 落地页通过 GET /v1/group/invite/detail?code=xxx 拿到脱敏预览
+//  2. 已登录用户点击「加入群聊」→ POST /v1/group/invite/authorize?code=xxx
+//     本端口在 Redis 里生成一条和扫码预检等价的 auth_code 记录
+//  3. 前端拿到 auth_code 后直接调用 GET /v1/groups/:group_no/scanjoin?auth_code=xxx
+//     完成入群（包含外部成员识别 / allow_external / invite 审批等完整鉴权链路）
+//
+// 注意：本接口本身只生成 auth_code，不真正入群；所有业务规则（是否在群、外部成员
+// 是否允许、是否邀请审批）都交给 groupScanJoin，避免双份鉴权漂移。
+func (g *Group) groupInviteAuthorize(c *wkhttp.Context) {
+	loginUID := c.GetLoginUID()
+	if loginUID == "" {
+		c.ResponseError(errors.New("请先登录"))
+		return
+	}
+	code := strings.TrimSpace(c.Query("code"))
+	if code == "" {
+		c.ResponseError(errors.New("邀请码不能为空"))
+		return
+	}
+
+	qrcodeContent, err := g.ctx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.QRCodeCachePrefix, code))
+	if err != nil {
+		g.Error("获取邀请码缓存失败", zap.Error(err), zap.String("code", code))
+		c.ResponseError(errors.New("获取邀请码信息失败"))
+		return
+	}
+	if qrcodeContent == "" {
+		c.ResponseError(errors.New("邀请链接已过期"))
+		return
+	}
+
+	var qrCodeModel common.QRCodeModel
+	if err := util.ReadJsonByByte([]byte(qrcodeContent), &qrCodeModel); err != nil {
+		g.Error("解析邀请码缓存失败", zap.Error(err), zap.String("code", code))
+		c.ResponseError(errors.New("邀请链接已过期"))
+		return
+	}
+	if qrCodeModel.Type != common.QRCodeTypeGroup {
+		c.ResponseError(errors.New("邀请链接已过期"))
+		return
+	}
+	groupNo, _ := qrCodeModel.Data["group_no"].(string)
+	if groupNo == "" {
+		c.ResponseError(errors.New("邀请链接已过期"))
+		return
+	}
+	generator, _ := qrCodeModel.Data["generator"].(string)
+	if strings.TrimSpace(generator) == "" {
+		c.ResponseError(errors.New("邀请链接已过期"))
+		return
+	}
+
+	groupModel, err := g.db.QueryWithGroupNo(groupNo)
+	if err != nil {
+		g.Error("查询群资料失败", zap.Error(err), zap.String("group_no", groupNo))
+		c.ResponseError(errors.New("查询群资料失败"))
+		return
+	}
+	if groupModel == nil || groupModel.Status == GroupStatusDisband {
+		c.ResponseError(errors.New("群不存在或已解散"))
+		return
+	}
+	if groupModel.Invite == 1 {
+		// 与 groupScanJoin 保持一致：开启邀请审批的群不支持直接扫码入群，
+		// 也不在 H5 落地页生成 auth_code（避免后续 scanjoin 失败时的语义含糊）。
+		c.ResponseError(errors.New("群开启了邀请模式，不能直接加入群聊"))
+		return
+	}
+
+	authCode := util.GenerUUID()
+	err = g.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode), util.ToJson(map[string]interface{}{
+		"group_no":  groupNo,
+		"generator": generator,
+		"scaner":    loginUID,
+		"type":      common.AuthCodeTypeJoinGroup,
+	}), time.Minute*30)
+	if err != nil {
+		g.Error("生成入群授权码失败", zap.Error(err), zap.String("group_no", groupNo))
+		c.ResponseError(errors.New("生成入群授权码失败，请稍后重试"))
+		return
+	}
+	c.Response(gin.H{
+		"group_no":  groupNo,
+		"auth_code": authCode,
 	})
 }

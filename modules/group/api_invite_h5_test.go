@@ -226,3 +226,145 @@ func TestGroupInvitePage_RendersHTMLWithAPIBase(t *testing.T) {
 	assert.True(t, strings.Contains(body, "群邀请"))
 	assert.True(t, strings.Contains(body, "/v1/group/invite/detail"))
 }
+
+// 已登录用户用公开 code 换取 auth_code：基础路径。
+func TestGroupInviteAuthorize_OK(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	groupNo := "g-invite-auth-ok"
+	err = f.db.Insert(&Model{
+		GroupNo:       groupNo,
+		Name:          "研发群",
+		Creator:       "10001",
+		Status:        1,
+		Invite:        0,
+		AllowExternal: 1,
+	})
+	assert.NoError(t, err)
+
+	code := "test-auth-ok-code"
+	err = ctx.GetRedisConn().SetAndExpire(
+		fmt.Sprintf("%s%s", common.QRCodeCachePrefix, code),
+		util.ToJson(common.NewQRCodeModel(common.QRCodeTypeGroup, map[string]interface{}{
+			"group_no":  groupNo,
+			"generator": "10001",
+		})),
+		time.Hour,
+	)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/group/invite/authorize?code="+code, nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, groupNo, resp["group_no"])
+	authCode, _ := resp["auth_code"].(string)
+	assert.NotEmpty(t, authCode)
+
+	// 校验 Redis 里写入的 auth_code 记录和移动端 handleJoinGroup 保持一致的 shape
+	cached, err := ctx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode))
+	assert.NoError(t, err)
+	var payload map[string]interface{}
+	assert.NoError(t, json.Unmarshal([]byte(cached), &payload))
+	assert.Equal(t, groupNo, payload["group_no"])
+	assert.Equal(t, "10001", payload["generator"])
+	assert.Equal(t, testutil.UID, payload["scaner"])
+	assert.Equal(t, string(common.AuthCodeTypeJoinGroup), payload["type"])
+}
+
+// invite=1 的群（需审批）不应通过 authorize 生成 auth_code。
+func TestGroupInviteAuthorize_InviteRequired(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	groupNo := "g-invite-auth-req"
+	err = f.db.Insert(&Model{
+		GroupNo: groupNo,
+		Name:    "审批群",
+		Creator: "10001",
+		Status:  1,
+		Invite:  1,
+	})
+	assert.NoError(t, err)
+
+	code := "test-auth-invite-code"
+	err = ctx.GetRedisConn().SetAndExpire(
+		fmt.Sprintf("%s%s", common.QRCodeCachePrefix, code),
+		util.ToJson(common.NewQRCodeModel(common.QRCodeTypeGroup, map[string]interface{}{
+			"group_no":  groupNo,
+			"generator": "10001",
+		})),
+		time.Hour,
+	)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/group/invite/authorize?code="+code, nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "邀请模式")
+}
+
+// code 已过期 / 不存在：返回错误。
+func TestGroupInviteAuthorize_Expired(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	_ = New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/group/invite/authorize?code=does-not-exist-"+util.GenerUUID(), nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "邀请链接已过期")
+}
+
+// 未登录：AuthMiddleware 直接拦截。
+func TestGroupInviteAuthorize_RequiresAuth(t *testing.T) {
+	s, _ := testutil.NewTestServer()
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/group/invite/authorize?code=foo", nil)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// 落地页 HTML 应包含「加入群聊」按钮与 authorize 端点引用，
+// 确保前端改动不会被后端模板替换误伤。
+func TestGroupInvitePage_ContainsJoinButton(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	_ = New(ctx)
+
+	wd, err := os.Getwd()
+	assert.NoError(t, err)
+	if err := os.Chdir("../.."); err != nil {
+		t.Fatalf("chdir to repo root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	w := httptest.NewRecorder()
+	s.GetRoute().ServeHTTP(w, newInviteRequest(t, "/v1/group/invite?code=join-button-check"))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.True(t, strings.Contains(body, "加入群聊"))
+	assert.True(t, strings.Contains(body, "/v1/group/invite/authorize"))
+	assert.True(t, strings.Contains(body, "/scanjoin"))
+}

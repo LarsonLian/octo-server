@@ -2566,6 +2566,24 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 		return
 	}
 
+	// D-2 · 级联带走 inviter 拉入的 bot（YUJ-49 / Mininglamp-OSS/octo-server#1186）。
+	// Edge case: 群主退群时此逻辑不触发（角色转让由上方 newGrouper 兜底；
+	//            若确要销群应走 DismissGroup）——保持 bot 跟随新群主留在群中。
+	var cascadedBotUsers []*user.Model
+	if loginMember.Role != MemberRoleCreator {
+		cascadedUIDs, cerr := cascadeRemoveBotsInvitedByUIDTx(g.db, g.ctx, groupNo, loginUID, tx)
+		if cerr != nil {
+			tx.Rollback()
+			g.Error("级联移除 bot 成员失败", zap.Error(cerr))
+			c.ResponseError(errors.New("级联移除 bot 成员失败"))
+			return
+		}
+		for _, botUID := range cascadedUIDs {
+			botUser, _ := g.userDB.QueryByUID(botUID)
+			cascadedBotUsers = append(cascadedBotUsers, botUser)
+		}
+	}
+
 	// 若退群者是外部成员且当前群是外部群，检查是否需要恢复普通群
 	resetExternalGroup := false
 	if loginMember.IsExternal == 1 && groupInfo.IsExternalGroup == 1 {
@@ -2648,6 +2666,30 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 		err = g.ctx.SendGroupExit(groupNo, loginUID, showName, visiblesUids)
 		if err != nil {
 			g.Error("发送成员退出群聊错误", zap.Error(err))
+		}
+	}
+
+	// D-2 · bot 级联移除后发系统 Tip，保持透明度（#1186 / YUJ-49）。
+	// IM 订阅也一并摘除，避免 bot 继续收到群消息。
+	if len(cascadedBotUsers) > 0 && groupInfo.Status != GroupStatusDisband {
+		botUIDs := make([]string, 0, len(cascadedBotUsers))
+		for _, bu := range cascadedBotUsers {
+			if bu == nil {
+				continue
+			}
+			botUIDs = append(botUIDs, bu.UID)
+		}
+		if len(botUIDs) > 0 {
+			if err := g.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
+				ChannelID:   groupNo,
+				ChannelType: common.ChannelTypeGroup.Uint8(),
+				Subscribers: botUIDs,
+			}); err != nil {
+				g.Error("级联移除 bot 的 IM 订阅失败", zap.Error(err))
+			}
+		}
+		if err := sendBotCascadeRemovedTip(g.ctx, groupNo, showName, "离开了", cascadedBotUsers); err != nil {
+			g.Error("发送 bot 级联移除 Tip 失败", zap.Error(err))
 		}
 	}
 	// 清理用户在该群的置顶（按 Space 隔离）

@@ -1339,6 +1339,14 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 	var removedUIDs []string
 	var removedVos []*config.UserBaseVo
 	removedExternal := false
+	// D-2 cascade：被踢成员拉入的 bot 也一并带走。按「leaver -> []*user.Model」记录以便事务提交后发系统 Tip。
+	// 使用 slice 保留顺序（同 Redis/日志可读性），用集合去重防重复推送。
+	type cascadedLeaver struct {
+		LeaverName string
+		Bots       []*user.Model
+	}
+	var cascadedPerLeaver []cascadedLeaver
+	alreadyCascadedBotUIDs := make(map[string]struct{})
 	for _, m := range removableMembers {
 		memberVersion, err := s.ctx.GenSeq(common.GroupMemberSeqKey)
 		if err != nil {
@@ -1361,6 +1369,33 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 			name = memberUser.Name
 		}
 		removedVos = append(removedVos, &config.UserBaseVo{UID: m.UID, Name: name})
+
+		// D-2 · 级联带走该成员拉入的 bot（#1186 / YUJ-49）。
+		// 只对非群主 / 非管理员成员触发；上层 filter 已排除 creator/manager，这里保底再判一次。
+		if m.Role == MemberRoleCreator || m.Role == MemberRoleManager {
+			continue
+		}
+		cascadedUIDs, cerr := cascadeRemoveBotsInvitedByUIDTx(s.db, s.ctx, req.GroupNo, m.UID, tx)
+		if cerr != nil {
+			s.Error("cascade remove bots failed", zap.Error(cerr), zap.String("uid", m.UID))
+			return nil, errors.New("failed to cascade-remove invited bots")
+		}
+		if len(cascadedUIDs) == 0 {
+			continue
+		}
+		var cascadedForThis []*user.Model
+		for _, botUID := range cascadedUIDs {
+			if _, seen := alreadyCascadedBotUIDs[botUID]; seen {
+				continue
+			}
+			alreadyCascadedBotUIDs[botUID] = struct{}{}
+			removedUIDs = append(removedUIDs, botUID)
+			botUser, _ := s.userDB.QueryByUID(botUID)
+			cascadedForThis = append(cascadedForThis, botUser)
+		}
+		if len(cascadedForThis) > 0 {
+			cascadedPerLeaver = append(cascadedPerLeaver, cascadedLeaver{LeaverName: name, Bots: cascadedForThis})
+		}
 	}
 
 	// 若移除了外部成员且当前群是外部群，检查剩余外部成员数；为 0 则恢复为普通群
@@ -1436,6 +1471,14 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 				"group_no": req.GroupNo,
 			},
 		})
+
+		// D-2 · 级联透明度：bot 被连带移除时发系统 Tip，避免"神秘消失"。
+		// 每个 leaver 单独发一条；若 leaver 没有 bot 则跳过。
+		for _, cl := range cascadedPerLeaver {
+			if err := sendBotCascadeRemovedTip(s.ctx, req.GroupNo, cl.LeaverName, "被移出", cl.Bots); err != nil {
+				s.Error("send bot cascade removed tip failed", zap.Error(err), zap.String("leaver", cl.LeaverName))
+			}
+		}
 
 		// 移除被踢用户在该群所有子区的成员身份和置顶（直接 SQL 查 thread 表）
 		for _, uid := range removedUIDs {

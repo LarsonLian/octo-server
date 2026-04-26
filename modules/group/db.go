@@ -680,6 +680,34 @@ func (d *DB) QueryBotMemberUIDs(groupNo string) ([]string, error) {
 	return uids, err
 }
 
+// QueryBotsInvitedByUIDTx 事务内查询群里由 inviterUID 所拥有的活跃 bot 成员 UID 列表，带 FOR UPDATE 行锁。
+//
+// D-2 cascade 语义（YUJ-49 / Mininglamp-OSS/octo-server#1186）：
+//   - Bot 进群本质是邀请关系延伸（#1182 已强制 inviter == robot.creator_uid）
+//   - inviter 离群（主动退 / 被踢）时，应同事务级联移除其所有 bot
+//
+// 只返回同时满足以下条件的 bot UID：
+//   - group_member.robot = 1 AND is_deleted = 0（仍在群内的 bot 成员）
+//   - robot.creator_uid = inviterUID AND robot.status = 1（仍活跃、且属于 inviter）
+//
+// 为什么是 INNER JOIN + status=1：与 checkBotOwnership（bot_ownership.go）保持一致，
+// 没有活跃 robot 行的 bot（孤儿 / 禁用）不视为任何人的 bot，不被级联。
+// 群主 / 其他管理员仍可通过常规移除成员接口清理它们。
+func (d *DB) QueryBotsInvitedByUIDTx(groupNo string, inviterUID string, tx *dbr.Tx) ([]string, error) {
+	if groupNo == "" || inviterUID == "" {
+		return nil, nil
+	}
+	var uids []string
+	_, err := tx.SelectBySql(
+		"SELECT gm.uid FROM group_member gm "+
+			"INNER JOIN robot r ON r.robot_id = gm.uid AND r.status = 1 "+
+			"WHERE gm.group_no = ? AND gm.robot = 1 AND gm.is_deleted = 0 "+
+			"AND r.creator_uid = ? FOR UPDATE",
+		groupNo, inviterUID,
+	).Load(&uids)
+	return uids, err
+}
+
 // QueryExternalMemberCountTx 事务内查询群内「人类」外部成员数量（FOR UPDATE 行锁防并发）。
 // 排除 robot=1 的 bot 成员：is_external_group 的语义只反映人类外部成员是否存在，
 // bot 的 is_external + source_space_id 字段仅用于能力路由，不影响群的外部属性。

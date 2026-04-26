@@ -866,6 +866,10 @@ func (m *Message) syncChannelMessage(c *wkhttp.Context) {
 	// 群消息中的 ThreadCreated 消息：用实时数据覆盖 payload 中的快照字段
 	if req.ChannelType == common.ChannelTypeGroup.Uint8() {
 		m.enrichThreadCreatedMessages(syncResp.Messages)
+		// 外部来源标识透传：填充顶层 from_is_external / from_source_space_name，
+		// 以及 mergeforward content.users 每个元素的 is_external / source_space_name。
+		// 详见 Mininglamp-OSS/octo-server#1188。
+		m.enrichExternalMarkers(req.ChannelID, syncResp.Messages)
 	}
 
 	c.Response(syncResp)
@@ -2382,6 +2386,10 @@ type MsgSyncResp struct {
 	ClientMsgNo   string                 `json:"client_msg_no"`             // 客户端消息唯一编号
 	StreamNo      string                 `json:"stream_no,omitempty"`       // 流编号
 	FromUID       string                 `json:"from_uid"`                  // 发送者UID
+	// 外部来源标识：仅在 /message/channel/sync 群聊路径填充，供前端在外部群渲染来源 Space 徽标。
+	// 详见 Mininglamp-OSS/octo-server#1188。
+	FromIsExternal      int    `json:"from_is_external"`                // 发送者是否为外部成员 0.否 1.是
+	FromSourceSpaceName string `json:"from_source_space_name,omitempty"` // 发送者来源 Space 名称（为空则前端不渲染）
 	ToUID         string                 `json:"to_uid,omitempty"`          // 接受者uid
 	ChannelID     string                 `json:"channel_id"`                // 频道ID
 	ChannelType   uint8                  `json:"channel_type"`              // 频道类型
@@ -2695,6 +2703,84 @@ func (m *Message) enrichThreadCreatedMessages(messages []*MsgSyncResp) {
 			if meta.SourceMessageID != nil {
 				msg.Payload["source_message_id"] = *meta.SourceMessageID
 			}
+		}
+	}
+}
+
+// applyExternalMarkerToUserItem 给 mergeforward content.users 中的单个 element 写入
+// is_external / source_space_name 字段。elem 为 map[string]interface{} 才会生效；
+// 其他类型（含旧数据缺 uid 的元素）直接跳过，保证向后兼容。
+func applyExternalMarkerToUserItem(elem interface{}, markers map[string]group.MemberExternalMarker) {
+	userMap, ok := elem.(map[string]interface{})
+	if !ok {
+		return
+	}
+	uid, _ := userMap["uid"].(string)
+	if uid == "" {
+		// 无 uid 的元素无法匹配群成员，写入安全默认值避免前端读到 undefined。
+		userMap["is_external"] = 0
+		if _, exists := userMap["source_space_name"]; !exists {
+			userMap["source_space_name"] = ""
+		}
+		return
+	}
+	marker, ok := markers[uid]
+	if !ok {
+		// 出现在 mergeforward 但已不在当前群的用户：标记为非外部，空 source_space_name。
+		userMap["is_external"] = 0
+		userMap["source_space_name"] = ""
+		return
+	}
+	userMap["is_external"] = marker.IsExternal
+	userMap["source_space_name"] = marker.SourceSpaceName
+}
+
+// enrichExternalMarkers 为群聊 /message/channel/sync 返回的每条消息注入外部来源标识。
+//  1. 顶层 from_is_external / from_source_space_name（发送者视角）
+//  2. mergeforward (content type 11) payload.users 每个 element 的 is_external / source_space_name
+//
+// 只做 O(N) 遍历 + O(1) 查找，整体至多一条 SQL，避免 N+1 JOIN。详见 Mininglamp-OSS/octo-server#1188。
+func (m *Message) enrichExternalMarkers(groupNo string, messages []*MsgSyncResp) {
+	if groupNo == "" || len(messages) == 0 {
+		return
+	}
+	markers, err := m.groupService.GetMemberExternalMarkers(groupNo)
+	if err != nil {
+		m.Error("查询群成员外部来源标识失败", zap.Error(err), zap.String("group_no", groupNo))
+		return
+	}
+	applyExternalMarkers(messages, markers)
+}
+
+// applyExternalMarkers 把批量查询好的 uid -> MemberExternalMarker 应用到消息数组上。
+// 纯函数，不做 IO，便于单测。内部成员（marker.IsExternal == 0）不写 source_space_name，
+// 避免无意义字段污染 payload。非群成员的 FromUID / users 元素一律写入安全默认值 0 / ""。
+func applyExternalMarkers(messages []*MsgSyncResp, markers map[string]group.MemberExternalMarker) {
+	if len(messages) == 0 {
+		return
+	}
+	for _, msg := range messages {
+		if msg == nil {
+			continue
+		}
+		if marker, ok := markers[msg.FromUID]; ok {
+			msg.FromIsExternal = marker.IsExternal
+			if marker.IsExternal == 1 {
+				msg.FromSourceSpaceName = marker.SourceSpaceName
+			}
+		}
+		if msg.Payload == nil {
+			continue
+		}
+		if payloadMsgType(msg.Payload) != common.MultipleForward.Int() {
+			continue
+		}
+		usersList, ok := msg.Payload["users"].([]interface{})
+		if !ok || len(usersList) == 0 {
+			continue
+		}
+		for _, u := range usersList {
+			applyExternalMarkerToUserItem(u, markers)
 		}
 	}
 }

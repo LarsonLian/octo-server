@@ -49,6 +49,9 @@ type IService interface {
 	// -------------------- 群成员 --------------------
 	// 获取指定群的群成员列表
 	GetMembers(groupNo string) ([]*MemberResp, error)
+	// GetMemberExternalMarkers 批量获取指定群所有非删除成员的外部来源标识。
+	// 返回 uid -> MemberExternalMarker 的映射，供消息同步等热路径 O(1) 查找，避免 N+1 JOIN。
+	GetMemberExternalMarkers(groupNo string) (map[string]MemberExternalMarker, error)
 	// 获取指定群的指定成员信息
 	GetMember(groupNo, uid string) (*MemberResp, error)
 	// 获取黑名单成员uid集合
@@ -335,6 +338,37 @@ func (s *Service) GetMembers(groupNo string) ([]*MemberResp, error) {
 		}
 	}
 	return memberResps, nil
+}
+
+// MemberExternalMarker 描述群成员的外部来源标识，用于消息同步等热路径。
+type MemberExternalMarker struct {
+	IsExternal      int    // 1 = 外部成员
+	SourceSpaceName string // 来源 Space 名称；非外部成员或无来源时为空
+}
+
+// GetMemberExternalMarkers 返回群内所有未删除成员的外部来源标识映射 uid -> MemberExternalMarker。
+// 实现上用一条 LEFT JOIN 语句同时取出 is_external / source_space_id / space.name，
+// 调用方在遍历消息时即可 O(1) lookup，避免每条消息再去 JOIN group_member。
+// groupNo 为空直接返回空 map，方便调用方统一处理 DM 场景。
+func (s *Service) GetMemberExternalMarkers(groupNo string) (map[string]MemberExternalMarker, error) {
+	result := make(map[string]MemberExternalMarker)
+	if strings.TrimSpace(groupNo) == "" {
+		return result, nil
+	}
+	rows, err := s.db.queryMemberExternalMarkers(groupNo)
+	if err != nil {
+		return result, err
+	}
+	for _, r := range rows {
+		marker := MemberExternalMarker{
+			IsExternal: r.IsExternal,
+		}
+		if r.IsExternal == 1 {
+			marker.SourceSpaceName = r.SourceSpaceName
+		}
+		result[r.UID] = marker
+	}
+	return result, nil
 }
 func (s *Service) GetMember(groupNo, uid string) (*MemberResp, error) {
 	memberDetail, err := s.db.queryMemberWithGroupNoAndUID(groupNo, uid)

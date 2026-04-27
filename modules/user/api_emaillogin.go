@@ -242,7 +242,7 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 		c.ResponseError(errors.New("该邮箱未注册"))
 		return
 	}
-	if userInfo.IsDestroy == 1 || userInfo.Status == 0 {
+	if userInfo.IsDestroy == IsDestroyDone || userInfo.Status == 0 {
 		// 密码路径同样泄露账号状态，统一为通用错误 + 计入失败计数
 		if req.Password != "" {
 			u.loginGuard.RecordFailureLogged(req.Email)

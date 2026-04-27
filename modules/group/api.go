@@ -1075,14 +1075,14 @@ func (g *Group) addMembersTx(members []string, groupNo string, operator, operato
 	newMembers := make([]string, 0)
 	unableAddMemberVos := make([]*config.UserBaseVo, 0)
 	if len(userList) > 0 {
-		for _, user := range userList {
-			if user.IsDestroy == 1 {
+		for _, u := range userList {
+			if u.IsDestroy == user.IsDestroyDone {
 				unableAddMemberVos = append(unableAddMemberVos, &config.UserBaseVo{
-					UID:  user.UID,
-					Name: user.Name,
+					UID:  u.UID,
+					Name: u.Name,
 				})
 			} else {
-				newMembers = append(newMembers, user.UID)
+				newMembers = append(newMembers, u.UID)
 			}
 		}
 	}
@@ -2027,7 +2027,7 @@ func (g *Group) transferGrouper(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询转让用户失败！"))
 		return
 	}
-	if toUser == nil || toUser.IsDestroy == 1 {
+	if toUser == nil || toUser.IsDestroy == user.IsDestroyDone {
 		c.ResponseError(errors.New("转让用户不存在或已注销！"))
 		return
 	}

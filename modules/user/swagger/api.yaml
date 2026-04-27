@@ -1825,6 +1825,113 @@ paths:
       security:
         - token: []
 
+  /user/destroy/apply:
+    post:
+      tags:
+        - "user"
+      summary: "申请注销账号（进入冷静期）"
+      description: "登录态调用，二次输入登录密码确认后进入冷静期。冷静期内可正常登录，到期前可调 cancel 撤销；到期后由后台定时任务执行最终注销。冷静期天数读取 app_config.destroy_cooling_off_days，默认 7。"
+      operationId: "destroyApply"
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            required:
+              - password
+            properties:
+              password:
+                type: string
+                description: "登录密码（二次确认）"
+      responses:
+        200:
+          description: "申请成功"
+          schema:
+            type: object
+            properties:
+              destroy_status:
+                type: integer
+                description: "注销状态：1=注销申请中"
+              apply_at:
+                type: integer
+                format: int64
+                description: "申请时间（Unix 秒）"
+              expire_at:
+                type: integer
+                format: int64
+                description: "到期执行时间（Unix 秒）"
+              cooling_off_days:
+                type: integer
+                description: "本次申请使用的冷静期天数"
+        400:
+          description: "密码错误 / 已在冷静期 / 已注销 / 状态冲突 / 限频"
+          schema:
+            $ref: "#/definitions/response"
+      security:
+        - token: []
+  /user/destroy/cancel:
+    post:
+      tags:
+        - "user"
+      summary: "撤销注销申请"
+      description: "登录态调用，撤销冷静期内的注销申请，账号恢复正常状态。"
+      operationId: "destroyCancel"
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      responses:
+        200:
+          description: "撤销成功"
+          schema:
+            $ref: "#/definitions/response"
+        400:
+          description: "账号未在注销中 / 状态冲突"
+          schema:
+            $ref: "#/definitions/response"
+      security:
+        - token: []
+  /user/destroy/status:
+    get:
+      tags:
+        - "user"
+      summary: "查询注销状态"
+      description: "返回当前账号注销状态。冷静期内附带 apply_at / expire_at / remaining_days。"
+      operationId: "destroyStatus"
+      produces:
+        - "application/json"
+      responses:
+        200:
+          description: "返回注销状态"
+          schema:
+            type: object
+            properties:
+              destroy_status:
+                type: integer
+                description: "0=正常 1=注销申请中（冷静期） 2=已注销"
+              apply_at:
+                type: integer
+                format: int64
+                description: "申请时间（Unix 秒），仅冷静期下发"
+              expire_at:
+                type: integer
+                format: int64
+                description: "到期执行时间（Unix 秒），仅冷静期下发"
+              remaining_days:
+                type: integer
+                description: "距到期剩余天数（向上取整），仅冷静期下发"
+        400:
+          description: "错误"
+          schema:
+            $ref: "#/definitions/response"
+      security:
+        - token: []
+
   /users/{uid}:
     get:
       tags:
@@ -2310,7 +2417,7 @@ definitions:
         description: "用户状态 0.封禁 1.正常 2.黑名单"
       is_destroy:
         type: integer
-        description: "是否已注销 1.是"
+        description: "注销状态 0.正常 1.注销申请中 2.已注销"
       wx_openid:
         type: string
         description: "微信授权登录返回"
@@ -2510,7 +2617,7 @@ definitions:
         description: "是否为机器人 1.是"
       is_destroy:
         type: integer
-        description: "是否已注销 1.是"
+        description: "注销状态 0.正常 1.注销申请中 2.已注销"
       flame:
         type: integer
         description: "是否开启阅后即焚 1.是"

@@ -946,7 +946,7 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 	realMemberUIDs := make([]string, 0, len(memberUsers))
 	memberVos := make([]*config.UserBaseVo, 0, len(memberUsers))
 	for _, memberUser := range memberUsers {
-		if memberUser.IsDestroy == 1 {
+		if memberUser.IsDestroy == user.IsDestroyDone {
 			continue
 		}
 		// Bot UID 单独处理（下面添加）
@@ -1203,7 +1203,7 @@ func (s *Service) AddGroupMembers(req *AddGroupMembersServiceReq) (*AddGroupMemb
 	var addedVos []*config.UserBaseVo
 	hasNewExternal := false
 	for _, memberUser := range memberUsers {
-		if memberUser.IsDestroy == 1 {
+		if memberUser.IsDestroy == user.IsDestroyDone {
 			continue
 		}
 		if existingSet[memberUser.UID] || blacklistSet[memberUser.UID] {

@@ -105,6 +105,12 @@ func (u *User) usernameLogin(c *wkhttp.Context) {
 		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
+	// 已注销账号拒绝登录；冷静期账号允许登录（响应中附带注销状态提示）
+	if userInfo.IsDestroy == IsDestroyDone || userInfo.Status == 0 {
+		u.loginGuard.RecordFailureLogged(req.Username)
+		c.ResponseError(errors.New("用户名或密码错误"))
+		return
+	}
 
 	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 	if !matched {
@@ -340,7 +346,7 @@ func (u *User) uploadWeb3PublicKey(c *wkhttp.Context) {
 		c.ResponseError(err)
 		return
 	}
-	if userInfo == nil || userInfo.Status == 0 || userInfo.IsDestroy == 1 {
+	if userInfo == nil || userInfo.Status == 0 || userInfo.IsDestroy == IsDestroyDone {
 		c.ResponseError(errors.New("该用户不存在或被封禁"))
 		return
 	}
@@ -451,7 +457,7 @@ func (u *User) getVerifyText(c *wkhttp.Context) {
 		c.ResponseError(err)
 		return
 	}
-	if user == nil || user.IsDestroy == 1 || user.Status == 0 {
+	if user == nil || user.IsDestroy == IsDestroyDone || user.Status == 0 {
 		c.ResponseError(errors.New("该用户不存在或被禁用"))
 		return
 	}

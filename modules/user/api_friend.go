@@ -306,7 +306,7 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询用户信息错误"))
 		return
 	}
-	if loginUserInfo == nil || loginUserInfo.IsDestroy == 1 || loginUserInfo.Status != 1 {
+	if loginUserInfo == nil || loginUserInfo.IsDestroy == IsDestroyDone || loginUserInfo.Status != 1 {
 		f.Error("登录用户不存在！", zap.String("uid", fromUID))
 		c.ResponseError(errors.New("登录用户不存在！"))
 		return
@@ -335,7 +335,7 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询用户信息失败！"))
 		return
 	}
-	if toUser == nil || toUser.IsDestroy == 1 {
+	if toUser == nil || toUser.IsDestroy == IsDestroyDone {
 		f.Error("接收好友请求的用户不存在！", zap.String("to_uid", req.ToUID))
 		c.ResponseError(errors.New("接收好友请求的用户不存在！"))
 		return
@@ -688,7 +688,7 @@ func (f *Friend) friendSure(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询用户信息失败！"))
 		return
 	}
-	if loginUser == nil || loginUser.IsDestroy == 1 {
+	if loginUser == nil || loginUser.IsDestroy == IsDestroyDone {
 		f.Error("当前用户不存在或已注销！", zap.String("uid", loginUID))
 		c.ResponseError(errors.New("当前用户不存在或已注销！"))
 		return
@@ -725,7 +725,7 @@ func (f *Friend) friendSure(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询申请人用户信息失败！"))
 		return
 	}
-	if applyUser == nil || applyUser.IsDestroy == 1 {
+	if applyUser == nil || applyUser.IsDestroy == IsDestroyDone {
 		f.Error("申请人不存在或已注销！", zap.String("uid", applyUID))
 		c.ResponseError(errors.New("申请人不存在"))
 		return

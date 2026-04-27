@@ -1089,7 +1089,7 @@ type UserDetailResp struct {
 	BotAgentPlatform    string            `json:"bot_agent_platform,omitempty"` // Agent 平台名称
 	BotAgentVersion     string            `json:"bot_agent_version,omitempty"`  // Agent 平台版本号
 	BotPluginVersion    string            `json:"bot_plugin_version,omitempty"` // DMWork 插件版本号
-	IsDestroy           int               `json:"is_destroy"`             // 是否注销0.否1.是
+	IsDestroy           int               `json:"is_destroy"`             // 注销状态 0.正常 1.注销申请中（冷静期，仍可正常通信） 2.已注销
 	Flame               int               `json:"flame"`                  // 是否开启阅后即焚
 	FlameSecond         int               `json:"flame_second"`           // 阅后即焚秒数
 	JoinGroupInviteUID  string            `json:"join_group_invite_uid"`  // 加入群聊邀请人UID

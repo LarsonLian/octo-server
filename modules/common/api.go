@@ -397,7 +397,16 @@ func (cn *Common) appConfig(c *wkhttp.Context) {
 		RegisterUserMustCompleteInfoOn: appConfigM.RegisterUserMustCompleteInfoOn,
 		CanModifyApiUrl:                appConfigM.CanModifyApiUrl,
 		ThreadOn:                       cn.threadOn,
+		DestroyCoolingOffDays:          destroyCoolingOffDaysOrDefault(appConfigM.DestroyCoolingOffDays),
 	})
+}
+
+// 兼容历史 app_config 行（NOT NULL DEFAULT 7 在迁移前的行为）：值 ≤ 0 时回退为 7。
+func destroyCoolingOffDaysOrDefault(v int) int {
+	if v > 0 {
+		return v
+	}
+	return 7
 }
 
 func (cn *Common) countriesList(c *wkhttp.Context) {
@@ -580,6 +589,7 @@ type appConfigResp struct {
 	RegisterUserMustCompleteInfoOn int    `json:"register_user_must_complete_info_on"` // 注册用户必须填写完整信息
 	CanModifyApiUrl                int    `json:"can_modify_api_url"`                  // 允许修改api地址
 	ThreadOn                       int    `json:"thread_on"`                           // 子区功能开关
+	DestroyCoolingOffDays          int    `json:"destroy_cooling_off_days"`            // 注销冷静期天数（默认 7）
 }
 
 type appVersionReq struct {

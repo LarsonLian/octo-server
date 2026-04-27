@@ -187,8 +187,11 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		user.PUT("/lock_after_minute", u.lockScreenAfterMinuteSet) // 设置多久后锁屏
 		user.DELETE("/lockscreenpwd", u.closeLockScreenPwd)        //关闭锁屏密码
 		user.GET("/customerservices", u.customerservices)          //客服列表
-		user.DELETE("/destroy/:code", u.destroyAccount)            // 注销用户
+		user.DELETE("/destroy/:code", u.destroyAccount)            // 注销用户（即时，已废弃但保留兼容）
 		user.POST("/sms/destroy", u.sendDestroyCode)               //获取注销账号短信验证码
+		user.POST("/destroy/apply", u.destroyApply)                // 申请注销（进入冷静期）
+		user.POST("/destroy/cancel", u.destroyCancel)              // 撤销注销申请
+		user.GET("/destroy/status", u.destroyStatus)               // 查询注销状态
 		user.PUT("/updatepassword", u.updatePwd)                   // 修改登录密码
 		user.POST("/web3publickey", u.uploadWeb3PublicKey)         // 上传web3公钥
 		user.POST("/quit", u.quit)                                 // 退出登录
@@ -259,6 +262,7 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	u.ctx.AddOnlineStatusListener(u.onlineService.listenOnlineStatus) // 监听在线状态
 	u.ctx.AddOnlineStatusListener(u.handleOnlineStatus)               // 需要放在listenOnlineStatus之后
 	u.ctx.Schedule(time.Minute*5, u.onlineStatusCheck)                // 在线状态定时检查
+	u.ctx.Schedule(time.Minute*5, u.checkDestroyExpired)              // 注销冷静期到期扫描
 
 }
 
@@ -1005,7 +1009,7 @@ func (u *User) wxLogin(c *wkhttp.Context) {
 		return
 	}
 	if userInfo != nil {
-		if userInfo.IsDestroy == 1 {
+		if userInfo.IsDestroy == IsDestroyDone {
 			c.ResponseError(errors.New("用户不存在"))
 			return
 		}
@@ -1080,7 +1084,8 @@ func (u *User) login(c *wkhttp.Context) {
 		c.ResponseError(err)
 		return
 	}
-	if userInfo == nil || userInfo.IsDestroy == 1 {
+	// 已注销 / 被禁用账号统一拒绝；与 emailLogin / usernameLogin 行为对齐
+	if userInfo == nil || userInfo.IsDestroy == IsDestroyDone || userInfo.Status == 0 {
 		u.loginGuard.RecordFailureLogged(req.Username)
 		// 统一错误消息，避免攻击者通过响应差异枚举有效账号
 		c.ResponseError(errors.New("用户名或密码错误"))
@@ -1678,8 +1683,13 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 
 	userModel, err := u.db.QueryByUID(scaner)
 	if err != nil {
-		u.Error("用户不存在！", zap.String("uid", scaner), zap.Error(err))
-		c.ResponseError(errors.New("用户不存在！"))
+		u.Error("查询用户信息失败", zap.String("uid", scaner), zap.Error(err))
+		c.ResponseError(errors.New("查询用户信息失败"))
+		return
+	}
+	// 已注销账号拒绝授权登录；冷静期账号允许（与其他登录路径一致）
+	if userModel == nil || userModel.IsDestroy == IsDestroyDone {
+		c.ResponseError(errors.New("用户不存在"))
 		return
 	}
 	// 获取缓存设备
@@ -2345,6 +2355,11 @@ func (u *User) loginCheckPhone(c *wkhttp.Context) {
 		c.ResponseError(errors.New("该用户不存在"))
 		return
 	}
+	// 已注销账号拒绝设备验证登录；冷静期账号允许
+	if userInfo.IsDestroy == IsDestroyDone {
+		c.ResponseError(errors.New("该用户不存在"))
+		return
+	}
 	err = u.smsServie.Verify(spanCtx, userInfo.Zone, userInfo.Phone, req.Code, commonapi.CodeTypeCheckMobile)
 	if err != nil {
 		u.Error("验证短信失败", zap.Error(err))
@@ -2437,8 +2452,16 @@ func (u *User) sendDestroyCode(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询登录用户信息错误"))
 		return
 	}
-	if userInfo == nil || userInfo.IsDestroy == 1 {
+	if userInfo == nil {
 		c.ResponseError(errors.New("登录用户不存在"))
+		return
+	}
+	switch userInfo.IsDestroy {
+	case IsDestroyApplying:
+		c.ResponseError(errors.New("账号已在注销冷静期中，请使用新版客户端撤销或查询状态"))
+		return
+	case IsDestroyDone:
+		c.ResponseError(errors.New("账号已注销"))
 		return
 	}
 	err = u.smsServie.SendVerifyCode(c.Context, userInfo.Zone, userInfo.Phone, commonapi.CodeTypeDestroyAccount)
@@ -2463,8 +2486,16 @@ func (u *User) destroyAccount(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询登录用户信息错误"))
 		return
 	}
-	if userInfo == nil || userInfo.IsDestroy == 1 {
+	if userInfo == nil {
 		c.ResponseError(errors.New("登录用户不存在"))
+		return
+	}
+	switch userInfo.IsDestroy {
+	case IsDestroyApplying:
+		c.ResponseError(errors.New("账号已在注销冷静期中，请使用新版客户端撤销或查询状态"))
+		return
+	case IsDestroyDone:
+		c.ResponseError(errors.New("账号已注销"))
 		return
 	}
 	//测试模式（仅非 release 生效）
@@ -2483,10 +2514,11 @@ func (u *User) destroyAccount(c *wkhttp.Context) {
 		}
 	}
 
-	t := time.Now()
-	time := fmt.Sprintf("%d%d%d%d%d", t.Year(), t.Month(), t.Day(), t.Minute(), t.Second())
-	phone := fmt.Sprintf("%s@%s@delete", userInfo.Phone, time)
-	username := fmt.Sprintf("%s%s", userInfo.Zone, phone)
+	// 毫秒时间戳：13 位足够保证唯一（UnixNano 19 位会撑爆 varchar(40)）。
+	// username 通过 anonymizeUsername 兜底防溢出（海外长手机号时回退 hash 形式）。
+	stamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	phone := fmt.Sprintf("%s@%s@delete", userInfo.Phone, stamp)
+	username := anonymizeUsername(loginUID, userInfo.Zone, phone, stamp)
 	err = u.db.destroyAccount(loginUID, username, phone)
 	if err != nil {
 		u.Error("注销账号错误", zap.Error(err))
@@ -3159,6 +3191,12 @@ type loginUserDetailResp struct {
 	RSAPublicKey    string  `json:"rsa_public_key"` // 应用公钥做一些消息验证 base64编码
 	ShortStatus     int     `json:"short_status"`
 	MsgExpireSecond int64   `json:"msg_expire_second"` // 消息过期时长
+	// 注销状态提示：仅当账号处于冷静期（is_destroy=1）时下发
+	// DestroyStatus: 0=正常 1=注销申请中
+	// DestroyRemainingDays: 距到期还剩天数（向上取整，最小 0）
+	DestroyStatus        int   `json:"destroy_status,omitempty"`
+	DestroyRemainingDays int   `json:"destroy_remaining_days,omitempty"`
+	DestroyExpireAt      int64 `json:"destroy_expire_at,omitempty"` // Unix 秒
 }
 
 type setting struct {
@@ -3181,7 +3219,18 @@ type blacklistResp struct {
 
 func newLoginUserDetailResp(m *Model, token string, ctx *config.Context) *loginUserDetailResp {
 
+	var destroyStatus, destroyRemainingDays int
+	var destroyExpireAt int64
+	if m.IsDestroy == IsDestroyApplying && m.DestroyExpireAt.Valid {
+		destroyStatus = IsDestroyApplying
+		destroyExpireAt = m.DestroyExpireAt.Time.Unix()
+		destroyRemainingDays = remainingDays(m.DestroyExpireAt.Time)
+	}
+
 	return &loginUserDetailResp{
+		DestroyStatus:        destroyStatus,
+		DestroyRemainingDays: destroyRemainingDays,
+		DestroyExpireAt:      destroyExpireAt,
 		UID:             m.UID,
 		AppID:           m.AppID,
 		Name:            m.Name,

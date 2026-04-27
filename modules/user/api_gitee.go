@@ -140,7 +140,7 @@ func (u *User) giteeOAuth(c *wkhttp.Context) {
 
 	var loginResp *loginUserDetailResp
 	if userInfoM != nil { // 存在就登录
-		if userInfoM.IsDestroy == 1 {
+		if userInfoM.IsDestroy == IsDestroyDone {
 			c.ResponseError(errors.New("用户不存在"))
 			return
 		}

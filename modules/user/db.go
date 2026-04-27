@@ -2,13 +2,22 @@ package user
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/db"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/gocraft/dbr/v2"
+)
+
+// 注销状态：0=正常，1=冷静期（可撤销），2=已注销（最终）
+const (
+	IsDestroyNo       = 0
+	IsDestroyApplying = 1
+	IsDestroyDone     = 2
 )
 
 // DB 用户db操作
@@ -253,14 +262,103 @@ func (d *DB) updatePassword(password string, uid string) error {
 	return err
 }
 
-// 注销账户
+// destroyAccountFromState 注销账户：仅当当前 is_destroy=expectedState 时执行，
+// 写入 is_destroy=2 + 匿名化字段并清空冷静期时间戳。否则返回 ErrDestroyStateConflict。
+//
+// 两个调用入口要求不同的前置状态：
+//   - 即时注销（legacy DELETE /v1/destroy/:code）：要求 expectedState=0
+//   - 冷静期到期 finalize：要求 expectedState=1
+//
+// 守卫的核心目的：避免「finalize 选中过期记录 → 用户在窗口内 cancel → finalize 仍把 is_destroy 覆写为 2」吞掉撤销。
+func (d *DB) destroyAccountFromState(uid, username, phone string, expectedState int) error {
+	res, err := d.session.Update("user").SetMap(map[string]interface{}{
+		"phone":             phone,
+		"username":          username,
+		"is_destroy":        2,
+		"destroy_apply_at":  nil,
+		"destroy_expire_at": nil,
+	}).Where("uid=? AND is_destroy=?", uid, expectedState).Exec()
+	if err != nil {
+		return fmt.Errorf("destroy account: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("destroy account: rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrDestroyStateConflict
+	}
+	return nil
+}
+
+// 即时注销（legacy）：要求当前 is_destroy=0。
 func (d *DB) destroyAccount(uid, username, phone string) error {
-	_, err := d.session.Update("user").SetMap(map[string]interface{}{
-		"phone":      phone,
-		"username":   username,
-		"is_destroy": 1,
-	}).Where("uid=?", uid).Exec()
-	return err
+	return d.destroyAccountFromState(uid, username, phone, IsDestroyNo)
+}
+
+// 冷静期到期 finalize：要求当前 is_destroy=1，防止与并发 cancel 竞争。
+func (d *DB) finalizeDestroyAccount(uid, username, phone string) error {
+	return d.destroyAccountFromState(uid, username, phone, IsDestroyApplying)
+}
+
+// ErrDestroyStateConflict 表示目标 uid 不在期望的注销状态：通常意味着并发请求已抢先改写。
+// 调用方需以「业务冲突」而非「服务端错误」对外呈现。
+var ErrDestroyStateConflict = errors.New("destroy state conflict")
+
+// 申请注销：进入冷静期 is_destroy=1。
+// WHERE 条件 + RowsAffected 检查保证并发请求中只有一个会成功落库；其余返回 ErrDestroyStateConflict。
+func (d *DB) applyDestroy(uid string, applyAt, expireAt time.Time) error {
+	res, err := d.session.Update("user").SetMap(map[string]interface{}{
+		"is_destroy":        1,
+		"destroy_apply_at":  applyAt,
+		"destroy_expire_at": expireAt,
+	}).Where("uid=? AND is_destroy=0", uid).Exec()
+	if err != nil {
+		return fmt.Errorf("apply destroy: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("apply destroy: rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrDestroyStateConflict
+	}
+	return nil
+}
+
+// 撤销注销申请：恢复 is_destroy=0，清空申请/到期时间。
+// RowsAffected 检查防止误把「未在冷静期」当成「已撤销」。
+func (d *DB) cancelDestroy(uid string) error {
+	res, err := d.session.Update("user").SetMap(map[string]interface{}{
+		"is_destroy":        0,
+		"destroy_apply_at":  nil,
+		"destroy_expire_at": nil,
+	}).Where("uid=? AND is_destroy=1", uid).Exec()
+	if err != nil {
+		return fmt.Errorf("cancel destroy: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("cancel destroy: rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrDestroyStateConflict
+	}
+	return nil
+}
+
+// 扫描所有冷静期已到期、待执行最终注销的用户。
+// ORDER BY destroy_expire_at ASC：保证最早过期的优先处理；批次满 100 时
+// 下一轮 5 分钟后能继续推进，避免新过期记录把老记录挤出每轮窗口。
+func (d *DB) queryDestroyExpired(now time.Time, limit uint64) ([]*Model, error) {
+	var models []*Model
+	_, err := d.session.Select("*").
+		From("user").
+		Where("is_destroy=1 AND destroy_expire_at IS NOT NULL AND destroy_expire_at <= ?", now).
+		OrderAsc("destroy_expire_at").
+		Limit(limit).
+		Load(&models)
+	return models, err
 }
 
 func (d *DB) queryWithWXOpenIDAndWxUnionidCtx(ctx context.Context, wxOpenid, wxUnionid string) (*Model, error) {
@@ -380,7 +478,9 @@ type Model struct {
 	Role              string // 角色 admin/superAdmin
 	Robot             int    // 机器人0.否1.是
 	MuteOfApp         int    // app是否禁音（当pc登录的时候app可以设置禁音，当pc登录后有效）
-	IsDestroy         int    // 是否已注销0.否1.是
+	IsDestroy         int           // 注销状态 0.正常 1.注销申请中（冷静期） 2.已注销
+	DestroyApplyAt    dbr.NullTime  // 注销申请时间
+	DestroyExpireAt   dbr.NullTime  // 注销到期执行时间
 	WXOpenid          string // 微信openid
 	WXUnionid         string // 微信unionid
 	GiteeUID          string // gitee uid

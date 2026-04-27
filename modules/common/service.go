@@ -66,6 +66,7 @@ func (s *service) GetAppConfig() (*AppConfigResp, error) {
 		InviteSystemAccountJoinGroupOn: appConfigM.InviteSystemAccountJoinGroupOn,
 		RegisterUserMustCompleteInfoOn: appConfigM.RegisterUserMustCompleteInfoOn,
 		ChannelPinnedMessageMaxCount:   appConfigM.ChannelPinnedMessageMaxCount,
+		DestroyCoolingOffDays:          appConfigM.DestroyCoolingOffDays,
 	}, nil
 }
 
@@ -135,4 +136,5 @@ type AppConfigResp struct {
 	InviteSystemAccountJoinGroupOn int    // 是否允许邀请系统账号进入群聊
 	RegisterUserMustCompleteInfoOn int    // 是否要求注册用户必须填写完整信息
 	ChannelPinnedMessageMaxCount   int    // 频道置顶消息最大数量
+	DestroyCoolingOffDays          int    // 注销冷静期天数（默认 7）
 }

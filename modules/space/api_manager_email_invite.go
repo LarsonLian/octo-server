@@ -94,7 +94,9 @@ func (m *Manager) createSpaceOwnerEmailInvite(c *wkhttp.Context) {
 	model.Id = id
 
 	// 异步发邮件：邮件失败不应让创建接口失败，否则前端拿不到 invite ID 也无从重发。
-	go m.space.dispatchInviteEmail(model, rawToken)
+	// 浅拷贝再传给 goroutine —— 见 api_email_invite.go 同名注释。
+	invCopy := *model
+	go m.space.dispatchInviteEmail(&invCopy, rawToken)
 
 	c.Response(toEmailInviteResp(model))
 }

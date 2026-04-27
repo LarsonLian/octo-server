@@ -57,7 +57,7 @@ func (s *Space) previewEmailInvite(c *wkhttp.Context) {
 
 	resp := &emailInvitePreviewResp{
 		InviteType: inv.InviteType,
-		Email:      inv.Email,
+		Email:      maskInviteEmail(inv.Email),
 		Status:     liveStatus(inv),
 		Role:       inv.Role,
 	}
@@ -95,16 +95,40 @@ func (s *Space) previewEmailInvite(c *wkhttp.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// acceptEmailInviteReq 接受邀请请求体。typed email 由前端要求用户重新输入，
+// 用作"用户明确意愿确认"和"防御预览阶段邮箱被掩码后猜测"双重校验。
+type acceptEmailInviteReq struct {
+	Email string `json:"email"`
+}
+
 // acceptEmailInvite 已登录用户接受邮件邀请。
 //   - owner：在同一事务内消费 token + createSpaceCoreTx，提交后跑 PostCommit 副作用。
 //   - member：先消费 token，再 executeJoinSpace；失败则回滚 token 状态到 pending。
 //
 // 不受 DM_SPACE_DISABLE_USER_CREATE 全局开关影响（管理员邀请视为显式授权）。
+//
+// 邮箱校验三层（defense in depth）：
+//  1. inv.Email 非空（拒绝历史脏数据）
+//  2. 请求体 email == inv.email（用户主动输入，确认意愿；预览仅返回掩码邮箱，
+//     无法照抄）
+//  3. 登录账号 user.email == inv.email（攻击者就算从某处捡到 token，也得控制
+//     正确邮箱对应的账号才能 accept）
 func (s *Space) acceptEmailInvite(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	rawToken := c.Param("token")
 	if rawToken == "" {
 		c.ResponseError(errors.New("token 不能为空"))
+		return
+	}
+
+	var req acceptEmailInviteReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求参数错误"))
+		return
+	}
+	typedEmail := strings.ToLower(strings.TrimSpace(req.Email))
+	if typedEmail == "" {
+		c.ResponseError(errors.New("请输入邮箱以确认接受"))
 		return
 	}
 
@@ -130,6 +154,10 @@ func (s *Space) acceptEmailInvite(c *wkhttp.Context) {
 	if inv.Email == "" {
 		// 历史脏数据兜底：邀请记录无邮箱时直接拒绝，避免空字符串自匹配。
 		c.ResponseError(errors.New("邀请缺少邮箱信息，无法接受"))
+		return
+	}
+	if !strings.EqualFold(typedEmail, inv.Email) {
+		c.ResponseError(errors.New("输入的邮箱与邀请目标不一致"))
 		return
 	}
 	loginEmail, err := s.db.queryUserEmail(loginUID)

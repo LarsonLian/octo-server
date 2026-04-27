@@ -75,7 +75,7 @@ func TestPreviewEmailInvite_Owner(t *testing.T) {
 	var resp emailInvitePreviewResp
 	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, EmailInviteTypeOwner, resp.InviteType)
-	assert.Equal(t, "u@x.com", resp.Email)
+	assert.Equal(t, "u***@x***.com", resp.Email, "preview 必须返回掩码邮箱")
 	assert.Equal(t, "新空间", resp.PlannedName)
 	assert.Equal(t, 50, resp.PlannedMaxUsers)
 	assert.Equal(t, "管理员A", resp.InviterName)
@@ -154,11 +154,13 @@ func TestPreviewEmailInvite_ExpiredShowsExpired(t *testing.T) {
 
 // --- accept ---
 
-// acceptInviteHelper 封装 accept 请求构造。
-func acceptInviteHelper(t *testing.T, srv *server.Server, raw, authToken string) *httptest.ResponseRecorder {
+// acceptInviteHelper 封装 accept 请求构造，typedEmail 默认填登录用户邮箱以保持原有用例语义。
+func acceptInviteHelper(t *testing.T, srv *server.Server, raw, authToken, typedEmail string) *httptest.ResponseRecorder {
 	t.Helper()
+	body := map[string]interface{}{"email": typedEmail}
+	buf, _ := json.Marshal(body)
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/v1/space/email-invite/"+raw+"/accept", bytes.NewReader([]byte("{}")))
+	req, _ := http.NewRequest("POST", "/v1/space/email-invite/"+raw+"/accept", bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
 	if authToken != "" {
 		req.Header.Set("token", authToken)
@@ -183,7 +185,7 @@ func TestAcceptEmailInvite_OwnerSuccess(t *testing.T) {
 		CreatedBy:       "admin-1",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "newowner@x.com")
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	var resp struct {
@@ -232,7 +234,7 @@ func TestAcceptEmailInvite_MemberSuccess(t *testing.T) {
 		CreatedBy:  "owner-x",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "joiner@x.com")
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	got, _ := testSpaceDB.queryEmailInviteByID(id)
@@ -265,7 +267,7 @@ func TestAcceptEmailInvite_MemberDefaultRole(t *testing.T) {
 		CreatedBy:  "owner-x",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "j2@x.com")
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	mem, _ := testSpaceDB.queryMember(spaceId, testutil.UID)
@@ -286,7 +288,7 @@ func TestAcceptEmailInvite_EmailMismatch(t *testing.T) {
 		CreatedBy:   "admin-1",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "different@x.com")
 	assert.NotEqual(t, http.StatusOK, w.Code)
 	got, _ := testSpaceDB.queryEmailInviteByID(id)
 	assert.Equal(t, EmailInviteStatusPending, got.Status)
@@ -306,7 +308,7 @@ func TestAcceptEmailInvite_AlreadyConsumed(t *testing.T) {
 		CreatedBy:   "admin-1",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "x@x.com")
 	assert.NotEqual(t, http.StatusOK, w.Code)
 }
 
@@ -326,7 +328,7 @@ func TestAcceptEmailInvite_Expired(t *testing.T) {
 		CreatedBy:   "admin-1",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "x@x.com")
 	assert.NotEqual(t, http.StatusOK, w.Code)
 }
 
@@ -349,7 +351,7 @@ func TestAcceptEmailInvite_DisbandedSpaceForMember(t *testing.T) {
 		CreatedBy:  "owner-x",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "z@x.com")
 	assert.NotEqual(t, http.StatusOK, w.Code)
 	got, _ := testSpaceDB.queryEmailInviteByID(id)
 	assert.Equal(t, EmailInviteStatusPending, got.Status, "空间已解散应保留邀请为 pending")
@@ -373,7 +375,7 @@ func TestAcceptEmailInvite_AlreadyMember_KeepsConsumed(t *testing.T) {
 		CreatedBy:  testutil.UID,
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "dup@x.com")
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	got, _ := testSpaceDB.queryEmailInviteByID(id)
@@ -409,7 +411,7 @@ func TestAcceptEmailInvite_AlreadyMember_PromotesToAdmin(t *testing.T) {
 		CreatedBy:  "owner-x",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "promote@x.com")
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	mem, _ := testSpaceDB.queryMember(spaceId, testutil.UID)
@@ -434,7 +436,7 @@ func TestAcceptEmailInvite_EmptyInviteEmail_Rejected(t *testing.T) {
 		CreatedBy:   "admin-1",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, testutil.Token)
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "any@x.com")
 	assert.NotEqual(t, http.StatusOK, w.Code)
 	got, _ := testSpaceDB.queryEmailInviteByID(id)
 	assert.Equal(t, EmailInviteStatusPending, got.Status)
@@ -452,6 +454,67 @@ func TestAcceptEmailInvite_RequiresAuth(t *testing.T) {
 		CreatedBy:   "admin-1",
 	})
 
-	w := acceptInviteHelper(t, srv, raw, "")
+	w := acceptInviteHelper(t, srv, raw, "", "x@x.com")
 	assert.NotEqual(t, http.StatusOK, w.Code)
+}
+
+func TestAcceptEmailInvite_TypedEmailMissing(t *testing.T) {
+	srv, _, err := setup(t)
+	resetSpaceInviteRateLimit(t)
+	assert.NoError(t, err)
+	seedUserWithEmail(t, testutil.UID, "x@x.com", "")
+
+	raw, id := seedEmailInviteWithToken(t, &spaceEmailInviteModel{
+		InviteType:  EmailInviteTypeOwner,
+		Email:       "x@x.com",
+		PlannedName: "y",
+		Status:      EmailInviteStatusPending,
+		CreatedBy:   "admin-1",
+	})
+
+	// 空 typed email 应被拒，token 保持 pending
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "")
+	assert.NotEqual(t, http.StatusOK, w.Code)
+	got, _ := testSpaceDB.queryEmailInviteByID(id)
+	assert.Equal(t, EmailInviteStatusPending, got.Status)
+}
+
+func TestAcceptEmailInvite_TypedEmailMismatch(t *testing.T) {
+	srv, _, err := setup(t)
+	resetSpaceInviteRateLimit(t)
+	assert.NoError(t, err)
+	// 登录用户邮箱与邀请目标一致；但前端用户输入打错
+	seedUserWithEmail(t, testutil.UID, "real@x.com", "")
+
+	raw, id := seedEmailInviteWithToken(t, &spaceEmailInviteModel{
+		InviteType:  EmailInviteTypeOwner,
+		Email:       "real@x.com",
+		PlannedName: "y",
+		Status:      EmailInviteStatusPending,
+		CreatedBy:   "admin-1",
+	})
+
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "typo@x.com")
+	assert.NotEqual(t, http.StatusOK, w.Code, "typed email 不一致应短路拒绝")
+	got, _ := testSpaceDB.queryEmailInviteByID(id)
+	assert.Equal(t, EmailInviteStatusPending, got.Status, "typed mismatch 不应消费 token")
+}
+
+func TestAcceptEmailInvite_TypedEmailCaseInsensitive(t *testing.T) {
+	srv, _, err := setup(t)
+	resetSpaceInviteRateLimit(t)
+	assert.NoError(t, err)
+	seedUserWithEmail(t, testutil.UID, "case@x.com", "")
+
+	raw, _ := seedEmailInviteWithToken(t, &spaceEmailInviteModel{
+		InviteType:  EmailInviteTypeOwner,
+		Email:       "case@x.com",
+		PlannedName: "y",
+		Status:      EmailInviteStatusPending,
+		CreatedBy:   "admin-1",
+	})
+
+	// 用户大小写混写应被接受（normalize 后比较）
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "Case@X.com")
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 }

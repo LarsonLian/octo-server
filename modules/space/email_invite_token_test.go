@@ -35,6 +35,24 @@ func TestGenerateEmailInviteToken_UniquePerCall(t *testing.T) {
 	}
 }
 
+func TestMaskInviteEmail(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"jerry@example.com", "je***@e***.com"},
+		{"a@x.io", "a***@x***.io"},
+		{"ab@y.cn", "ab***@y***.cn"},
+		{"foo@a.b.example.com", "fo***@a***.com"},
+		{"", "***"},
+		{"@", "***"},
+		{"a@b", "***"},     // 域无 . 视为非法
+		{"a@", "***"},
+		{"@b.com", "***"},
+	}
+	for _, tc := range cases {
+		got := maskInviteEmail(tc.in)
+		assert.Equal(t, tc.want, got, tc.in)
+	}
+}
+
 func TestValidateInviteEmail(t *testing.T) {
 	cases := []struct {
 		in    string

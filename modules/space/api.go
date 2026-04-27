@@ -108,6 +108,7 @@ func (s *Space) Route(r *wkhttp.WKHttp) {
 	{
 		open.GET("/invite/:invite_code", invitePreviewLimit, s.getInviteInfo)
 		open.GET("/invite/:invite_code/preview", invitePreviewLimit, s.getInvitePreview)
+		open.GET("/email-invite", invitePreviewLimit, s.emailInvitePage)
 		open.GET("/email-invite/:token", invitePreviewLimit, s.previewEmailInvite)
 		open.GET("/join-approve", s.joinApprovePage)
 		open.GET("/join-approve/detail", s.joinApproveDetail)

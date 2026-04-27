@@ -3,12 +3,32 @@ package space
 import (
 	"errors"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"go.uber.org/zap"
 )
+
+// emailInvitePage 返回邀请落地页 H5（公开，注入 API_BASE_URL）。
+// JS 在浏览器里调用 previewEmailInvite / acceptEmailInvite 完成实际逻辑；
+// 鉴权 token 由 dmwork-web 写入 localStorage，与 group_invite.html 同模式。
+func (s *Space) emailInvitePage(c *wkhttp.Context) {
+	htmlBytes, err := os.ReadFile("./assets/web/space_email_invite.html")
+	if err != nil {
+		s.Error("加载邮件邀请落地页失败", zap.Error(err))
+		c.ResponseError(errors.New("页面加载失败"))
+		return
+	}
+	safeBaseURL := strconv.Quote(s.ctx.GetConfig().External.BaseURL)
+	html := strings.Replace(string(htmlBytes), `"{{API_BASE_URL}}"`, safeBaseURL, 1)
+	// BaseURL 与部署强相关；邀请落地页本身也不应被搜索引擎索引或 CDN 缓存。
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Robots-Tag", "noindex, nofollow")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+}
 
 // emailInvitePreviewResp 公开预览响应。owner 与 member 类型共用结构，按 invite_type 取不同字段：
 //   - owner：planned_* 字段非空，space_id 为空

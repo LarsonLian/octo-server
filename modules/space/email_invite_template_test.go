@@ -10,11 +10,11 @@ import (
 func TestEmailInviteAcceptURL(t *testing.T) {
 	t.Run("无尾斜杠", func(t *testing.T) {
 		got := emailInviteAcceptURL("https://h5.example.com", "abc")
-		assert.Equal(t, "https://h5.example.com/space-email-invite.html?token=abc", got)
+		assert.Equal(t, "https://h5.example.com/v1/space/email-invite?token=abc", got)
 	})
 	t.Run("有尾斜杠", func(t *testing.T) {
 		got := emailInviteAcceptURL("https://h5.example.com/", "abc")
-		assert.Equal(t, "https://h5.example.com/space-email-invite.html?token=abc", got)
+		assert.Equal(t, "https://h5.example.com/v1/space/email-invite?token=abc", got)
 	})
 	t.Run("token 走 URL 转义（防止 ?/& 截断查询串）", func(t *testing.T) {
 		got := emailInviteAcceptURL("https://h5.example.com", "a/b?c=d")

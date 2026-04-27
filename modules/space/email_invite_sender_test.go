@@ -3,6 +3,9 @@ package space
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -162,7 +165,7 @@ func TestCreateOwnerEmailInvite_TriggersEmail(t *testing.T) {
 	got := rec.waitOne(t)
 	assert.Equal(t, "owner-e2e@example.com", got.To)
 	assert.Contains(t, got.Subject, "团队 A")
-	assert.Contains(t, got.Body, "https://h5.example.com/space-email-invite.html?token=")
+	assert.Contains(t, got.Body, "https://h5.example.com/v1/space/email-invite?token=")
 }
 
 func TestCreateMemberEmailInvite_TriggersEmail(t *testing.T) {
@@ -186,6 +189,63 @@ func TestCreateMemberEmailInvite_TriggersEmail(t *testing.T) {
 	assert.Equal(t, "member-e2e@example.com", got.To)
 	assert.Contains(t, got.Body, "管理员")
 	assert.Contains(t, got.Body, "测试空间") // seedSpaceWithMemberRole 设的名字
+}
+
+// chdirRepoRoot 落地页 handler 用 ./assets/... 相对路径读文件，需要切到 repo 根。
+func chdirRepoRoot(t *testing.T) {
+	t.Helper()
+	wd, err := os.Getwd()
+	assert.NoError(t, err)
+	if err := os.Chdir("../.."); err != nil {
+		t.Fatalf("chdir to repo root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+}
+
+func TestEmailInvitePage_RendersHTMLWithAPIBase(t *testing.T) {
+	srv, sp, err := setup(t)
+	assert.NoError(t, err)
+	chdirRepoRoot(t)
+
+	cfg := sp.ctx.GetConfig()
+	prev := cfg.External.BaseURL
+	cfg.External.BaseURL = "https://api.test.example.com"
+	t.Cleanup(func() { cfg.External.BaseURL = prev })
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/space/email-invite?token=anything", nil)
+	srv.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `var API_BASE = "https://api.test.example.com"`,
+		"API_BASE_URL 占位符应被替换为带引号的 BaseURL 字面量")
+	assert.NotContains(t, body, "{{API_BASE_URL}}", "占位符应已被替换")
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
+	// rate-limit / server error / network error 三个状态块必须存在（参见 group_invite.html YUJ-42）。
+	assert.Contains(t, body, `id="state-rate-limited"`)
+	assert.Contains(t, body, `id="state-server-error"`)
+	assert.Contains(t, body, `id="state-network-error"`)
+}
+
+func TestEmailInvitePage_PathDoesNotShadowPreview(t *testing.T) {
+	// 防御回归：/v1/space/email-invite 与 /v1/space/email-invite/:token 必须分别匹配
+	srv, _, err := setup(t)
+	assert.NoError(t, err)
+	chdirRepoRoot(t)
+
+	wPage := httptest.NewRecorder()
+	reqPage, _ := http.NewRequest("GET", "/v1/space/email-invite", nil)
+	srv.GetRoute().ServeHTTP(wPage, reqPage)
+	assert.Equal(t, http.StatusOK, wPage.Code)
+	assert.Contains(t, wPage.Header().Get("Content-Type"), "text/html")
+
+	wPreview := httptest.NewRecorder()
+	reqPreview, _ := http.NewRequest("GET", "/v1/space/email-invite/non-existent-token-xxx", nil)
+	srv.GetRoute().ServeHTTP(wPreview, reqPreview)
+	assert.Equal(t, http.StatusOK, wPreview.Code)
+	assert.Contains(t, wPreview.Header().Get("Content-Type"), "application/json")
 }
 
 func TestDispatchInviteEmail_SendErrorDoesNotPanic(t *testing.T) {

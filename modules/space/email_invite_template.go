@@ -8,19 +8,20 @@ import (
 	"strings"
 )
 
-// emailInviteAcceptHTMLPath 前端承接接受邀请的 H5 页面路径。与 group invite_detail.html
-// 同模式，由 H5 应用部署。
-const emailInviteAcceptHTMLPath = "space-email-invite.html"
+// emailInviteAcceptPath 后端承接邀请落地页的 API 路径。与 space_join_approve.html
+// 走同一模式：后端读 HTML 模板、注入 API_BASE_URL 后返回；JS 在浏览器里完成
+// 预览展示和接受动作。
+const emailInviteAcceptPath = "/v1/space/email-invite"
 
-// emailInviteAcceptURL 用 H5 base 拼出邀请接受链接。base 为空时返回空串，
-// 由调用方决定是否跳过发送。
+// emailInviteAcceptURL 用 External.BaseURL 拼出邀请接受链接。base 为空时返回空串，
+// 由调用方决定是否跳过发送（典型场景：本地开发未配置 BaseURL）。
 func emailInviteAcceptURL(base, rawToken string) string {
 	base = strings.TrimSpace(base)
 	if base == "" {
 		return ""
 	}
 	base = strings.TrimRight(base, "/")
-	return fmt.Sprintf("%s/%s?token=%s", base, emailInviteAcceptHTMLPath, url.QueryEscape(rawToken))
+	return fmt.Sprintf("%s%s?token=%s", base, emailInviteAcceptPath, url.QueryEscape(rawToken))
 }
 
 // inviterDisplay 收件方看到的邀请人名；为空时回退到通用文案。

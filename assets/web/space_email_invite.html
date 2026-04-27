@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Space 邀请</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+    <meta name="robots" content="noindex,nofollow">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #333; min-height: 100vh; }
+        .container { max-width: 420px; margin: 0 auto; padding: 0 16px; }
+        .card { margin-top: 32px; padding: 24px 20px; background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+        .card-title { font-size: 18px; font-weight: 600; color: #222; line-height: 1.4; word-break: break-all; text-align: center; }
+        .card-sub { font-size: 13px; color: #999; margin-top: 6px; text-align: center; }
+        .badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; line-height: 18px; margin-top: 8px; }
+        .badge-warn { background: #fff3e0; color: #f57c00; }
+        .badge-info { background: #e3f2fd; color: #1565c0; }
+        .info-row { display: flex; padding: 12px 0; border-bottom: 1px solid #f5f5f5; font-size: 14px; line-height: 1.5; }
+        .info-row:last-child { border-bottom: none; }
+        .info-label { color: #999; width: 64px; flex-shrink: 0; }
+        .info-value { color: #333; flex: 1; word-break: break-all; }
+        .field { margin-top: 16px; }
+        .field-label { font-size: 13px; color: #666; margin-bottom: 6px; }
+        .field-input {
+            width: 100%; height: 44px; padding: 0 14px;
+            border: 1px solid #e0e0e0; border-radius: 8px;
+            font-size: 15px; color: #333; background: #fff;
+            -webkit-appearance: none;
+        }
+        .field-input:focus { border-color: #7c3aed; outline: none; }
+        .field-hint { font-size: 12px; color: #999; margin-top: 6px; line-height: 1.5; }
+        .btn-group { margin-top: 20px; }
+        .btn {
+            width: 100%; height: 44px; border: none; border-radius: 22px;
+            font-size: 15px; font-weight: 600; cursor: pointer;
+            transition: opacity 0.2s; text-decoration: none;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .btn:active { opacity: 0.7; }
+        .btn[disabled], .btn.disabled { opacity: 0.5; pointer-events: none; }
+        .btn-primary { background: #7c3aed; color: #fff; }
+        .toast {
+            position: fixed; left: 50%; top: 32px; transform: translateX(-50%);
+            padding: 10px 16px; border-radius: 8px; font-size: 14px;
+            background: rgba(0,0,0,0.78); color: #fff; z-index: 1000;
+            max-width: 80%; text-align: center; display: none;
+        }
+        .loading { text-align: center; padding: 80px 20px; color: #999; font-size: 15px; }
+        .state-page { text-align: center; padding: 64px 20px; display: none; }
+        .state-page .icon { font-size: 48px; margin-bottom: 16px; }
+        .state-page .title { font-size: 17px; font-weight: 600; color: #333; margin-bottom: 8px; }
+        .state-page .desc { font-size: 14px; color: #999; line-height: 1.6; }
+    </style>
+</head>
+<body>
+    <div id="toast" class="toast"></div>
+    <div class="container">
+        <div id="loading" class="loading">加载中...</div>
+
+        <div id="content" style="display:none">
+            <div class="card">
+                <div class="card-title" id="v-title"></div>
+                <div class="card-sub" id="v-sub"></div>
+                <div id="v-meta" style="margin-top: 16px;"></div>
+
+                <div class="field">
+                    <div class="field-label">请输入收件邮箱以确认</div>
+                    <input type="email" class="field-input" id="v-email"
+                           autocomplete="email" inputmode="email"
+                           placeholder="必须与邀请目标一致" />
+                    <div class="field-hint">为安全起见，需要你重新输入收到邀请的邮箱地址。</div>
+                </div>
+
+                <div class="btn-group">
+                    <button class="btn btn-primary" id="btn-accept">接受邀请</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="state-page" id="state-expired">
+            <div class="icon">⏰</div>
+            <div class="title">邀请已过期</div>
+            <div class="desc">请联系发起人重新发送邀请</div>
+        </div>
+
+        <div class="state-page" id="state-consumed">
+            <div class="icon">✅</div>
+            <div class="title">邀请已被接受</div>
+            <div class="desc">该邀请链接已使用，无需重复操作</div>
+        </div>
+
+        <div class="state-page" id="state-revoked">
+            <div class="icon">🚫</div>
+            <div class="title">邀请已撤销或失效</div>
+            <div class="desc">请联系发起人重新发送邀请</div>
+        </div>
+
+        <div class="state-page" id="state-not-logged-in">
+            <div class="icon">🔐</div>
+            <div class="title">请先登录后再接受邀请</div>
+            <div class="desc">请打开 DMWork Web 端登录后回到本页面继续。</div>
+        </div>
+
+        <div class="state-page" id="state-success">
+            <div class="icon">🎉</div>
+            <div class="title">已加入空间</div>
+            <div class="desc">即将返回首页...</div>
+        </div>
+
+        <div class="state-page" id="state-rate-limited">
+            <div class="icon">⏳</div>
+            <div class="title">请稍后再试</div>
+            <div class="desc">当前访问人数较多，请稍等片刻后刷新页面重试</div>
+        </div>
+
+        <div class="state-page" id="state-server-error">
+            <div class="icon">⚠️</div>
+            <div class="title">加载失败</div>
+            <div class="desc">服务暂时不可用，请稍后刷新重试</div>
+        </div>
+
+        <div class="state-page" id="state-network-error">
+            <div class="icon">📡</div>
+            <div class="title">网络异常</div>
+            <div class="desc">无法连接服务器，请检查网络后刷新重试</div>
+        </div>
+    </div>
+
+<script>
+var API_BASE = "{{API_BASE_URL}}";
+var token = new URLSearchParams(location.search).get("token") || "";
+
+// 与服务端 EmailInviteStatus* / EmailInviteType* / EmailInviteRole* 同步
+var STATUS_PENDING = 0, STATUS_CONSUMED = 1, STATUS_EXPIRED = 2, STATUS_REVOKED = 3;
+var TYPE_OWNER = 1, TYPE_MEMBER = 2;
+var ROLE_MEMBER = 0, ROLE_ADMIN = 1;
+
+function show(id) { var el = document.getElementById(id); if (el) el.style.display = "block"; }
+function hide(id) { var el = document.getElementById(id); if (el) el.style.display = "none"; }
+function showState(stateID) { hide("loading"); hide("content"); show(stateID); }
+function setText(id, txt) { var el = document.getElementById(id); if (el) el.textContent = txt || ""; }
+
+function toast(msg, ms) {
+    var el = document.getElementById("toast");
+    el.textContent = msg;
+    el.style.display = "block";
+    clearTimeout(toast._t);
+    toast._t = setTimeout(function () { el.style.display = "none"; }, ms || 2200);
+}
+
+// 与 group_invite.html 一致：从 localStorage 抓 dmwork-web 的登录会话。
+// key 形如 "token{sid}"，value 为 token；找不到就当未登录处理。
+function findTokenAndSid() {
+    try {
+        for (var i = 0; i < localStorage.length; i++) {
+            var key = localStorage.key(i);
+            if (key && key.indexOf("token") === 0 && key !== "tokenCallback") {
+                var val = localStorage.getItem(key);
+                if (val && val.length > 10) {
+                    return { token: val, sid: key.substring(5) };
+                }
+            }
+        }
+    } catch (e) { /* Safari 隐私模式等 */ }
+    return { token: "", sid: "" };
+}
+
+// 把后端 ISO 时间字符串渲染成本地短格式；解析失败原样返回，防止 UI 崩溃。
+function formatExpires(s) {
+    if (!s) return "";
+    var d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.getFullYear() + "/" + (d.getMonth() + 1) + "/" + d.getDate() +
+           " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+function renderInfoRow(label, value) {
+    if (!value) return "";
+    var row = document.createElement("div");
+    row.className = "info-row";
+    var l = document.createElement("span"); l.className = "info-label"; l.textContent = label;
+    var v = document.createElement("span"); v.className = "info-value"; v.textContent = value;
+    row.appendChild(l); row.appendChild(v);
+    return row;
+}
+
+function renderPreview(d) {
+    var meta = document.getElementById("v-meta");
+    meta.innerHTML = "";
+
+    if (d.invite_type === TYPE_OWNER) {
+        setText("v-title", d.planned_name || "团队空间");
+        setText("v-sub", "邀请你创建并成为该空间的所有者");
+        var rowDesc = renderInfoRow("空间描述", d.planned_description);
+        if (rowDesc) meta.appendChild(rowDesc);
+        var rowMax = renderInfoRow("成员上限", d.planned_max_users ? String(d.planned_max_users) : "");
+        if (rowMax) meta.appendChild(rowMax);
+    } else if (d.invite_type === TYPE_MEMBER) {
+        setText("v-title", d.space_name || "团队空间");
+        var roleLabel = d.role === ROLE_ADMIN ? "管理员" : "成员";
+        setText("v-sub", "邀请你以「" + roleLabel + "」身份加入");
+        var rowMembers = renderInfoRow("成员数", typeof d.member_count === "number" ? String(d.member_count) : "");
+        if (rowMembers) meta.appendChild(rowMembers);
+    } else {
+        setText("v-title", "邀请");
+    }
+
+    var rowInviter = renderInfoRow("邀请人", d.inviter_name);
+    if (rowInviter) meta.appendChild(rowInviter);
+    var rowEmailMask = renderInfoRow("收件邮箱", d.email);
+    if (rowEmailMask) meta.appendChild(rowEmailMask);
+    var rowExpire = renderInfoRow("过期时间", formatExpires(d.expires_at));
+    if (rowExpire) meta.appendChild(rowExpire);
+
+    document.getElementById("btn-accept").addEventListener("click", onAcceptClick);
+    hide("loading");
+    show("content");
+}
+
+function onAcceptClick() {
+    var btn = document.getElementById("btn-accept");
+    if (btn.disabled) return;
+
+    var typed = (document.getElementById("v-email").value || "").trim();
+    if (!typed) { toast("请输入邮箱"); return; }
+
+    var session = findTokenAndSid();
+    if (!session.token) {
+        showState("state-not-logged-in");
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = "处理中...";
+
+    fetch(API_BASE + "/v1/space/email-invite/" + encodeURIComponent(token) + "/accept", {
+        method: "POST",
+        headers: {
+            "token": session.token,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ email: typed })
+    }).then(function (r) {
+        return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; });
+    }).then(function (r) {
+        if (!r.ok) {
+            throw new Error((r.data && r.data.msg) || "接受失败");
+        }
+        showState("state-success");
+    }).catch(function (err) {
+        toast((err && err.message) || "接受失败");
+        btn.disabled = false;
+        btn.textContent = "接受邀请";
+    });
+}
+
+if (!token) {
+    showState("state-revoked");
+} else {
+    fetch(API_BASE + "/v1/space/email-invite/" + encodeURIComponent(token))
+        .then(function (r) {
+            // 与 group_invite.html 同款分流：429 / 5xx 不当作"邀请失效"。
+            if (r.status === 429) { showState("state-rate-limited"); return null; }
+            if (r.status >= 500) { showState("state-server-error"); return null; }
+            return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; });
+        })
+        .then(function (r) {
+            if (r === null) return;
+            if (!r.ok || !r.data) { showState("state-revoked"); return; }
+            switch (r.data.status) {
+                case STATUS_PENDING:    renderPreview(r.data); break;
+                case STATUS_CONSUMED:   showState("state-consumed"); break;
+                case STATUS_EXPIRED:    showState("state-expired"); break;
+                case STATUS_REVOKED:    showState("state-revoked"); break;
+                default:                showState("state-revoked"); break;
+            }
+        })
+        .catch(function () { showState("state-network-error"); });
+}
+</script>
+</body>
+</html>

@@ -21,8 +21,8 @@ type managerCreateOwnerEmailInviteReq struct {
 	ExpiresAt          *string `json:"expires_at"`
 }
 
-// managerEmailInviteResp 列表与创建成功的公共响应结构。创建时 Token 字段带明文 token；
-// 列表响应中 Token 永远为空（入库只保存 hash，无法还原）。
+// managerEmailInviteResp 列表与创建成功的公共响应结构。raw token 入库只保存 hash，
+// Phase 6 起改为通过邮件投递；API 不再返回明文 token，避免日志/前端意外泄露。
 type managerEmailInviteResp struct {
 	ID                 int64  `json:"id"`
 	InviteType         int    `json:"invite_type"`
@@ -40,7 +40,6 @@ type managerEmailInviteResp struct {
 	ConsumedBy         string `json:"consumed_by,omitempty"`
 	ConsumedAt         string `json:"consumed_at,omitempty"`
 	CreatedAt          string `json:"created_at"`
-	Token              string `json:"token,omitempty"`
 }
 
 // createSpaceOwnerEmailInvite 管理端创建一条 owner 类型邮件邀请。
@@ -94,9 +93,10 @@ func (m *Manager) createSpaceOwnerEmailInvite(c *wkhttp.Context) {
 	}
 	model.Id = id
 
-	resp := toEmailInviteResp(model)
-	resp.Token = rawToken
-	c.Response(resp)
+	// 异步发邮件：邮件失败不应让创建接口失败，否则前端拿不到 invite ID 也无从重发。
+	go m.space.dispatchInviteEmail(model, rawToken)
+
+	c.Response(toEmailInviteResp(model))
 }
 
 // listSpaceOwnerEmailInvites 管理端列出所有 owner 邀请（仅自己创建的；按创建人过滤避免管理员互见）。

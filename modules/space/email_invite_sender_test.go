@@ -1,0 +1,205 @@
+package space
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/Mininglamp-OSS/octo-lib/testutil"
+	"github.com/stretchr/testify/assert"
+)
+
+// recordingInviteSender 用于测试：把每次调用的入参塞到 channel，单测可阻塞读取。
+type recordingInviteSender struct {
+	mu    sync.Mutex
+	calls []sentInviteEmail
+	err   error
+	done  chan struct{}
+}
+
+type sentInviteEmail struct {
+	To      string
+	Subject string
+	Body    string
+}
+
+func newRecordingSender() *recordingInviteSender {
+	return &recordingInviteSender{done: make(chan struct{}, 4)}
+}
+
+func (r *recordingInviteSender) SendHTMLEmail(_ context.Context, to, subject, body string) error {
+	r.mu.Lock()
+	r.calls = append(r.calls, sentInviteEmail{to, subject, body})
+	r.mu.Unlock()
+	select {
+	case r.done <- struct{}{}:
+	default:
+	}
+	return r.err
+}
+
+func (r *recordingInviteSender) waitOne(t *testing.T) sentInviteEmail {
+	t.Helper()
+	select {
+	case <-r.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("等待邮件发送回调超时")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls[len(r.calls)-1]
+}
+
+// withRecordingSender 把测试期间的全局发送器替换为 recorder，并在测试结束后还原。
+func withRecordingSender(t *testing.T) *recordingInviteSender {
+	t.Helper()
+	rec := newRecordingSender()
+	prev := getInviteEmailSenderForTest()
+	SetInviteEmailSenderForTest(rec)
+	t.Cleanup(func() { SetInviteEmailSenderForTest(prev) })
+	return rec
+}
+
+// withH5Base 让测试用例临时把 External.H5BaseURL 改为非空，结束时还原。
+func withH5Base(t *testing.T, sp *Space, base string) {
+	t.Helper()
+	cfg := sp.ctx.GetConfig()
+	prev := cfg.External.H5BaseURL
+	cfg.External.H5BaseURL = base
+	t.Cleanup(func() { cfg.External.H5BaseURL = prev })
+}
+
+func TestDispatchOwnerInviteEmail_SendsExpectedFields(t *testing.T) {
+	_, sp, err := setup(t)
+	assert.NoError(t, err)
+	rec := withRecordingSender(t)
+	withH5Base(t, sp, "https://h5.example.com")
+
+	rawToken := "raw-tok-owner-123"
+	inv := &spaceEmailInviteModel{
+		Email:              "owner@example.com",
+		PlannedName:        "Acme Owner Space",
+		PlannedDescription: "for testing",
+		InviteType:         EmailInviteTypeOwner,
+		CreatedBy:          "admin-uid",
+	}
+	sp.dispatchInviteEmail(inv, rawToken)
+	got := rec.waitOne(t)
+
+	assert.Equal(t, "owner@example.com", got.To)
+	assert.Contains(t, got.Subject, "Acme Owner Space")
+	assert.Contains(t, got.Body, "Acme Owner Space")
+	assert.Contains(t, got.Body, "token="+rawToken,
+		"邮件正文必须包含 raw token，否则收件人无法接受邀请")
+}
+
+func TestDispatchMemberInviteEmail_UsesSpaceName(t *testing.T) {
+	_, sp, err := setup(t)
+	assert.NoError(t, err)
+	rec := withRecordingSender(t)
+	withH5Base(t, sp, "https://h5.example.com")
+
+	// 准备一个真实空间，让 dispatch 能查到 spaceName
+	const spaceId = "sp-dispatch-1"
+	assert.NoError(t, testSpaceDB.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "我的会议空间", Creator: "owner-x", Status: SpaceStatusNormal,
+	}))
+
+	inv := &spaceEmailInviteModel{
+		Email:      "newmember@example.com",
+		SpaceId:    spaceId,
+		Role:       EmailInviteRoleMember,
+		InviteType: EmailInviteTypeMember,
+		CreatedBy:  "owner-x",
+	}
+	sp.dispatchInviteEmail(inv, "tok-mem-1")
+	got := rec.waitOne(t)
+
+	assert.Equal(t, "newmember@example.com", got.To)
+	assert.Contains(t, got.Body, "我的会议空间")
+	assert.Contains(t, got.Body, "tok-mem-1")
+}
+
+func TestDispatchInviteEmail_NoH5BaseURLSkips(t *testing.T) {
+	_, sp, err := setup(t)
+	assert.NoError(t, err)
+	rec := withRecordingSender(t)
+
+	// 显式清空 H5BaseURL
+	withH5Base(t, sp, "")
+
+	inv := &spaceEmailInviteModel{
+		Email: "x@example.com", PlannedName: "X", InviteType: EmailInviteTypeOwner,
+	}
+	sp.dispatchInviteEmail(inv, "tok-skip")
+
+	// 不应触发发送（没有可点击链接）
+	select {
+	case <-rec.done:
+		t.Fatal("H5BaseURL 为空时不应发送邮件")
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestCreateOwnerEmailInvite_TriggersEmail(t *testing.T) {
+	srv, sp, err := setup(t)
+	assert.NoError(t, err)
+	rec := withRecordingSender(t)
+	withH5Base(t, sp, "https://h5.example.com")
+	tk := adminToken(t)
+
+	w := postJSON(t, srv, "/v1/manager/spaces/invites", tk, map[string]interface{}{
+		"email":             "owner-e2e@example.com",
+		"planned_name":      "团队 A",
+		"planned_max_users": 50,
+		"planned_join_mode": 0,
+	})
+	assert.Equal(t, 200, w.Code, w.Body.String())
+
+	got := rec.waitOne(t)
+	assert.Equal(t, "owner-e2e@example.com", got.To)
+	assert.Contains(t, got.Subject, "团队 A")
+	assert.Contains(t, got.Body, "https://h5.example.com/space-email-invite.html?token=")
+}
+
+func TestCreateMemberEmailInvite_TriggersEmail(t *testing.T) {
+	srv, sp, err := setup(t)
+	assert.NoError(t, err)
+	rec := withRecordingSender(t)
+	withH5Base(t, sp, "https://h5.example.com")
+
+	const spaceId = "sp-mem-e2e"
+	// testutil.UID 作为 admin (role=1)，creator 是另一人
+	seedSpaceWithMemberRole(t, spaceId, "owner-mem", 1)
+
+	w := postJSON(t, srv, "/v1/space/"+spaceId+"/email-invites",
+		testutil.Token, map[string]interface{}{
+			"email": "member-e2e@example.com",
+			"role":  EmailInviteRoleAdmin,
+		})
+	assert.Equal(t, 200, w.Code, w.Body.String())
+
+	got := rec.waitOne(t)
+	assert.Equal(t, "member-e2e@example.com", got.To)
+	assert.Contains(t, got.Body, "管理员")
+	assert.Contains(t, got.Body, "测试空间") // seedSpaceWithMemberRole 设的名字
+}
+
+func TestDispatchInviteEmail_SendErrorDoesNotPanic(t *testing.T) {
+	_, sp, err := setup(t)
+	assert.NoError(t, err)
+	rec := withRecordingSender(t)
+	withH5Base(t, sp, "https://h5.example.com")
+	rec.err = errors.New("smtp down")
+
+	inv := &spaceEmailInviteModel{
+		Email: "x@example.com", PlannedName: "X", InviteType: EmailInviteTypeOwner,
+	}
+	// 不应抛 panic 或上抛错误
+	assert.NotPanics(t, func() { sp.dispatchInviteEmail(inv, "tok-fail") })
+	got := rec.waitOne(t)
+	assert.True(t, strings.Contains(got.Body, "X"))
+}

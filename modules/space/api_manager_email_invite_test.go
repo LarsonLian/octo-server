@@ -50,11 +50,12 @@ func TestManager_CreateOwnerEmailInvite_Success(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Greater(t, resp.ID, int64(0))
 	assert.Equal(t, "newowner@example.com", resp.Email)
-	assert.NotEmpty(t, resp.Token, "token 应仅在创建时返回一次")
+	// Phase 6 起 raw token 仅通过邮件投递，API 不再返回。
+	assert.Empty(t, resp.Token, "raw token 不应出现在创建响应中")
 	assert.Equal(t, EmailInviteStatusPending, resp.Status)
 	assert.Equal(t, EmailInviteTypeOwner, resp.InviteType)
 
-	inv, err := testSpaceDB.queryEmailInviteByTokenHash(hashEmailInviteToken(resp.Token))
+	inv, err := testSpaceDB.queryEmailInviteByID(resp.ID)
 	assert.NoError(t, err)
 	assert.NotNil(t, inv)
 	assert.Equal(t, resp.ID, inv.Id)

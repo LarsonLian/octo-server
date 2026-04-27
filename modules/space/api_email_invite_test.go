@@ -60,12 +60,13 @@ func TestSpace_CreateMemberEmailInvite_Success(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Greater(t, resp.ID, int64(0))
 	assert.Equal(t, "newmember@example.com", resp.Email)
-	assert.NotEmpty(t, resp.Token)
+	// Phase 6 起 raw token 仅通过邮件投递，API 不再返回。
+	assert.Empty(t, resp.Token, "raw token 不应出现在创建响应中")
 	assert.Equal(t, EmailInviteTypeMember, resp.InviteType)
 	assert.Equal(t, spaceId, resp.SpaceId)
 	assert.Equal(t, EmailInviteRoleMember, resp.Role)
 
-	got, err := testSpaceDB.queryEmailInviteByTokenHash(hashEmailInviteToken(resp.Token))
+	got, err := testSpaceDB.queryEmailInviteByID(resp.ID)
 	assert.NoError(t, err)
 	assert.NotNil(t, got)
 	assert.Equal(t, spaceId, got.SpaceId)

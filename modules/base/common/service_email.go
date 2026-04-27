@@ -25,6 +25,8 @@ type IEmailService interface {
 	SendVerifyCode(ctx context.Context, email string, codeType CodeType) error
 	// 验证验证码(销毁缓存)
 	Verify(ctx context.Context, email, code string, codeType CodeType) error
+	// SendHTMLEmail 发送一封 HTML 邮件（不走频率限制 / 验证码缓存，由调用方自己控制）
+	SendHTMLEmail(ctx context.Context, to, subject, htmlBody string) error
 }
 
 // EmailService 邮件服务
@@ -85,6 +87,15 @@ func (s *EmailService) SendVerifyCode(ctx context.Context, email string, codeTyp
 	return s.sendEmail(email, subject, body)
 }
 
+// SendHTMLEmail 直接发送一封 HTML 邮件。subject/body 由调用方负责，本方法
+// 不写 Redis、不限速；速率控制由调用方根据业务场景自行处理。
+func (s *EmailService) SendHTMLEmail(_ context.Context, to, subject, htmlBody string) error {
+	if to == "" {
+		return errors.New("收件人不能为空")
+	}
+	return s.sendEmail(to, subject, htmlBody)
+}
+
 // sendEmail 通过SMTP发送邮件（支持SSL端口465和STARTTLS端口587）
 func (s *EmailService) sendEmail(to, subject, body string) error {
 	cfg := s.ctx.GetConfig()
@@ -125,11 +136,14 @@ func (s *EmailService) sendEmail(to, subject, body string) error {
 	// 端口465使用直连SSL/TLS
 	if port == "465" {
 		tlsConfig := &tls.Config{ServerName: host}
-		conn, err := tls.Dial("tcp", smtpAddr, tlsConfig)
+		dialer := &net.Dialer{Timeout: smtpDialTimeout}
+		conn, err := tls.DialWithDialer(dialer, "tcp", smtpAddr, tlsConfig)
 		if err != nil {
 			return fmt.Errorf("TLS连接失败: %w", err)
 		}
 		defer conn.Close()
+		// 防止 SMTP 握手 / 投递阶段无限挂起 —— 异步触发的发送任务一旦泄漏会持续占用 goroutine。
+		_ = conn.SetDeadline(time.Now().Add(smtpIOTimeout))
 
 		client, err := smtp.NewClient(conn, host)
 		if err != nil {
@@ -157,9 +171,47 @@ func (s *EmailService) sendEmail(to, subject, body string) error {
 		return w.Close()
 	}
 
-	// 端口25/587使用STARTTLS
-	return smtp.SendMail(smtpAddr, auth, from, []string{to}, []byte(msg))
+	// 端口25/587使用STARTTLS。手动 dial 以注入超时（smtp.SendMail 默认无超时）。
+	conn, err := net.DialTimeout("tcp", smtpAddr, smtpDialTimeout)
+	if err != nil {
+		return fmt.Errorf("SMTP 连接失败: %w", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(smtpIOTimeout))
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return fmt.Errorf("创建SMTP客户端失败: %w", err)
+	}
+	defer client.Close()
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err = client.StartTLS(&tls.Config{ServerName: host}); err != nil {
+			return fmt.Errorf("STARTTLS 失败: %w", err)
+		}
+	}
+	if err = client.Auth(auth); err != nil {
+		return fmt.Errorf("SMTP认证失败: %w", err)
+	}
+	if err = client.Mail(from); err != nil {
+		return err
+	}
+	if err = client.Rcpt(to); err != nil {
+		return err
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err = w.Write([]byte(msg)); err != nil {
+		return err
+	}
+	return w.Close()
 }
+
+const (
+	smtpDialTimeout = 15 * time.Second
+	smtpIOTimeout   = 60 * time.Second
+)
 
 // Verify 验证验证码（验证成功后销毁缓存）
 func (s *EmailService) Verify(ctx context.Context, email, code string, codeType CodeType) error {

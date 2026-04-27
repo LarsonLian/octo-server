@@ -1,0 +1,120 @@
+package space
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
+	"go.uber.org/zap"
+)
+
+// inviteEmailSendTimeout 异步发送的硬上限。SMTP 层已有自己的 dial / IO 超时，
+// 这里再叠一层是为了避免任何下游 hang 让 goroutine 不可回收。
+const inviteEmailSendTimeout = 30 * time.Second
+
+// inviteEmailSender 抽象掉具体的 SMTP 发送实现，便于在测试中替换为 recorder。
+// 故意保持 1 个方法 —— 发邮件的所有上层细节（subject/html 构造、链接拼接）都
+// 在 dispatchInviteEmail 中完成。
+type inviteEmailSender interface {
+	SendHTMLEmail(ctx context.Context, to, subject, htmlBody string) error
+}
+
+// inviteEmailSenderOverride 测试钩子：非 nil 时优先于默认 EmailService。
+// 使用包级变量是因为 testutil.NewTestServer() 在 TestMain 阶段就构造好 Space 单例，
+// 测试用例无法在构造期注入；只有 override 能覆盖该单例。
+var (
+	inviteEmailSenderOverride   inviteEmailSender
+	inviteEmailSenderOverrideMu sync.RWMutex
+)
+
+// SetInviteEmailSenderForTest 测试专用：替换全局发送器。production 代码不要调用。
+func SetInviteEmailSenderForTest(s inviteEmailSender) {
+	inviteEmailSenderOverrideMu.Lock()
+	defer inviteEmailSenderOverrideMu.Unlock()
+	inviteEmailSenderOverride = s
+}
+
+// getInviteEmailSenderForTest 测试专用：取当前 override，便于 t.Cleanup 还原。
+func getInviteEmailSenderForTest() inviteEmailSender {
+	inviteEmailSenderOverrideMu.RLock()
+	defer inviteEmailSenderOverrideMu.RUnlock()
+	return inviteEmailSenderOverride
+}
+
+// currentInviteSender 优先返回 override；否则按需构造 EmailService。
+// 每次 New 都构造 EmailService 也行，但这里保持 lazy + override 优先。
+func (s *Space) currentInviteSender() inviteEmailSender {
+	if v := getInviteEmailSenderForTest(); v != nil {
+		return v
+	}
+	return commonapi.NewEmailService(s.ctx)
+}
+
+// dispatchInviteEmail 同步发送一封 owner/member 邀请邮件。
+// 失败仅打 alert 日志：邀请记录已落库，调用方通过 list 接口仍能看到该邀请，
+// 后续支持手工重发；让创建接口失败会留下"DB 有 invite 但用户没收到邮件"的
+// 不一致状态。
+//
+// 调用方约定：在创建端点的 DB 写入成功后用 `go` 异步触发，避免阻塞 API。
+func (s *Space) dispatchInviteEmail(inv *spaceEmailInviteModel, rawToken string) {
+	if inv == nil || inv.Email == "" || rawToken == "" {
+		return
+	}
+
+	acceptURL := emailInviteAcceptURL(s.ctx.GetConfig().External.H5BaseURL, rawToken)
+	if acceptURL == "" {
+		// 没有 H5 地址就没有可点击链接；记 warn 而非错误，让运维感知配置缺失。
+		s.Warn("跳过邀请邮件：未配置 External.H5BaseURL",
+			zap.String("alert", "email_invite_send_skipped_no_h5"),
+			zap.Int64("inviteID", inv.Id))
+		return
+	}
+
+	inviterName, qErr := s.db.queryUserName(inv.CreatedBy)
+	if qErr != nil {
+		// 不阻塞发送：拿不到名字就走匿名兜底文案。但要记日志便于排障。
+		s.Warn("查询邀请人名失败，使用兜底文案",
+			zap.Error(qErr), zap.String("createdBy", inv.CreatedBy))
+		inviterName = ""
+	}
+
+	var (
+		subject string
+		body    string
+		bErr    error
+	)
+	switch inv.InviteType {
+	case EmailInviteTypeOwner:
+		subject, body, bErr = buildOwnerInviteEmail(inv, inviterName, acceptURL)
+	case EmailInviteTypeMember:
+		spaceName := ""
+		sp, sErr := s.db.querySpaceByID(inv.SpaceId)
+		if sErr != nil {
+			s.Warn("查询空间名失败，邮件正文将不显示空间名",
+				zap.Error(sErr), zap.String("spaceId", inv.SpaceId))
+		} else if sp != nil {
+			spaceName = sp.Name
+		}
+		subject, body, bErr = buildMemberInviteEmail(inv, inviterName, spaceName, acceptURL)
+	default:
+		s.Warn("未知 invite_type，跳过邮件发送", zap.Int("inviteType", inv.InviteType))
+		return
+	}
+	if bErr != nil {
+		s.Error("构造邀请邮件失败",
+			zap.String("alert", "email_invite_render_failed"),
+			zap.Error(bErr), zap.Int64("inviteID", inv.Id))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), inviteEmailSendTimeout)
+	defer cancel()
+	if err := s.currentInviteSender().SendHTMLEmail(ctx, inv.Email, subject, body); err != nil {
+		s.Error("发送邀请邮件失败",
+			zap.String("alert", "email_invite_send_failed"),
+			zap.Error(err),
+			zap.Int64("inviteID", inv.Id),
+			zap.String("to", inv.Email))
+	}
+}

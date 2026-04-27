@@ -62,11 +62,18 @@ func (s *Space) dispatchInviteEmail(inv *spaceEmailInviteModel, rawToken string)
 		return
 	}
 
-	acceptURL := emailInviteAcceptURL(s.ctx.GetConfig().External.H5BaseURL, rawToken)
+	// ctx 提前到入口：即便 DB 查询本身不接 ctx（dbr 同步调用），也能让 SendHTMLEmail
+	// 在 DB hang 后立即超时退出，整个 dispatch 真正在 inviteEmailSendTimeout 内收敛。
+	ctx, cancel := context.WithTimeout(context.Background(), inviteEmailSendTimeout)
+	defer cancel()
+
+	// 落地页由后端在 BaseURL/v1/space/email-invite 提供（emailInvitePage handler）；
+	// H5BaseURL 在多数部署里是独立 H5 服务，不会响应该路径。这里必须用 BaseURL，
+	// 否则邮件链接会 404。修正于 PR #1194 review (W1)。
+	acceptURL := emailInviteAcceptURL(s.ctx.GetConfig().External.BaseURL, rawToken)
 	if acceptURL == "" {
-		// 没有 H5 地址就没有可点击链接；记 warn 而非错误，让运维感知配置缺失。
-		s.Warn("跳过邀请邮件：未配置 External.H5BaseURL",
-			zap.String("alert", "email_invite_send_skipped_no_h5"),
+		s.Warn("跳过邀请邮件：未配置 External.BaseURL",
+			zap.String("alert", "email_invite_send_skipped_no_base"),
 			zap.Int64("inviteID", inv.Id))
 		return
 	}
@@ -108,8 +115,6 @@ func (s *Space) dispatchInviteEmail(inv *spaceEmailInviteModel, rawToken string)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), inviteEmailSendTimeout)
-	defer cancel()
 	if err := s.currentInviteSender().SendHTMLEmail(ctx, inv.Email, subject, body); err != nil {
 		s.Error("发送邀请邮件失败",
 			zap.String("alert", "email_invite_send_failed"),

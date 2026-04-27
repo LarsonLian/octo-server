@@ -57,6 +57,8 @@ func (r *recordingInviteSender) waitOne(t *testing.T) sentInviteEmail {
 }
 
 // withRecordingSender 把测试期间的全局发送器替换为 recorder，并在测试结束后还原。
+//
+// NOTE: 共享全局 override + 单例 Space，使用本 helper 的测试不要 t.Parallel()。
 func withRecordingSender(t *testing.T) *recordingInviteSender {
 	t.Helper()
 	rec := newRecordingSender()
@@ -66,20 +68,23 @@ func withRecordingSender(t *testing.T) *recordingInviteSender {
 	return rec
 }
 
-// withH5Base 让测试用例临时把 External.H5BaseURL 改为非空，结束时还原。
-func withH5Base(t *testing.T, sp *Space, base string) {
+// withBaseURL 让测试用例临时把 External.BaseURL 改为非空，结束时还原。
+// 邮件接受链接由后端在 {BaseURL}/v1/space/email-invite 提供，dispatch 也读这个字段。
+//
+// NOTE: 直接写共享 *config.Config，使用本 helper 的测试不要 t.Parallel()。
+func withBaseURL(t *testing.T, sp *Space, base string) {
 	t.Helper()
 	cfg := sp.ctx.GetConfig()
-	prev := cfg.External.H5BaseURL
-	cfg.External.H5BaseURL = base
-	t.Cleanup(func() { cfg.External.H5BaseURL = prev })
+	prev := cfg.External.BaseURL
+	cfg.External.BaseURL = base
+	t.Cleanup(func() { cfg.External.BaseURL = prev })
 }
 
 func TestDispatchOwnerInviteEmail_SendsExpectedFields(t *testing.T) {
 	_, sp, err := setup(t)
 	assert.NoError(t, err)
 	rec := withRecordingSender(t)
-	withH5Base(t, sp, "https://h5.example.com")
+	withBaseURL(t, sp, "https://h5.example.com")
 
 	rawToken := "raw-tok-owner-123"
 	inv := &spaceEmailInviteModel{
@@ -103,7 +108,7 @@ func TestDispatchMemberInviteEmail_UsesSpaceName(t *testing.T) {
 	_, sp, err := setup(t)
 	assert.NoError(t, err)
 	rec := withRecordingSender(t)
-	withH5Base(t, sp, "https://h5.example.com")
+	withBaseURL(t, sp, "https://h5.example.com")
 
 	// 准备一个真实空间，让 dispatch 能查到 spaceName
 	const spaceId = "sp-dispatch-1"
@@ -126,13 +131,13 @@ func TestDispatchMemberInviteEmail_UsesSpaceName(t *testing.T) {
 	assert.Contains(t, got.Body, "tok-mem-1")
 }
 
-func TestDispatchInviteEmail_NoH5BaseURLSkips(t *testing.T) {
+func TestDispatchInviteEmail_NoBaseURLSkips(t *testing.T) {
 	_, sp, err := setup(t)
 	assert.NoError(t, err)
 	rec := withRecordingSender(t)
 
-	// 显式清空 H5BaseURL
-	withH5Base(t, sp, "")
+	// 显式清空 BaseURL
+	withBaseURL(t, sp, "")
 
 	inv := &spaceEmailInviteModel{
 		Email: "x@example.com", PlannedName: "X", InviteType: EmailInviteTypeOwner,
@@ -142,7 +147,7 @@ func TestDispatchInviteEmail_NoH5BaseURLSkips(t *testing.T) {
 	// 不应触发发送（没有可点击链接）
 	select {
 	case <-rec.done:
-		t.Fatal("H5BaseURL 为空时不应发送邮件")
+		t.Fatal("BaseURL 为空时不应发送邮件")
 	case <-time.After(150 * time.Millisecond):
 	}
 }
@@ -151,7 +156,7 @@ func TestCreateOwnerEmailInvite_TriggersEmail(t *testing.T) {
 	srv, sp, err := setup(t)
 	assert.NoError(t, err)
 	rec := withRecordingSender(t)
-	withH5Base(t, sp, "https://h5.example.com")
+	withBaseURL(t, sp, "https://h5.example.com")
 	tk := adminToken(t)
 
 	w := postJSON(t, srv, "/v1/manager/spaces/invites", tk, map[string]interface{}{
@@ -172,7 +177,7 @@ func TestCreateMemberEmailInvite_TriggersEmail(t *testing.T) {
 	srv, sp, err := setup(t)
 	assert.NoError(t, err)
 	rec := withRecordingSender(t)
-	withH5Base(t, sp, "https://h5.example.com")
+	withBaseURL(t, sp, "https://h5.example.com")
 
 	const spaceId = "sp-mem-e2e"
 	// testutil.UID 作为 admin (role=1)，creator 是另一人
@@ -252,7 +257,7 @@ func TestDispatchInviteEmail_SendErrorDoesNotPanic(t *testing.T) {
 	_, sp, err := setup(t)
 	assert.NoError(t, err)
 	rec := withRecordingSender(t)
-	withH5Base(t, sp, "https://h5.example.com")
+	withBaseURL(t, sp, "https://h5.example.com")
 	rec.err = errors.New("smtp down")
 
 	inv := &spaceEmailInviteModel{

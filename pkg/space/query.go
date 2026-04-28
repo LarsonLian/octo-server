@@ -6,9 +6,10 @@ import (
 
 // SystemBots 是所有 Space 都可见的系统级 Bot UID。
 var SystemBots = map[string]bool{
-	"botfather":  true,
-	"u_10000":    true,
-	"fileHelper": true,
+	"botfather":     true,
+	"u_10000":       true,
+	"fileHelper":    true,
+	"notification":  true,
 }
 
 // GetBotUIDs 从给定 UID 列表中查询哪些是 Bot（robot=1），排除系统 Bot。

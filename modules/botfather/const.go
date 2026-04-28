@@ -67,4 +67,4 @@ const (
 // systemExcludedUIDs is the canonical list of system UIDs excluded from
 // batch bot operations (ensureBotFatherFriends, repairOrphanBots, etc.).
 // Maintain this single list to avoid drift between functions.
-var systemExcludedUIDs = []string{BotFatherUID, systemUIDAdmin, systemUIDFileHelper}
+var systemExcludedUIDs = []string{BotFatherUID, systemUIDAdmin, systemUIDFileHelper, "notification"}

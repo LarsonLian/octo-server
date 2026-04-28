@@ -366,6 +366,17 @@ func (u *User) updateSystemUserToken() {
 		u.Error("更新IM的token失败！", zap.Error(err))
 	}
 
+	// 通知助手
+	_, err = u.ctx.UpdateIMToken(config.UpdateIMTokenReq{
+		UID:         u.ctx.GetConfig().Account.NotificationUID,
+		DeviceFlag:  config.APP,
+		DeviceLevel: config.DeviceLevelMaster,
+		Token:       util.GenerUUID(),
+	})
+	if err != nil {
+		u.Error("更新通知助手IM的token失败！", zap.Error(err))
+	}
+
 	// 系统管理员
 	_, err = u.ctx.UpdateIMToken(config.UpdateIMTokenReq{
 		UID:         u.ctx.GetConfig().Account.AdminUID,
@@ -410,6 +421,17 @@ func (u *User) UserAvatar(c *wkhttp.Context) {
 		avatarBytes, err := os.ReadFile("assets/assets/fileHelper.jpeg")
 		if err != nil {
 			u.Error("文件传输助手头像读取失败！", zap.Error(err))
+			c.Writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		c.Writer.Write(avatarBytes)
+		return
+	}
+	if uid == u.ctx.GetConfig().Account.NotificationUID {
+		c.Header("Content-Type", "image/png")
+		avatarBytes, err := os.ReadFile("assets/assets/notification.png")
+		if err != nil {
+			u.Error("通知助手头像读取失败！", zap.Error(err))
 			c.Writer.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -2565,6 +2587,36 @@ func (u *User) addFileHelperFriend(uid string) error {
 	return nil
 }
 
+// addNotificationFriend 处理注册用户和通知助手互为好友
+func (u *User) addNotificationFriend(uid string) error {
+	if uid == "" {
+		u.Error("用户ID不能为空")
+		return errors.New("用户ID不能为空")
+	}
+	isFriend, err := u.friendDB.IsFriend(uid, u.ctx.GetConfig().Account.NotificationUID)
+	if err != nil {
+		u.Error("查询用户与通知助手关系失败")
+		return err
+	}
+	if !isFriend {
+		version, err := u.ctx.GenSeq(common.FriendSeqKey)
+		if err != nil {
+			u.Error("GenSeq failed", zap.Error(err))
+			return err
+		}
+		err = u.friendDB.Insert(&FriendModel{
+			UID:     uid,
+			ToUID:   u.ctx.GetConfig().Account.NotificationUID,
+			Version: version,
+		})
+		if err != nil {
+			u.Error("注册用户和通知助手成为好友失败")
+			return err
+		}
+	}
+	return nil
+}
+
 // addBotFatherFriend 处理注册用户和BotFather互为好友（双向记录 + 白名单 + CMD同步，使用事务）
 func (u *User) addBotFatherFriend(uid string) error {
 	const botFatherUID = "botfather"
@@ -2992,6 +3044,11 @@ func (u *User) createUserWithRespAndTx(registerSpanCtx context.Context, createUs
 	err = u.addFileHelperFriend(createUser.UID)
 	if err != nil {
 		u.Error("添加注册用户和文件助手为好友关系失败", zap.Error(err))
+		return nil, err
+	}
+	err = u.addNotificationFriend(createUser.UID)
+	if err != nil {
+		u.Error("添加注册用户和通知助手为好友关系失败", zap.Error(err))
 		return nil, err
 	}
 	// Space 模式下不再自动添加 BotFather 为好友

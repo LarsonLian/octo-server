@@ -29,6 +29,7 @@ func TestFilterConversationsBySpace_SystemBotsVisible(t *testing.T) {
 		{ChannelID: "botfather", ChannelType: common.ChannelTypePerson.Uint8(), SpaceID: ""},
 		{ChannelID: "u_10000", ChannelType: common.ChannelTypePerson.Uint8(), SpaceID: ""},
 		{ChannelID: "fileHelper", ChannelType: common.ChannelTypePerson.Uint8(), SpaceID: ""},
+		{ChannelID: "notification", ChannelType: common.ChannelTypePerson.Uint8(), SpaceID: ""},
 		{ChannelID: "custom_bot", ChannelType: common.ChannelTypePerson.Uint8(), SpaceID: ""},
 	}
 
@@ -39,11 +40,12 @@ func TestFilterConversationsBySpace_SystemBotsVisible(t *testing.T) {
 	botInSpace := map[string]bool{}
 	result := filterConversationsCore(convs, "spaceB", "spaceA", nil, nil, botSet, botInSpace, false, false)
 	// 系统 Bot 可见，custom_bot（Bot 不在此 Space）不可见
-	assert.Len(t, result, 3)
-	ids := []string{result[0].ChannelID, result[1].ChannelID, result[2].ChannelID}
+	assert.Len(t, result, 4)
+	ids := []string{result[0].ChannelID, result[1].ChannelID, result[2].ChannelID, result[3].ChannelID}
 	assert.Contains(t, ids, "botfather")
 	assert.Contains(t, ids, "u_10000")
 	assert.Contains(t, ids, "fileHelper")
+	assert.Contains(t, ids, "notification")
 }
 
 func TestFilterConversationsBySpace_DefaultSpaceBareConvs(t *testing.T) {
@@ -207,7 +209,7 @@ func TestFilterConversationsBySpace_ExternalGroupFallbackToDefault(t *testing.T)
 
 func TestGetBotUIDs_SkipsSystemBots(t *testing.T) {
 	// 系统 Bot 不应被 GetBotUIDs 查询（它们在调用前被排除）
-	uids := []string{"botfather", "u_10000", "fileHelper"}
+	uids := []string{"botfather", "u_10000", "fileHelper", "notification"}
 	for _, uid := range uids {
 		assert.True(t, spacepkg.SystemBots[uid], "should be system bot: %s", uid)
 	}

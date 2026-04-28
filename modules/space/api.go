@@ -274,6 +274,9 @@ func (s *Space) createSpaceCorePostCommit(spaceId string, p createSpaceParams) *
 		Status:  1,
 	})
 
+	// 为创建者补齐默认分类（GH octo-server#1228）。失败不阻塞空间创建，list 端有兜底。
+	ensureDefaultCategoryProvisioned(s.ctx, p.Creator, spaceId, s)
+
 	go s.loadKnownSpaceIDs()
 	go s.fireSpaceMemberJoinEvent(p.Creator, spaceId)
 
@@ -535,6 +538,12 @@ func (s *Space) addMembers(c *wkhttp.Context) {
 		newMembers = append(newMembers, uid)
 	}
 	c.ResponseOK()
+
+	// 为每个新成员补齐默认分类（GH octo-server#1228）；异步以免阻塞响应。
+	for _, uid := range newMembers {
+		uid := uid
+		go ensureDefaultCategoryProvisioned(s.ctx, uid, spaceId, s)
+	}
 
 	// 触发 SpaceMemberJoin 事件（每个新成员）
 	for _, uid := range newMembers {
@@ -877,6 +886,9 @@ func (s *Space) executeJoinSpace(uid, spaceId string, space *SpaceModel) error {
 	if space.PresetGroupIds != nil && *space.PresetGroupIds != "" {
 		go s.joinPresetGroups(uid, spaceId, *space.PresetGroupIds)
 	}
+
+	// 为新成员补齐默认分类（GH octo-server#1228）。失败不阻塞加入流程。
+	ensureDefaultCategoryProvisioned(s.ctx, uid, spaceId, s)
 
 	// 触发 SpaceMemberJoin 事件
 	go s.fireSpaceMemberJoinEvent(uid, spaceId)

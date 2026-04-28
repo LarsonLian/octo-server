@@ -135,6 +135,13 @@ func (c *Category) list(ctx *wkhttp.Context) {
 		return
 	}
 
+	// 兜底：确保 (uid, spaceID) 下默认分类存在（GH octo-server#1228）。
+	// 创建 space / 加入 space 路径已在 space 模块预先补一条；此处为老用户 / 异常路径
+	// 的防御性补偿。INSERT IGNORE 幂等，失败降级为 warn，不中断列表返回。
+	if err := EnsureDefaultCategory(c.ctx, loginUID, spaceID); err != nil {
+		c.Warn("确保默认分类失败（降级继续）", zap.Error(err), zap.String("uid", loginUID), zap.String("spaceID", spaceID))
+	}
+
 	categories, err := c.db.queryCategoriesByUIDAndSpaceID(loginUID, spaceID)
 	if err != nil {
 		c.Error("查询类别失败", zap.Error(err))

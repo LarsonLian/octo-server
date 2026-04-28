@@ -477,6 +477,12 @@ func (m *Manager) addMembers(c *wkhttp.Context) {
 		return
 	}
 	m.Info("管理员添加空间成员", zap.String("spaceId", spaceId), zap.String("operator", c.GetLoginUID()), zap.Strings("uids", uids))
+	// 为每个成员补齐默认分类（GH octo-server#1228）。管理端 upsert 不区分新/旧成员，
+	// 一律调用一次 ensure；底层函数幂等（INSERT IGNORE + 唯一索引），已存在则 no-op。
+	for _, uid := range uids {
+		uid := uid
+		go ensureDefaultCategoryProvisioned(m.space.ctx, uid, spaceId, m)
+	}
 	c.ResponseOK()
 }
 

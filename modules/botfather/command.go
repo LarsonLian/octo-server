@@ -981,9 +981,19 @@ func (h *commandHandler) sendConnectPrompt(toUID string, bot *robotModel) {
 	}
 
 	displayName := h.getBotDisplayName(bot.RobotID)
-	prompt := fmt.Sprintf("📋 机器人「**%s**」的连接信息：\n\n**Bot Name:** %s  \n**Bot ID:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n📋 把下面命令发给 OpenClaw 模型执行（需先执行 /install 安装插件）：\n\n```\nnpx -y openclaw-channel-dmwork bind --bot-token %s --api-url %s --account-id %s --agent <你的agent标识>\n```\n\nagent 标识可通过 /status 查看  \n🔌 断开连接请发送 /disconnect",
+	prompt := fmt.Sprintf("📋 机器人「**%s**」的连接信息：\n\n"+
+		"**Bot Name:** %s  \n**Bot ID:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n"+
+		"📋 **把下述内容发给 OpenClaw 执行，默认绑定到当前 Session 的 Agent（需先执行 /install 安装插件）：**\n\n"+
+		"```\n"+
+		"将 DMWork bot %s 绑定到 Agent。\n"+
+		"默认绑定到当前 Session 的 Agent，agent 标识通过 /status 查看。\n"+
+		"如果用户指定了其他 Agent，使用用户指定的标识替换。\n\n"+
+		"npx -y openclaw-channel-dmwork bind --bot-token %s --api-url %s --account-id %s --agent <agent标识>\n"+
+		"```\n\n"+
+		"💡 **如需绑定到其他 Agent，修改 `--agent` 参数即可。**\n"+
+		"🔌 断开连接请发送 /disconnect",
 		displayName, displayName, bot.RobotID, bot.BotToken, apiURL,
-		bot.BotToken, apiURL, bot.RobotID)
+		bot.RobotID, bot.BotToken, apiURL, bot.RobotID)
 
 	h.reply(toUID, prompt)
 }
@@ -995,7 +1005,16 @@ func (h *commandHandler) sendCreatedPrompt(toUID string, name string, bot *robot
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	msg := fmt.Sprintf("✅ 机器人「**%s**」创建成功！\n\n**Bot Name:** %s  \n**Bot ID:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n📋 **把下述内容发给 OpenClaw 执行（未安装插件请先使用 /install）：**\n\n```\n使用以下命令将当前 agent 绑定到 DMWork bot %s：\nnpx -y openclaw-channel-dmwork bind --bot-token %s --api-url %s --account-id %s --agent <你的agent标识>\n当前 agent 标识可通过 /status 查看\n```",
+	msg := fmt.Sprintf("✅ 机器人「**%s**」创建成功！\n\n"+
+		"**Bot Name:** %s  \n**Bot ID:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n"+
+		"📋 **把下述内容发给 OpenClaw 执行，默认绑定到当前 Session 的 Agent（未安装插件请先使用 /install）：**\n\n"+
+		"```\n"+
+		"将 DMWork bot %s 绑定到 Agent。\n"+
+		"默认绑定到当前 Session 的 Agent，agent 标识通过 /status 查看。\n"+
+		"如果用户指定了其他 Agent，使用用户指定的标识替换。\n\n"+
+		"npx -y openclaw-channel-dmwork bind --bot-token %s --api-url %s --account-id %s --agent <agent标识>\n"+
+		"```\n\n"+
+		"💡 **如需绑定到其他 Agent，修改 `--agent` 参数即可。**",
 		name, name, bot.RobotID, bot.BotToken, apiURL,
 		bot.RobotID, bot.BotToken, apiURL, bot.RobotID)
 

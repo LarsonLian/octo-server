@@ -503,17 +503,150 @@ func TestAPI_Callback_IdPError_WritesZero(t *testing.T) {
 	}
 }
 
-// logout 当前 P1.2 仅返回 200。
-func TestAPI_Logout_OK(t *testing.T) {
+// fakeRevoker 内存版 rtRevoker,记录被吊销的 uid 列表。
+type fakeRevoker struct {
+	mu    sync.Mutex
+	calls []string
+	count int64
+	err   error
+}
+
+func (r *fakeRevoker) RevokeRefreshByUID(uid string) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, uid)
+	if r.err != nil {
+		return 0, r.err
+	}
+	return r.count, nil
+}
+
+// authorize 成功 → audit EventAuthorize 落库,带 IP/UA。
+// 用于风控数据面追溯 state 数 / 异常 IP 起步等指标。
+func TestAPI_Authorize_AuditsEventAuthorize(t *testing.T) {
 	mp := NewMockProvider(t)
 	o := newTestOIDC(t, mp, &fakeUserLookup{}, newFakeIdentityStore())
+	audit := newFakeAudit()
+	o.audit = audit
 	r := newTestRouter(o)
 
+	req := httptest.NewRequest("GET", "/v1/auth/oidc/aegis/authorize?authcode=ac-audit&return_to=/", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", w.Code)
+	}
+	events := audit.events()
+	foundAuth := false
+	for _, e := range events {
+		if e == EventAuthorize {
+			foundAuth = true
+		}
+	}
+	if !foundAuth {
+		t.Errorf("expected EventAuthorize in audit, got %v", events)
+	}
+}
+
+// 已登录 logout:踢全部设备 + 吊销 RT + 审计 EventLogout,返回 200。
+func TestAPI_Logout_KicksAndRevokesAndAudits(t *testing.T) {
+	mp := NewMockProvider(t)
+	o := newTestOIDC(t, mp, &fakeUserLookup{}, newFakeIdentityStore())
+	killer := &fakeKiller{}
+	revoker := &fakeRevoker{count: 2}
+	audit := newFakeAudit()
+	o.killer = killer
+	o.revoker = revoker
+	o.audit = audit
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	// 模拟 AuthMiddleware 已校验过,把 uid 写入 gin.Context
+	r.POST("/v1/auth/oidc/aegis/logout", func(c *gin.Context) {
+		c.Set("uid", "u-logout")
+		o.logout(wrapWk(c))
+	})
 	req := httptest.NewRequest("POST", "/v1/auth/oidc/aegis/logout", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
+
 	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if got := killer.snapshot(); len(got) != 1 || got[0] != "u-logout" {
+		t.Errorf("kicks = %v, want [u-logout]", got)
+	}
+	revoker.mu.Lock()
+	calls := append([]string(nil), revoker.calls...)
+	revoker.mu.Unlock()
+	if len(calls) != 1 || calls[0] != "u-logout" {
+		t.Errorf("revoke calls = %v, want [u-logout]", calls)
+	}
+	events := audit.events()
+	foundLogout := false
+	for _, e := range events {
+		if e == EventLogout {
+			foundLogout = true
+		}
+	}
+	if !foundLogout {
+		t.Errorf("expected EventLogout in audit, got %v", events)
+	}
+}
+
+// 未登录 logout:无 uid → 401,不调踢线/吊销/审计。
+func TestAPI_Logout_NoAuth_Rejected(t *testing.T) {
+	mp := NewMockProvider(t)
+	o := newTestOIDC(t, mp, &fakeUserLookup{}, newFakeIdentityStore())
+	killer := &fakeKiller{}
+	revoker := &fakeRevoker{}
+	o.killer = killer
+	o.revoker = revoker
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/v1/auth/oidc/aegis/logout", func(c *gin.Context) {
+		// 不 Set uid → 模拟未登录请求绕过 AuthMiddleware 直达 handler
+		o.logout(wrapWk(c))
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/oidc/aegis/logout", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	if len(killer.kicks) != 0 || len(revoker.calls) != 0 {
+		t.Errorf("unauthenticated logout must not call killer/revoker; kicks=%v calls=%v",
+			killer.kicks, revoker.calls)
+	}
+}
+
+// 踢线 / 吊销失败时仍返 200 + 写审计。
+// 客户端关心的是"我点了登出,本地状态已清",失败由 SyncWorker 兜底。
+func TestAPI_Logout_KickerFailureStillReturnsOK(t *testing.T) {
+	mp := NewMockProvider(t)
+	o := newTestOIDC(t, mp, &fakeUserLookup{}, newFakeIdentityStore())
+	o.killer = &fakeKiller{err: errors.New("imd down")}
+	o.revoker = &fakeRevoker{err: errors.New("db down")}
+	audit := newFakeAudit()
+	o.audit = audit
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/v1/auth/oidc/aegis/logout", func(c *gin.Context) {
+		c.Set("uid", "u-resilient")
+		o.logout(wrapWk(c))
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/oidc/aegis/logout", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (best-effort)", w.Code)
+	}
+	if len(audit.events()) == 0 {
+		t.Errorf("audit must record logout even on downstream failures")
 	}
 }
 

@@ -109,28 +109,6 @@ func (d *DB) QueryRefreshByHash(hash string) (*RefreshModel, error) {
 	return m, nil
 }
 
-// QueryRefreshDueForSync 拉取需要刷新的 RT(未吊销 + 即将过期或最久未刷新)
-//
-// 当前 ORDER BY COALESCE(last_refreshed_at, created_at) 无覆盖索引,小数据量
-// 下 filesort 可接受。当 active RT 行数明显增长后(P1.3 上线后量化),按需添加
-// idx_sync_order(revoked_at, last_refreshed_at, created_at) 复合索引,或在
-// 应用层缓存 cursor 做增量轮询。本期 scaffold 不预先下注。
-func (d *DB) QueryRefreshDueForSync(limit int) ([]*RefreshModel, error) {
-	if limit <= 0 {
-		// 防御负数 / 零:负数 uint64 转换会得到极大值导致全表扫描
-		return nil, nil
-	}
-	var list []*RefreshModel
-	if _, err := d.session.Select("*").From("user_oidc_refresh").
-		Where("revoked_at IS NULL AND expires_at > ?", time.Now()).
-		OrderAsc("COALESCE(last_refreshed_at, created_at)").
-		Limit(uint64(limit)).
-		Load(&list); err != nil {
-		return nil, fmt.Errorf("oidc: query refresh due for sync: %w", err)
-	}
-	return list, nil
-}
-
 // InsertRefresh 新增 RT
 func (d *DB) InsertRefresh(m *RefreshModel) error {
 	if err := insertRefreshRow(d.session.InsertBySql, m); err != nil {
@@ -139,18 +117,21 @@ func (d *DB) InsertRefresh(m *RefreshModel) error {
 	return nil
 }
 
-// MarkRefreshRevoked 标记吊销
+// MarkRefreshRevoked 标记吊销,返回真正改动的行数(0 表示已被其他 worker 抢先吊销)。
 //
-// 幂等语义:对已吊销的 id 再次调用不报错(WHERE 加 revoked_at IS NULL 过滤),
-// 与 logout / 异常清理路径的"多次调用"诉求一致。需要严格"是否真正吊销"语义
-// 的并发竞态检测见 RotateRefresh + ErrAlreadyRevoked。
-func (d *DB) MarkRefreshRevoked(id int64) error {
-	if _, err := d.session.Update("user_oidc_refresh").
+// 幂等语义保留:对已吊销的 id 再次调用不报错。返回 rowsAffected 是为了让多实例
+// SyncWorker 区分"我刚把 RT 吊销了"(=1)与"别人抢先一步"(=0)—— 后者表示
+// 当前 invalid_grant 只是 IdP 端 RT 旋转后的副产品(其他实例已成功 rotate),
+// 不应踢用户,否则会出现"两实例同时跑就乱踢"的假阳性。
+func (d *DB) MarkRefreshRevoked(id int64) (int64, error) {
+	res, err := d.session.Update("user_oidc_refresh").
 		Set("revoked_at", time.Now()).
-		Where("id=? AND revoked_at IS NULL", id).Exec(); err != nil {
-		return fmt.Errorf("oidc: mark refresh revoked id=%d: %w", id, err)
+		Where("id=? AND revoked_at IS NULL", id).Exec()
+	if err != nil {
+		return 0, fmt.Errorf("oidc: mark refresh revoked id=%d: %w", id, err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // RotateRefresh 用新 RT 替换旧 RT(成功刷新后调用)
@@ -199,6 +180,63 @@ func insertRefreshRow(insert insertBySql, m *RefreshModel) error {
 		m.IdentityID, m.TokenHash, m.TokenCiphertext, m.ExpiresAt,
 	).Exec()
 	return err
+}
+
+// DueRefreshes 拉一批待刷新 RT,JOIN identity 把 uid 一并取出 —— invalid_grant
+// 时 worker 直接拿 uid 调踢线,不需要再查一次 identity 表。
+//
+// 排序:最久未刷新的优先(`COALESCE(last_refreshed_at, created_at)`)。
+//
+// 索引提示:`COALESCE(...)` 上无 B-tree 索引,filesort 在小数据量(P0 上线初期
+// 预计 < 1k active RT)可接受。RT 量明显增长(>10k)后,按需:
+//   1. 加复合索引 `(revoked_at, last_refreshed_at, created_at)` 让 WHERE +
+//      ORDER BY 局部覆盖;或
+//   2. 改成应用层维护"下次该刷新时间"列(避免 COALESCE),用单列索引兜住。
+// JOIN 到 identity 走主键,负担可忽略。
+func (d *DB) DueRefreshes(limit int) ([]*DueRefresh, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	var list []*DueRefresh
+	if _, err := d.session.SelectBySql(`
+		SELECT r.id, r.identity_id, i.uid,
+		       r.token_ciphertext, r.expires_at
+		FROM user_oidc_refresh r
+		JOIN user_oidc_identity i ON i.id = r.identity_id
+		WHERE r.revoked_at IS NULL AND r.expires_at > ?
+		ORDER BY COALESCE(r.last_refreshed_at, r.created_at) ASC
+		LIMIT ?`,
+		time.Now(), limit,
+	).Load(&list); err != nil {
+		return nil, fmt.Errorf("oidc: due refreshes: %w", err)
+	}
+	return list, nil
+}
+
+// RevokeRefreshByUID 把 uid 名下所有未吊销 RT 标记吊销(logout 用)。
+//
+// 两步走是因为 dbr 的 Update builder 不支持 JOIN;先查 identity_id 再批量 IN。
+// 没有 identity 行时直接返回 0,不触发空 IN(...) 子句。
+func (d *DB) RevokeRefreshByUID(uid string) (int64, error) {
+	if uid == "" {
+		return 0, nil
+	}
+	var ids []int64
+	if _, err := d.session.Select("id").From("user_oidc_identity").
+		Where("uid=?", uid).Load(&ids); err != nil {
+		return 0, fmt.Errorf("oidc: query identities by uid=%q: %w", uid, err)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res, err := d.session.Update("user_oidc_refresh").
+		Set("revoked_at", time.Now()).
+		Where("revoked_at IS NULL AND identity_id IN ?", ids).Exec()
+	if err != nil {
+		return 0, fmt.Errorf("oidc: revoke refresh by uid=%q: %w", uid, err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // ---------- 跨模块只读查询 ----------

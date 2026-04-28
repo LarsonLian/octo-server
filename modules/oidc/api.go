@@ -48,6 +48,12 @@ type auditWriter interface {
 	InsertAudit(m *AuditModel) error
 }
 
+// rtRevoker logout / 状态同步路径上对 RT 的批量吊销抽象。
+// 生产实现是 *DB,测试可注入内存 fake 断言调用。
+type rtRevoker interface {
+	RevokeRefreshByUID(uid string) (int64, error)
+}
+
 // OIDC OIDC 登录模块。
 //
 // 字段全部包内可见:测试在 New 后可替换 stateStore / authcode 为内存实现。
@@ -63,6 +69,10 @@ type OIDC struct {
 	stateStore StateStore
 	authcode   authcodeWriter
 	audit      auditWriter
+	killer     sessionKiller
+	revoker    rtRevoker
+	worker     *SyncWorker
+	tickLock   *RedisTickLock
 }
 
 // New 构造 OIDC 模块(生产路径)。
@@ -89,6 +99,8 @@ func New(ctx *config.Context) *OIDC {
 	o.stateStore = newRedisStateStore(ctx)
 	o.authcode = redisAuthcode{ctx: ctx}
 	o.audit = db
+	o.revoker = db
+	o.killer = ctxKiller{ctx: ctx}
 
 	cctx, cancel := context.WithTimeout(context.Background(), cfg.Aegis.HTTPTimeout)
 	defer cancel()
@@ -131,21 +143,44 @@ func (o *OIDC) Init() error {
 		return fmt.Errorf("oidc: Init: expected user.IService, got %T", raw)
 	}
 	o.service = newService(o.cfg.Aegis, o.store, newUserAdapter(userSvc, o.db))
+
+	// SyncWorker:Aegis 侧账号状态变更(封号/改密/登出)→ DMWork 主动感知。
+	// Interval=0 视为禁用,适合本地开发 / DB 还没准备好 RT 行的早期阶段。
+	if o.cfg.Aegis.SyncInterval > 0 && o.db != nil && o.killer != nil {
+		enc, err := NewEncryptor(o.cfg.Aegis.RefreshTokenEncryptionKey)
+		if err != nil {
+			return fmt.Errorf("oidc: Init: encryptor: %w", err)
+		}
+		// 注入 Redis tick lock:多实例同 tick 只一个跑,IdP 流量降到 1/N。
+		o.tickLock = newRedisTickLock(o.ctx)
+		o.worker = NewSyncWorker(SyncWorkerConfig{
+			Interval:    o.cfg.Aegis.SyncInterval,
+			Concurrency: o.cfg.Aegis.SyncConcurrency,
+		}, o.db, enc, clientRefresher{c: o.client}, o.killer, o.audit, o.tickLock)
+		o.worker.Start(context.Background())
+	}
 	return nil
 }
 
 // Route 路由注册。Enabled=false 时所有端点返回 404,避免漏配置静默通过。
+//
+// authorize/callback 是公开端点(IdP 重定向到 callback 时不带 dmwork token);
+// logout 必须 AuthMiddleware 校验后拿 uid 才能踢线 + 吊销 RT,所以单独分组。
 func (o *OIDC) Route(r *wkhttp.WKHttp) {
-	g := r.Group("/v1/auth/oidc/aegis")
+	pub := r.Group("/v1/auth/oidc/aegis")
 	if o.cfg == nil || !o.cfg.Enabled {
-		g.GET("/authorize", o.disabled)
-		g.GET("/callback", o.disabled)
-		g.POST("/logout", o.disabled)
+		// disabled 路径三个端点都返 404,所以 logout 挂在 pub 而非 authed 没有
+		// 安全影响 —— 不挂 AuthMiddleware 反而避免在 OIDC 关闭时给 /logout 引入
+		// 跨模块的 token 校验依赖,行为更"完全关闭"。
+		pub.GET("/authorize", o.disabled)
+		pub.GET("/callback", o.disabled)
+		pub.POST("/logout", o.disabled)
 		return
 	}
-	g.GET("/authorize", o.authorize)
-	g.GET("/callback", o.callback)
-	g.POST("/logout", o.logout)
+	pub.GET("/authorize", o.authorize)
+	pub.GET("/callback", o.callback)
+	authed := r.Group("/v1/auth/oidc/aegis", o.ctx.AuthMiddleware(r))
+	authed.POST("/logout", o.logout)
 }
 
 func (o *OIDC) disabled(c *wkhttp.Context) {
@@ -214,6 +249,9 @@ func (o *OIDC) authorize(c *wkhttp.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, errMsg(err.Error()))
 		return
 	}
+	// EventAuthorize 不携带 uid(此时尚未拿到 IdP claims),仅用于审计统计:
+	// state 数 / 异常 ip 高频起步 / authcode 复用 等运维向问题。
+	o.writeAudit("", EventAuthorize, sd, "")
 	c.Redirect(http.StatusFound, authURL)
 }
 
@@ -435,12 +473,22 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 	o.redirectAfterCallback(c, sd, false)
 }
 
-// Close 释放 OIDC 模块持有的资源(目前只有 redisStateStore 的独立连接池)。
+// Close 释放 OIDC 模块持有的资源(redisStateStore 连接池 + SyncWorker goroutine)。
 //
 // 注册到 register.Module.Stop,框架优雅退出时调用。可被多次调用(幂等):
 //   - New() 内 Discovery 失败会调一次清理 stateStore
 //   - 之后 framework shutdown 又会调一次,此时 stateStore 已 nil,早返回
 func (o *OIDC) Close() error {
+	if o.worker != nil {
+		o.worker.Stop()
+		o.worker = nil
+	}
+	if o.tickLock != nil {
+		if err := o.tickLock.Close(); err != nil {
+			o.Error("关闭 OIDC sync tick lock 失败", zap.Error(err))
+		}
+		o.tickLock = nil
+	}
 	if o.stateStore == nil {
 		return nil
 	}
@@ -450,11 +498,36 @@ func (o *OIDC) Close() error {
 	return nil
 }
 
-// logout 撤销本地登录态。
+// logout 撤销本地登录态:踢全部设备 + 吊销该 UID 名下所有未吊销 RT + 审计。
 //
-// P1.2 范围:仅返回 200,IdP 端登出由前端按需调 IdP 的 /end_session。
-// 后续 P1.3 SyncWorker 上线后,这里会同步把对应 RT 标记吊销。
+// 前置条件:路由已挂 AuthMiddleware,c.GetLoginUID() 有值。无 uid 视为未登录。
+// 任何步骤失败都按"尽力而为"处理:踢线失败仍尝试吊销 RT,反之亦然,最终都返 200。
+// 理由:logout 客户端关心的是"我点了登出,本地已清空状态",对幂等性要求高于完美吊销。
+// 真正的兜底由 SyncWorker 的下次轮询补足(refresh 失败也会触发踢线)。
+//
+// IdP 端 RP-Initiated Logout(/end_session)由前端按需调用,后端不代理:
+// id_token_hint 在前端容易拿到,且跨域跳转更适合浏览器层面发起。
 func (o *OIDC) logout(c *wkhttp.Context) {
+	uid := c.GetLoginUID()
+	if uid == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, errMsg("login required"))
+		return
+	}
+	ctx := c.Request.Context()
+	if o.killer != nil {
+		if err := o.killer.Kick(ctx, uid); err != nil {
+			o.Error("OIDC logout 踢线失败", zap.Error(err), zap.String("uid", uid))
+		}
+	}
+	if o.revoker != nil {
+		if _, err := o.revoker.RevokeRefreshByUID(uid); err != nil {
+			o.Error("OIDC logout 吊销 RT 失败", zap.Error(err), zap.String("uid", uid))
+		}
+	}
+	o.writeAudit(uid, EventLogout, &StateData{
+		IP:        util.GetClientPublicIP(c.Request),
+		UserAgent: c.Request.UserAgent(),
+	}, "")
 	c.JSON(http.StatusOK, map[string]interface{}{"status": 200})
 }
 
@@ -620,6 +693,15 @@ func (r redisAuthcode) SetAuthcode(ctx context.Context, authcode, payload string
 	case <-timer.C:
 		return fmt.Errorf("oidc: SetAuthcode timeout after %s", timeout)
 	}
+}
+
+// ctxKiller 生产路径下的 sessionKiller 实现 —— 委托给 dmwork-lib 的
+// QuitUserDevice(uid, -1):内部统一删 token Redis + 用新 token 重签 IM,
+// WuKongIM 老连接的 transport 验证失败后自然断开,达成"踢全部设备"。
+type ctxKiller struct{ ctx *config.Context }
+
+func (k ctxKiller) Kick(_ context.Context, uid string) error {
+	return k.ctx.QuitUserDevice(uid, -1)
 }
 
 func maskEmail(email string) string {

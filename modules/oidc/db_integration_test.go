@@ -201,14 +201,109 @@ func TestDB_MarkRefreshRevoked_Idempotent_Integration(t *testing.T) {
 	rt, err := d.QueryRefreshByHash("h-rev")
 	require.NoError(t, err)
 
-	// 第一次标记吊销
-	require.NoError(t, d.MarkRefreshRevoked(rt.Id))
+	// 第一次标记吊销:rowsAffected=1
+	n1, err := d.MarkRefreshRevoked(rt.Id)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n1, "first revoke should affect 1 row")
+
 	got, err := d.QueryRefreshByHash("h-rev")
 	require.NoError(t, err)
 	require.NotNil(t, got.RevokedAt)
 
-	// 第二次幂等不报错
-	require.NoError(t, d.MarkRefreshRevoked(rt.Id))
+	// 第二次幂等不报错,但 rowsAffected=0 —— 多实例竞态检测的关键信号
+	n2, err := d.MarkRefreshRevoked(rt.Id)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, n2, "second revoke must report 0 rows for race detection")
+}
+
+func TestDB_DueRefreshes_JoinsUID_Integration(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	d := NewDB(ctx)
+
+	require.NoError(t, d.InsertIdentity(&IdentityModel{
+		UID: "u-due", Issuer: "https://aegis", Subject: "sub-due", LinkedAt: time.Now(),
+	}))
+	idRow, err := d.QueryIdentityByIssuerSubject("https://aegis", "sub-due")
+	require.NoError(t, err)
+	require.NoError(t, d.InsertRefresh(&RefreshModel{
+		IdentityID: idRow.Id, TokenHash: "h-due",
+		TokenCiphertext: []byte("ct-due"),
+		ExpiresAt:       time.Now().Add(time.Hour),
+	}))
+	// 已 revoked 的不该出现
+	rev := &RefreshModel{
+		IdentityID: idRow.Id, TokenHash: "h-rev",
+		TokenCiphertext: []byte("ct-rev"),
+		ExpiresAt:       time.Now().Add(time.Hour),
+	}
+	require.NoError(t, d.InsertRefresh(rev))
+	got, err := d.QueryRefreshByHash("h-rev")
+	require.NoError(t, err)
+	_, err = d.MarkRefreshRevoked(got.Id)
+	require.NoError(t, err)
+
+	due, err := d.DueRefreshes(10)
+	require.NoError(t, err)
+	require.Len(t, due, 1)
+	assert.Equal(t, "u-due", due[0].UID)
+	assert.Equal(t, idRow.Id, due[0].IdentityID)
+	assert.Equal(t, []byte("ct-due"), due[0].TokenCiphertext)
+}
+
+func TestDB_RevokeRefreshByUID_Integration(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	d := NewDB(ctx)
+
+	// 一个 uid 绑两个 issuer,各一个 RT,RevokeRefreshByUID 应同时吊销两条
+	require.NoError(t, d.InsertIdentity(&IdentityModel{
+		UID: "u-out", Issuer: "https://aegis", Subject: "sub-1", LinkedAt: time.Now(),
+	}))
+	require.NoError(t, d.InsertIdentity(&IdentityModel{
+		UID: "u-out", Issuer: "https://google", Subject: "sub-2", LinkedAt: time.Now(),
+	}))
+	rows, err := d.QueryIdentitiesByUID("u-out")
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	for i, ir := range rows {
+		require.NoError(t, d.InsertRefresh(&RefreshModel{
+			IdentityID:      ir.Id,
+			TokenHash:       "h-out-" + string(rune('a'+i)),
+			TokenCiphertext: []byte("ct"),
+			ExpiresAt:       time.Now().Add(time.Hour),
+		}))
+	}
+	// 另一个 uid 的 RT 不该被波及
+	require.NoError(t, d.InsertIdentity(&IdentityModel{
+		UID: "u-bystander", Issuer: "https://aegis", Subject: "sub-bys", LinkedAt: time.Now(),
+	}))
+	bys, err := d.QueryIdentityByIssuerSubject("https://aegis", "sub-bys")
+	require.NoError(t, err)
+	require.NoError(t, d.InsertRefresh(&RefreshModel{
+		IdentityID: bys.Id, TokenHash: "h-bys",
+		TokenCiphertext: []byte("ct-bys"),
+		ExpiresAt:       time.Now().Add(time.Hour),
+	}))
+
+	n, err := d.RevokeRefreshByUID("u-out")
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, n)
+
+	// 旁观者仍 active
+	bysRT, err := d.QueryRefreshByHash("h-bys")
+	require.NoError(t, err)
+	assert.Nil(t, bysRT.RevokedAt)
+
+	// 再 revoke 一次幂等(已吊销不计)
+	n2, err := d.RevokeRefreshByUID("u-out")
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, n2)
+
+	// 不存在的 uid 返回 0,无副作用
+	n3, err := d.RevokeRefreshByUID("u-noexist")
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, n3)
 }
 
 func TestDB_InsertAudit_Integration(t *testing.T) {

@@ -172,15 +172,6 @@ func (u *User) emailRegister(c *wkhttp.Context) {
 		return
 	}
 	c.Response(result)
-
-	// 新注册用户自动加入默认 Space
-	_, _ = u.db.session.InsertBySql(
-		"INSERT IGNORE INTO space_member (space_id, uid, role, status, created_at, updated_at) VALUES (?, ?, 0, 1, NOW(), NOW())",
-		"minglue_default", uid,
-	).Exec()
-
-	// 触发 SpaceMemberJoin 事件，让 BotFather 发送 Space 感知的欢迎消息
-	go u.fireSpaceMemberJoinEvent(uid, "minglue_default")
 }
 
 // emailLogin 邮箱登录（验证码方式）

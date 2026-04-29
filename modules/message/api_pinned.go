@@ -608,6 +608,12 @@ func (m *Message) syncPinnedMessage(c *wkhttp.Context) {
 		list = append(list, msgResp)
 	}
 
+	// YUJ-98 / YUJ-101: 置顶消息同步路径同样回填 msg-level 外部来源字段，
+	// 保持与 /message/channel/sync 的外部标识口径一致。
+	if req.ChannelType == common.ChannelTypeGroup.Uint8() {
+		m.enrichExternalMarkers(req.ChannelID, list)
+	}
+
 	for _, msg := range pinnedMsgs {
 		messageUserExtra := messageUserExtraMap[msg.MessageId]
 		if messageUserExtra != nil && messageUserExtra.MessageIsDeleted == 1 {

@@ -646,6 +646,13 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	// ---------- 子区 source_message_id ----------
 	co.fillThreadMeta(syncUserConversationResps)
 
+	// YUJ-98 / YUJ-101: 会话同步 Recents 里的群消息同样需要回填
+	// msg-level 外部来源字段（from_is_external / from_source_space_name /
+	// from_home_space_id / from_home_space_name），
+	// 保持与 /message/channel/sync 的字段口径一致，
+	// 避免前端 fromHomeSpaceId / fromIsExternal getter 在增量同步路径读到空值。
+	co.enrichConversationExternalMarkers(syncUserConversationResps)
+
 	// 查询通话中的频道
 	// 加入的群聊
 	joinedGroups, err := co.groupService.GetGroupsWithMemberUID(loginUID)
@@ -1362,5 +1369,38 @@ func (co *Conversation) fillThreadMeta(resps []*SyncUserConversationResp) {
 				MessageCount:    meta.MessageCount,
 			}
 		}
+	}
+}
+
+// enrichConversationExternalMarkers 为会话同步 Recents 中的群消息回填
+// msg-level 外部来源字段（YUJ-98 / YUJ-101）。
+//
+// 口径与 /message/channel/sync 保持一致：
+//   - from_is_external / from_source_space_name（发送者视角）
+//   - from_home_space_id / from_home_space_name（视角相对渲染 / YUJ-63）
+//   - mergeforward content.users 元素的 is_external / source_space_name / home_space_*
+//
+// 每个群最多一条 DB 查询，遇到错误降级跳过（不让前端主流程崩掉）。
+// 非群会话（ChannelTypePerson / thread / visitor）直接跳过——这些路径当前没有
+// 多 Space 外部成员语义。
+func (co *Conversation) enrichConversationExternalMarkers(resps []*SyncUserConversationResp) {
+	if len(resps) == 0 {
+		return
+	}
+	for _, resp := range resps {
+		if resp == nil || len(resp.Recents) == 0 {
+			continue
+		}
+		if resp.ChannelType != common.ChannelTypeGroup.Uint8() {
+			continue
+		}
+		markers, err := co.groupService.GetMemberExternalMarkers(resp.ChannelID)
+		if err != nil {
+			co.Error("查询群成员外部来源标识失败",
+				zap.Error(err),
+				zap.String("group_no", resp.ChannelID))
+			continue
+		}
+		applyExternalMarkers(resp.Recents, markers)
 	}
 }

@@ -1404,6 +1404,13 @@ func (m *Message) sync(c *wkhttp.Context) {
 		respVos = append(respVos, respVo)
 	}
 
+	// YUJ-98 / YUJ-101: 群消息同步路径同样需要回填 msg-level 外部来源字段，
+	// 让前端 fromHomeSpaceId / fromHomeSpaceName / fromIsExternal / fromSourceSpaceName
+	// getter 在本路径也能拿到值。与 /message/channel/sync 保持一致。
+	if req.ChannelType == common.ChannelTypeGroup.Uint8() {
+		m.enrichExternalMarkers(req.ChannelID, respVos)
+	}
+
 	c.JSON(http.StatusOK, respVos)
 }
 

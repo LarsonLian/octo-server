@@ -3871,33 +3871,60 @@ func (g *Group) groupInviteDetail(c *wkhttp.Context) {
 		return
 	}
 
+	// YUJ-39: 可选鉴权。本端点不挂 AuthMiddleware（面向公开 H5 落地页），
+	// 但如果请求带了合法 token，我们也要把登录态吃下来，让 Space 内部成员
+	// 看到 joinable 而不是 external_blocked（否则 PR#1174 对 authorize 的
+	// 放行修复在 UI 层被 detail 的 external_blocked 按钮隐藏所抵消，
+	// 同 Space 成员根本看不到「加入群聊」按钮）。
+	// 无 token / token 无效 / 解析失败 → loginUID="" → 行为严格对齐既有公开
+	// 预览路径，不破坏未登录访问者的 external_blocked 硬拦截语义。
+	var loginUID string
+	if token := strings.TrimSpace(c.GetHeader("token")); token != "" {
+		uidAndName, cacheErr := g.ctx.Cache().Get(g.ctx.GetConfig().Cache.TokenCachePrefix + token)
+		if cacheErr == nil && strings.TrimSpace(uidAndName) != "" {
+			// AuthMiddleware 的 token value 约定：uid@name[@role]，和
+			// pkg/wkhttp/http.go 的 AuthMiddleware 解析一致，这里只取 uid。
+			parts := strings.SplitN(uidAndName, "@", 3)
+			if len(parts) >= 2 {
+				loginUID = parts[0]
+			}
+		}
+	}
+
+	// 只对真实挂 Space 的群做一次成员校验；校验失败降级为 !inSameSpace，
+	// 等价于"跨 Space 访问者"，保持外部拦截语义的安全默认值。
+	inSameSpace := false
+	if groupModel.SpaceID != "" && loginUID != "" {
+		inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), groupModel.SpaceID, loginUID)
+		if checkErr != nil {
+			g.Warn("检查 Space 成员失败", zap.Error(checkErr), zap.String("group_no", groupNo))
+		} else {
+			inSameSpace = inSpace
+		}
+	}
+
 	// 3/4. invite=1 -> invite_required；否则 joinable
-	// 5. 群属于某 Space 且 allow_external=0 -> external_blocked（优先级高于
-	//    joinable / invite_required，因为这是更强的硬拦截：外部用户根本不可能入群，
-	//    让 H5 落地页直接给出明确提示，避免点了「加入群聊」再被 groupScanJoin 拒绝）。
+	// 5. 群属于某 Space 且 allow_external=0 且访问者不是该 Space 成员
+	//    -> external_blocked（优先级高于 joinable / invite_required，
+	//    因为这是更强的硬拦截：外部用户根本不可能入群，让 H5 落地页直接给出
+	//    明确提示，避免点了「加入群聊」再被 groupScanJoin 拒绝）。
+	//    同 Space 成员保留 joinable/invite_required 状态，和 groupInviteAuthorize
+	//    的放行路径对齐（PR#1174 / YUJ-38 fix）。
 	status := groupInviteStatusJoinable
 	if groupModel.Invite == 1 {
 		status = groupInviteStatusInviteRequired
 	}
-	if groupModel.SpaceID != "" && groupModel.AllowExternal == 0 {
+	if groupModel.SpaceID != "" && groupModel.AllowExternal == 0 && !inSameSpace {
 		status = groupInviteStatusExternalBlocked
 	}
 
 	// YUJ-168 / GH #1243: 为公开 H5 landing 提供信任锚点字段。
 	// - space_name 始终下发（前端判断非空才渲染"来自 xx"）。
-	// - is_external：公开接口场景下，如果访问者带着合法 token 经过可选登录态也会
-	//   通过 c.GetLoginUID() 拿到；未登录访问者 loginUID=="" → is_external=0，
-	//   前端不渲染"外部"徽标，仅保留 space_name 文案。
+	// - is_external：0=未登录 / 同 Space 成员（内部视角），1=跨 Space 登录者。
 	spaceName, _ := spacepkg.GetSpaceName(g.ctx.DB(), groupModel.SpaceID)
 	isExternal := 0
-	loginUID := c.GetLoginUID()
-	if groupModel.SpaceID != "" && loginUID != "" {
-		inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), groupModel.SpaceID, loginUID)
-		if checkErr != nil {
-			g.Warn("检查 Space 成员失败", zap.Error(checkErr), zap.String("group_no", groupNo))
-		} else if !inSpace {
-			isExternal = 1
-		}
+	if groupModel.SpaceID != "" && loginUID != "" && !inSameSpace {
+		isExternal = 1
 	}
 
 	c.Response(gin.H{

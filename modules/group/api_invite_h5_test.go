@@ -386,6 +386,34 @@ func TestGroupInvitePage_ContainsJoinButton(t *testing.T) {
 	assert.True(t, strings.Contains(body, "/scanjoin"))
 }
 
+// Mininglamp-OSS/octo-server#1246: 移动端两端均未注册 dmwork:// scheme，
+// H5 落地页上的「打开 App」深链按钮是死链，点击会弹错 / 被微信 block。
+// 方案 C 是最小改动——删按钮 + 删绑定 href 的 JS，所以用 grep 测试把
+// 这两个字面量钉死：任何人再把按钮加回来都会挂 CI。
+func TestGroupInvitePage_NoDmworkScheme(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	_ = New(ctx)
+
+	wd, err := os.Getwd()
+	assert.NoError(t, err)
+	if err := os.Chdir("../.."); err != nil {
+		t.Fatalf("chdir to repo root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	w := httptest.NewRecorder()
+	s.GetRoute().ServeHTTP(w, newInviteRequest(t, "/v1/group/invite?code=no-dmwork-scheme-check"))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.NotContains(t, body, "dmwork://",
+		"group_invite.html 不应再包含 dmwork:// 深链（两端均未注册该 scheme，点击会弹错）")
+	assert.NotContains(t, body, `id="btn-open"`,
+		"group_invite.html 不应再包含 btn-open 按钮（死链）")
+	assert.NotContains(t, body, "打开 App",
+		"group_invite.html 不应再包含「打开 App」按钮文案")
+}
+
 // authorize 必须挂 per-UID 限流（SharedUIDRateLimiter）：每次调用会往 Redis 写
 // TTL=30min 的 auth_code，登录用户可能高频批量调用灌满 Redis。契约测试只断言
 // 中间件已挂载（X-RateLimit-Scope: uid），不验证具体 rps/burst 数值——

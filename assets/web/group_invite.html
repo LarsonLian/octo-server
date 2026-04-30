@@ -58,7 +58,6 @@
             </div>
             <div class="btn-group">
                 <button class="btn btn-primary" id="btn-join" style="display:none">加入群聊</button>
-                <a class="btn btn-primary" id="btn-open" href="#">打开 App</a>
                 <a class="btn btn-secondary" id="btn-download" href="#" target="_blank" rel="noopener">下载 App</a>
             </div>
         </div>
@@ -189,7 +188,7 @@ function renderInfo(data) {
     if (data.avatar) {
         document.getElementById("v-avatar").src = API_BASE + "/v1/" + data.avatar;
     }
-    // 邀请确认开启时，禁用「打开 App」按钮，提示在 App 内由管理员审批
+    // 邀请确认开启时，在落地页展示「需管理员审批」徽标，提示用户在 App 内走审批流
     if (data.status === "invite_required") {
         var badge = document.getElementById("v-badge");
         badge.textContent = "需管理员审批";
@@ -198,9 +197,6 @@ function renderInfo(data) {
         tip.textContent = "该群已开启邀请确认，请在 App 内由管理员审批后入群。";
         tip.style.display = "block";
     }
-    // 「打开 App」走深链：App 注册 dmwork:// scheme 后由系统拉起
-    var openBtn = document.getElementById("btn-open");
-    openBtn.href = "dmwork://group/invite?code=" + encodeURIComponent(code);
     // 「下载 App」回退到产品官网（无独立配置时复用 BaseURL）
     document.getElementById("btn-download").href = API_BASE;
 

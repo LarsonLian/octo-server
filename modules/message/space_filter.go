@@ -224,6 +224,64 @@ func personConvHasSpaceMessages(conv *SyncUserConversationResp, targetSpaceID st
 	return false
 }
 
+// EnsureSystemBotsPresent 保证 Space-scoped sync 响应中一定包含系统 Bot
+// （目前 botfather / u_10000 / fileHelper）的 conversation entry。
+//
+// 背景 (YUJ-216 / GH#1280)：
+//   - POST /v1/conversation/sync 带 X-Space-ID 时，IM 核心只会返回自
+//     `version` 之后有新消息的 conversation。系统 Bot 若没有新消息就不会
+//     出现在增量响应中，经 Space 过滤后客户端也拿不到。移动端没有 Web
+//     那样的前端兜底，就会导致用户在某些 Space 下"消失"了 botfather 私聊。
+//   - 修复策略：只要调用方开启了 Space 过滤，就在最终响应中显式补齐每一个
+//     系统 Bot 的 entry。已经存在的 entry（有真实 Recents）保持不变；缺席的
+//     以最小占位形式注入，兼容老客户端。
+//
+// 占位 entry 的字段原则：
+//   - ChannelID / ChannelType：对齐 Person DM；
+//   - SpaceID: 空串 —— 系统 Bot 不属于任何 Space；
+//   - Recents / LastMsgSeq / Unread / Version / Timestamp 保持零值，避免
+//     客户端误以为有新消息或错把占位写回 ack；
+//   - 其他字段沿用结构体默认值，等价于"已知此频道、无新内容"。
+//
+// 不影响消息级 space_id 过滤：本函数只补 conversation-level 占位，
+// 对 Recents 内 payload.space_id 字段不做任何修改。
+func EnsureSystemBotsPresent(conversations []*SyncUserConversationResp) []*SyncUserConversationResp {
+	systemBots := spacepkg.SystemBotList()
+	if len(systemBots) == 0 {
+		return conversations
+	}
+
+	present := make(map[string]bool, len(conversations))
+	for _, conv := range conversations {
+		if conv == nil {
+			continue
+		}
+		if conv.ChannelType == common.ChannelTypePerson.Uint8() && spacepkg.IsSystemBot(conv.ChannelID) {
+			present[conv.ChannelID] = true
+		}
+	}
+
+	for _, uid := range systemBots {
+		if present[uid] {
+			continue
+		}
+		conversations = append(conversations, newSystemBotPlaceholder(uid))
+	}
+	return conversations
+}
+
+// newSystemBotPlaceholder 构造一个空的 Person 会话占位，字段口径与
+// newSyncUserConversationResp 生成的真实会话保持一致，避免新老客户端解码
+// 差异。Recents 明确初始化为空切片，保证 JSON 序列化为 `[]` 而非 `null`。
+func newSystemBotPlaceholder(uid string) *SyncUserConversationResp {
+	return &SyncUserConversationResp{
+		ChannelID:   uid,
+		ChannelType: common.ChannelTypePerson.Uint8(),
+		SpaceID:     "",
+		Recents:     []*MsgSyncResp{},
+	}
+}
+
 // resolveBotFilter 批量查询 Bot 状态和 Space 成员关系。
 // 返回 botSet（哪些 UID 是 Bot）、botInSpace（哪些 Bot 在 filterSpaceID 中）、skipBotFilter（DB 错误时为 true）。
 func resolveBotFilter(ctx *config.Context, filterSpaceID string, bareDMUIDs []string) (botSet map[string]bool, botInSpace map[string]bool, skipBotFilter bool) {

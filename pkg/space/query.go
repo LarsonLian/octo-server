@@ -1,14 +1,47 @@
 package space
 
 import (
+	"sort"
+
 	"github.com/gocraft/dbr/v2"
 )
 
 // SystemBots 是所有 Space 都可见的系统级 Bot UID。
+//
+// 关键场景 (YUJ-216 / GH#1280)：
+//   - 会话同步（POST /v1/conversation/sync）带 X-Space-ID 时，按 Space 过滤
+//     普通会话。系统 Bot（botfather 等）与 Space 无关，必须始终对客户端可见，
+//     哪怕用户在当前 Space 下尚未与 Bot 产生任何消息（首次进入 Space、
+//     本地缓存丢失等）。Web 端在前端做兜底，移动端没有，所以后端
+//     需要在 sync 响应中保底注入 SystemBot entry。
+//   - 目前系统 Bot 固定为 {botfather, u_10000, fileHelper}。未来加入
+//     BUILDER/ADMIN bot 时，只需在此 map 中追加，或改为从配置加载。
+//     对外接口通过 SystemBotList() 暴露，便于统一遍历。
 var SystemBots = map[string]bool{
 	"botfather":  true,
 	"u_10000":    true,
 	"fileHelper": true,
+}
+
+// SystemBotList 以稳定顺序返回所有系统 Bot UID。
+//
+// 稳定顺序有两个价值：
+//  1. sync 响应里保底注入 SystemBot entry 时，保证跨请求顺序一致，
+//     方便客户端/测试做幂等比对。
+//  2. 未来系统 Bot 列表改为配置驱动时，调用方无需感知底层容器类型。
+func SystemBotList() []string {
+	uids := make([]string, 0, len(SystemBots))
+	for uid := range SystemBots {
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	return uids
+}
+
+// IsSystemBot 判断 UID 是否为系统 Bot。语义等价于 SystemBots[uid]，
+// 提供函数版本是为将来切换到配置/DB 后不破坏调用方签名。
+func IsSystemBot(uid string) bool {
+	return SystemBots[uid]
 }
 
 // GetBotUIDs 从给定 UID 列表中查询哪些是 Bot（robot=1），排除系统 Bot。

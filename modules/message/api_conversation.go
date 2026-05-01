@@ -706,6 +706,13 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		syncUserConversationResps = FilterConversationsBySpace(
 			syncUserConversationResps, filterSpaceID, loginUID, co.ctx, co.groupService,
 		)
+
+		// YUJ-216 / GH#1280: 系统 Bot（botfather 等）在所有 Space 都应可见。
+		// IM 核心按 version 增量返回 conversation，若系统 Bot 在此次 window 内
+		// 没有新消息，Space 过滤后就会缺席；移动端没有前端兜底，会直接丢失 entry。
+		// 在过滤结果之后显式补齐占位 entry，保证 SystemBot channel 在每一个
+		// X-Space-ID 维度下都可见。
+		syncUserConversationResps = EnsureSystemBotsPresent(syncUserConversationResps)
 	}
 
 	c.Response(SyncUserConversationRespWrap{

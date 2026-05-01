@@ -347,3 +347,192 @@ func TestCheckBotsInSpace_EmptyInputs(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Empty(t, result)
 }
+
+// ---- YUJ-216 / GH#1280: SystemBot sync bypass ----
+
+func TestEnsureSystemBotsPresent_InjectsMissingBots(t *testing.T) {
+	// 空会话列表 → 所有系统 Bot 都作为占位注入
+	result := EnsureSystemBotsPresent(nil)
+	assert.Len(t, result, len(spacepkg.SystemBotList()))
+
+	// 每个系统 Bot 都应以 Person 占位形式存在
+	ids := make(map[string]*SyncUserConversationResp, len(result))
+	for _, conv := range result {
+		ids[conv.ChannelID] = conv
+	}
+	for _, uid := range spacepkg.SystemBotList() {
+		conv, ok := ids[uid]
+		assert.True(t, ok, "system bot %s should be injected", uid)
+		assert.Equal(t, common.ChannelTypePerson.Uint8(), conv.ChannelType)
+		assert.Equal(t, "", conv.SpaceID)
+		assert.NotNil(t, conv.Recents, "Recents should be [] not nil for client compat")
+		assert.Empty(t, conv.Recents)
+		// 占位 entry 不应伪造 version/unread，避免客户端把占位 ack 回去
+		assert.Equal(t, int64(0), conv.Version)
+		assert.Equal(t, 0, conv.Unread)
+	}
+}
+
+func TestEnsureSystemBotsPresent_PreservesExistingEntries(t *testing.T) {
+	// 已存在的 botfather 真实会话不应被占位覆盖
+	real := &SyncUserConversationResp{
+		ChannelID:   "botfather",
+		ChannelType: common.ChannelTypePerson.Uint8(),
+		SpaceID:     "",
+		Version:     12345,
+		Unread:      7,
+		Recents: []*MsgSyncResp{
+			{Payload: map[string]interface{}{"content": "hello"}},
+		},
+	}
+	in := []*SyncUserConversationResp{real}
+
+	result := EnsureSystemBotsPresent(in)
+
+	// 找回 botfather → 必须是原对象，字段未改
+	var got *SyncUserConversationResp
+	for _, conv := range result {
+		if conv.ChannelID == "botfather" {
+			got = conv
+			break
+		}
+	}
+	assert.NotNil(t, got)
+	assert.Same(t, real, got, "existing botfather entry must be preserved in-place")
+	assert.Equal(t, int64(12345), got.Version)
+	assert.Equal(t, 7, got.Unread)
+	assert.Len(t, got.Recents, 1)
+
+	// u_10000 / fileHelper 仍被补齐
+	ids := map[string]bool{}
+	for _, conv := range result {
+		ids[conv.ChannelID] = true
+	}
+	assert.True(t, ids["u_10000"])
+	assert.True(t, ids["fileHelper"])
+}
+
+func TestEnsureSystemBotsPresent_IgnoresSameUIDOnNonPersonChannel(t *testing.T) {
+	// 极端情况：同名 channel 不是 Person（理论上不会发生）不能错认为已存在
+	// 否则会漏掉占位注入。
+	weird := &SyncUserConversationResp{
+		ChannelID:   "botfather",
+		ChannelType: common.ChannelTypeGroup.Uint8(), // 非 Person
+	}
+	result := EnsureSystemBotsPresent([]*SyncUserConversationResp{weird})
+
+	var personCount int
+	for _, conv := range result {
+		if conv.ChannelID == "botfather" && conv.ChannelType == common.ChannelTypePerson.Uint8() {
+			personCount++
+		}
+	}
+	assert.Equal(t, 1, personCount, "Person placeholder should still be injected")
+}
+
+func TestEnsureSystemBotsPresent_HandlesNilEntries(t *testing.T) {
+	// nil 会话不应 panic，且不阻止后续 Bot 注入
+	result := EnsureSystemBotsPresent([]*SyncUserConversationResp{nil})
+	ids := map[string]bool{}
+	for _, conv := range result {
+		if conv == nil {
+			continue
+		}
+		ids[conv.ChannelID] = true
+	}
+	for _, uid := range spacepkg.SystemBotList() {
+		assert.True(t, ids[uid], "system bot %s should still be injected when list contains nil", uid)
+	}
+}
+
+func TestEnsureSystemBotsPresent_AllBotsAlreadyPresent(t *testing.T) {
+	// 响应中已有全部系统 Bot → 不改变长度、不新增占位
+	in := make([]*SyncUserConversationResp, 0)
+	for _, uid := range spacepkg.SystemBotList() {
+		in = append(in, &SyncUserConversationResp{
+			ChannelID:   uid,
+			ChannelType: common.ChannelTypePerson.Uint8(),
+			Recents:     []*MsgSyncResp{{Payload: map[string]interface{}{"content": "x"}}},
+		})
+	}
+	result := EnsureSystemBotsPresent(in)
+	assert.Len(t, result, len(in))
+}
+
+func TestSystemBotList_DeterministicOrder(t *testing.T) {
+	// 连续调用返回同顺序（方便响应序列化稳定 & 测试幂等）
+	a := spacepkg.SystemBotList()
+	b := spacepkg.SystemBotList()
+	assert.Equal(t, a, b)
+	// 至少包含 botfather
+	assert.Contains(t, a, "botfather")
+}
+
+func TestIsSystemBot(t *testing.T) {
+	assert.True(t, spacepkg.IsSystemBot("botfather"))
+	assert.True(t, spacepkg.IsSystemBot("u_10000"))
+	assert.True(t, spacepkg.IsSystemBot("fileHelper"))
+	assert.False(t, spacepkg.IsSystemBot("random_user"))
+	assert.False(t, spacepkg.IsSystemBot(""))
+}
+
+// TestSyncPipeline_SystemBotsAlwaysReturned 模拟 POST /v1/conversation/sync
+// 完整数据流：IM 核心返回的会话 → FilterConversationsBySpace → EnsureSystemBotsPresent。
+// 对任意 X-Space-ID（含默认 Space、非默认 Space、全新 Space），最终响应都必须
+// 包含每一个系统 Bot 的 entry。这是 YUJ-216 / GH#1280 的验收门槛。
+func TestSyncPipeline_SystemBotsAlwaysReturned(t *testing.T) {
+	// 模拟 IM 核心返回的原始会话：
+	//   - 一条普通 DM（属于 spaceA 的消息）
+	//   - 一个普通群（spaceA）
+	//   - botfather 本次没有新消息 → 增量 sync 中缺席
+	base := []*SyncUserConversationResp{
+		{
+			ChannelID:   "peer1",
+			ChannelType: common.ChannelTypePerson.Uint8(),
+			SpaceID:     "",
+			Recents: []*MsgSyncResp{
+				{Payload: map[string]interface{}{"space_id": "spaceA", "content": "hi"}},
+			},
+		},
+		{
+			ChannelID:   "g1",
+			ChannelType: common.ChannelTypeGroup.Uint8(),
+			SpaceID:     "",
+		},
+	}
+	groupMap := map[string]string{"g1": "spaceA"}
+
+	run := func(filterSpaceID, defaultSpaceID string) []*SyncUserConversationResp {
+		// 深拷贝一份，避免用例间干扰
+		in := make([]*SyncUserConversationResp, len(base))
+		for i, c := range base {
+			cp := *c
+			in[i] = &cp
+		}
+		filtered := filterConversationsCore(in, filterSpaceID, defaultSpaceID, groupMap, nil, nil, nil, false, false)
+		return EnsureSystemBotsPresent(filtered)
+	}
+
+	cases := []struct {
+		name           string
+		filterSpaceID  string
+		defaultSpaceID string
+	}{
+		{"default space", "spaceA", "spaceA"},
+		{"non-default space with history", "spaceA", "spaceB"},
+		{"brand-new space with no history", "spaceNew", "spaceA"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := run(tc.filterSpaceID, tc.defaultSpaceID)
+			ids := map[string]bool{}
+			for _, conv := range result {
+				ids[conv.ChannelID] = true
+			}
+			for _, uid := range spacepkg.SystemBotList() {
+				assert.Truef(t, ids[uid],
+					"X-Space-ID=%s 必须包含系统 Bot %s 的 entry", tc.filterSpaceID, uid)
+			}
+		})
+	}
+}

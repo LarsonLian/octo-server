@@ -79,7 +79,21 @@
             $(".num").text(`（共${data.member_count}人）`);
         })
         $("#ok").click(function(){
-            $.getJSON(`${apiURL}groups/${groupNo}/scanjoin?auth_code=${code}`).then(function(resp){
+            // YUJ-199 / GH#1265：H5 兜底扫码路径同样要把当前 Space 透出给后端，
+            // 否则 groupScanJoin 读不到 X-Space-ID，source_space_id 会落到 home。
+            // currentSpaceId 由 Web 主应用登录流程写入 localStorage（YUJ-88/EP3），
+            // 读不到 → 不传 header，后端按 home 兜底（与旧行为一致）。
+            var joinHeaders = {};
+            try {
+                var currentSpaceId = localStorage.getItem('currentSpaceId') || '';
+                if (currentSpaceId) { joinHeaders['X-Space-ID'] = currentSpaceId; }
+            } catch (e) { /* best-effort */ }
+            $.ajax({
+                url: `${apiURL}groups/${groupNo}/scanjoin?auth_code=${code}`,
+                type: 'GET',
+                dataType: 'json',
+                headers: joinHeaders
+            }).then(function(resp){
                 // YUJ-170 / dmwork-web#1100: 跨 Space 加群引导。
                 // groupScanJoin 成功响应直接回带 space_id / space_name / group_name（YUJ-170
                 // 新增字段），避免 /detail 二次往返（非成员首次调 /detail 会 403，成员二次调

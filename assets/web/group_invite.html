@@ -256,10 +256,19 @@ function onJoinClick() {
         var groupNo = r.data.group_no;
         var authCode = r.data.auth_code;
         // 2. 复用和移动端一致的入群接口，内部已覆盖外部成员 / allow_external / invite 校验
+        // YUJ-199 / GH#1265：把当前 Space 用 X-Space-ID header 透出，后端
+        // groupScanJoin 用它写 source_space_id，避免群错落在 home Space。
+        // currentSpaceId 由 Web 主应用写 localStorage（YUJ-88/EP3）；读不到
+        // 就不传，后端 fallback 到 home（与历史行为一致）。
+        var scanHeaders = { "token": token };
+        try {
+            var currentSpaceId = localStorage.getItem('currentSpaceId') || '';
+            if (currentSpaceId) { scanHeaders['X-Space-ID'] = currentSpaceId; }
+        } catch (e) { /* best-effort */ }
         return fetch(API_BASE + "/v1/groups/" + encodeURIComponent(groupNo) +
                      "/scanjoin?auth_code=" + encodeURIComponent(authCode), {
             method: "GET",
-            headers: { "token": token }
+            headers: scanHeaders
         }).then(function (r2) {
             return r2.text().then(function (txt) {
                 // YUJ-170 round 3 / octo-server#1255: scanjoin 成功响应带

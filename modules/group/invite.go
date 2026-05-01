@@ -311,7 +311,12 @@ func (g *Group) groupMemberInviteSure(c *wkhttp.Context) {
 		c.ResponseError(errors.New("更新邀请信息项状态失败！"))
 		return
 	}
-	commitCallback, err := g.addMembersTx(members, groupNo, inviterUser.UID, inviterUser.Name, tx)
+	// YUJ-199 / GH#1265：邀请确认调用方携带的 X-Space-ID 才是邀请发起
+	// 时所在的 Space（三端 header 拦截器注入，YUJ-88/GH#1038/EP3）。
+	// 透传到 addMembersTxWithSpace，source_space_id 才能正确落点；
+	// 空时 addMembersTxWithSpace 内部会走 operator / home Space 兜底。
+	inviterSpaceID := strings.TrimSpace(c.GetHeader("X-Space-ID"))
+	commitCallback, err := g.addMembersTxWithSpace(members, groupNo, inviterUser.UID, inviterUser.Name, inviterSpaceID, tx)
 	if err != nil {
 		tx.Rollback()
 		g.Error("添加成员失败！", zap.Error(err))

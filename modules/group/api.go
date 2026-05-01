@@ -1024,6 +1024,14 @@ func (g *Group) memberAdd(c *wkhttp.Context) {
 }
 
 func (g *Group) addMembersTx(members []string, groupNo string, operator, operatorName string, tx *dbr.Tx) (func(), error) {
+	return g.addMembersTxWithSpace(members, groupNo, operator, operatorName, "", tx)
+}
+
+// addMembersTxWithSpace 是 addMembersTx 的带 inviterSpaceID 版本。
+// inviterSpaceID 来源于邀请发起请求的 X-Space-ID header（YUJ-199 / GH#1265）。
+// 非空时优先作为跨 Space 邀请新成员的 source_space_id；空时沿用历史兜底逻辑
+// （operator 外部 → operator.SourceSpaceID；否则 → 被邀请者 home Space）。
+func (g *Group) addMembersTxWithSpace(members []string, groupNo string, operator, operatorName, inviterSpaceID string, tx *dbr.Tx) (func(), error) {
 
 	/**
 	判断操作者是否在群内，如果不在群内是不允许邀请好友的
@@ -1103,10 +1111,21 @@ func (g *Group) addMembersTx(members []string, groupNo string, operator, operato
 				continue
 			}
 			externalMap[uid] = true
+			// YUJ-199 / GH#1265：邀请确认路径同样要尊重邀请发起者**当前视角**
+			// 所在的 Space（X-Space-ID header）。否则 operator 不是外部成员时
+			// 会 fallback 到被邀请者 uid 的 home Space，外部成员被错误地挂到
+			// 被邀请者自己的主 Space，而不是邀请发起的那个 Space。
+			// 优先级：
+			//   1. inviterSpaceID（caller 从 X-Space-ID header 读出）
+			//   2. operator 自身外部成员的 SourceSpaceID
+			//   3. 被邀请者的 home Space（兜底，保持历史行为）
 			// source_space_id 规则与 Service.AddGroupMembers 保持一致。
-			if operatorMemberForSpace != nil && operatorMemberForSpace.IsExternal == 1 && operatorMemberForSpace.SourceSpaceID != "" {
+			switch {
+			case inviterSpaceID != "":
+				sourceSpaceMap[uid] = inviterSpaceID
+			case operatorMemberForSpace != nil && operatorMemberForSpace.IsExternal == 1 && operatorMemberForSpace.SourceSpaceID != "":
 				sourceSpaceMap[uid] = operatorMemberForSpace.SourceSpaceID
-			} else {
+			default:
 				sourceSpaceMap[uid] = spacemod.GetUserDefaultSpaceID(g.ctx, uid)
 			}
 		}
@@ -1932,7 +1951,17 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 				return
 			}
 			isExternal = 1
-			sourceSpaceID = spacemod.GetUserDefaultSpaceID(g.ctx, scaner)
+			// YUJ-199 / GH#1265：source_space_id 必须反映扫码者**当前视角**
+			// 所在的 Space（三端拦截器注入的 X-Space-ID header），而不是
+			// scaner 的 home Space。否则用户 A 在测试空间建群，B 在华山派
+			// 扫码入群后，群会错落在 B 的 home（ExampleCorp）视图。
+			// 三端（Android/iOS/Web React）的 header 拦截器（YUJ-88/GH#1038/EP3）
+			// 早就把 X-Space-ID 注入在每个请求上，这里只需读取 + 兜底 home。
+			if headerSpaceID := strings.TrimSpace(c.GetHeader("X-Space-ID")); headerSpaceID != "" {
+				sourceSpaceID = headerSpaceID
+			} else {
+				sourceSpaceID = spacemod.GetUserDefaultSpaceID(g.ctx, scaner)
+			}
 		}
 	}
 

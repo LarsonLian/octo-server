@@ -12,6 +12,7 @@ import (
 	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	"github.com/Mininglamp-OSS/octo-server/modules/space"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -396,6 +397,27 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		spaceID = c.GetHeader("X-Space-ID")
 	}
 
+	// YUJ-231 / GH#1290：纵深防御——好友申请 claim 的 space_id 来自 client
+	// 可控输入（body/query/header），无校验则攻击者可伪造任意 Space，让
+	// 攻击者-受害者的 DM tip payload 出现在受害者的其它 Space 视图中
+	// （客户端按 payload.space_id 路由）。非成员降级为空串，走默认 Space 兜底。
+	// 参考：modules/group/api.go 的 YUJ-201/YUJ-219 pattern。
+	if spaceID != "" {
+		inSpace, membershipErr := spacepkg.CheckMembership(f.ctx.DB(), spaceID, fromUID)
+		if membershipErr != nil {
+			f.Error("好友申请 space_id 成员校验失败",
+				zap.String("uid", fromUID),
+				zap.String("spaceId", spaceID),
+				zap.Error(membershipErr))
+			spaceID = "" // DB 抖动时降级，不阻断主流程
+		} else if !inSpace {
+			f.Warn("friend apply: not a member of claimed space, dropping claim",
+				zap.String("uid", fromUID),
+				zap.String("spaceId", spaceID))
+			spaceID = "" // 非成员降级，避免伪造 space_id 写入 DM payload
+		}
+	}
+
 	// 设置token
 	token := util.GenerUUID()
 
@@ -667,6 +689,26 @@ func (f *Friend) friendSure(c *wkhttp.Context) {
 	}
 	if spaceID == "" {
 		spaceID = c.GetHeader("X-Space-ID")
+	}
+
+	// YUJ-231 / GH#1290：纵深防御——friendSure claim 的 space_id 同样是
+	// client 可控输入，非成员降级为空串（之后 cache fallback 可覆盖）。
+	// loginUID 是当前确认者，写进 DM tip payload 的 space_id 必须是其成员
+	// Space；否则攻击者可让 DM 出现在受害者任意 Space 视图。
+	if spaceID != "" {
+		inSpace, membershipErr := spacepkg.CheckMembership(f.ctx.DB(), spaceID, loginUID)
+		if membershipErr != nil {
+			f.Error("好友确认 space_id 成员校验失败",
+				zap.String("uid", loginUID),
+				zap.String("spaceId", spaceID),
+				zap.Error(membershipErr))
+			spaceID = ""
+		} else if !inSpace {
+			f.Warn("friend sure: not a member of claimed space, dropping claim",
+				zap.String("uid", loginUID),
+				zap.String("spaceId", spaceID))
+			spaceID = ""
+		}
 	}
 	key := f.ctx.GetConfig().Cache.FriendApplyTokenCachePrefix + req.Token + loginUID
 	tokenVaule, err := f.ctx.Cache().Get(key) // 获取申请人的uid

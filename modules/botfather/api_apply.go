@@ -11,6 +11,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"go.uber.org/zap"
 )
 
@@ -107,6 +108,27 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 	}
 	if applySpaceID == "" {
 		applySpaceID = c.GetHeader("X-Space-ID")
+	}
+
+	// YUJ-231 / GH#1291：纵深防御——robot 申请 claim 的 space_id 来自 client
+	// 可控输入。无校验则攻击者可伪造任意 Space，让 bot notify payload 写进
+	// 受害者非成员 Space 视图。与 P1-2 friend apply 同构，参考 YUJ-201 pattern。
+	// 非成员降级为空串，notify 链（notifyOwnerNewApply / notifyApplicantResult）
+	// 用规整后的 applySpaceID 写入 payload。
+	if applySpaceID != "" {
+		inSpace, membershipErr := spacepkg.CheckMembership(bf.ctx.DB(), applySpaceID, loginUID)
+		if membershipErr != nil {
+			bf.Error("robot 申请 space_id 成员校验失败",
+				zap.String("uid", loginUID),
+				zap.String("spaceId", applySpaceID),
+				zap.Error(membershipErr))
+			applySpaceID = ""
+		} else if !inSpace {
+			bf.Warn("robot apply: not a member of claimed space, dropping claim",
+				zap.String("uid", loginUID),
+				zap.String("spaceId", applySpaceID))
+			applySpaceID = ""
+		}
 	}
 
 	// 创建申请记录

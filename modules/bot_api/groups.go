@@ -410,7 +410,11 @@ func (ba *BotAPI) botGroupCreate(c *wkhttp.Context) {
 			c.ResponseError(errors.New("failed to query creator info"))
 			return
 		}
-		if creatorUser != nil && creatorUser.Robot == 1 {
+		if creatorUser == nil {
+			c.ResponseError(errors.New("creator user does not exist"))
+			return
+		}
+		if creatorUser.Robot == 1 {
 			c.ResponseError(errors.New("creator cannot be a bot"))
 			return
 		}
@@ -453,7 +457,12 @@ func (ba *BotAPI) botGroupUpdate(c *wkhttp.Context) {
 	botName := ba.resolveBotDisplayName(robotID)
 
 	isMember, err := ba.groupService.ExistMember(groupNo, robotID)
-	if err != nil || !isMember {
+	if err != nil {
+		ba.Error("check group membership failed", zap.Error(err))
+		c.ResponseError(errors.New("查询群成员失败"))
+		return
+	}
+	if !isMember {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "bot is not a member of this group"})
 		return
 	}
@@ -507,7 +516,12 @@ func (ba *BotAPI) botGroupMemberAdd(c *wkhttp.Context) {
 	botName := ba.resolveBotDisplayName(robotID)
 
 	isMember, err := ba.groupService.ExistMember(groupNo, robotID)
-	if err != nil || !isMember {
+	if err != nil {
+		ba.Error("check group membership failed", zap.Error(err))
+		c.ResponseError(errors.New("查询群成员失败"))
+		return
+	}
+	if !isMember {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "bot is not a member of this group"})
 		return
 	}
@@ -578,7 +592,12 @@ func (ba *BotAPI) botGroupMemberRemove(c *wkhttp.Context) {
 	botName := ba.resolveBotDisplayName(robotID)
 
 	isMember, err := ba.groupService.ExistMember(groupNo, robotID)
-	if err != nil || !isMember {
+	if err != nil {
+		ba.Error("check group membership failed", zap.Error(err))
+		c.ResponseError(errors.New("查询群成员失败"))
+		return
+	}
+	if !isMember {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "bot is not a member of this group"})
 		return
 	}

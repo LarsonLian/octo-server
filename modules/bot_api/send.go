@@ -218,9 +218,9 @@ func (ba *BotAPI) readReceipt(c *wkhttp.Context) {
 	// not actually a group — otherwise callers could bypass the DM-only restriction.
 	if req.ChannelType == 0 && botKind == BotKindApp {
 		var groupCount int
-		_, grpErr := ba.db.session.SelectBySql(
+		grpErr := ba.db.session.SelectBySql(
 			"SELECT COUNT(*) FROM `group` WHERE group_no=? AND is_deleted=0", req.ChannelID,
-		).Load(&groupCount)
+		).LoadOne(&groupCount)
 		if grpErr != nil {
 			c.ResponseError(errors.New("验证频道类型失败"))
 			return

@@ -88,12 +88,14 @@ func (n *Notify) ensureNotifyBot() bool {
 
 	// Step 4: Register IM token
 	imToken := util.GenerUUID()
-	_, _ = n.ctx.UpdateIMToken(config.UpdateIMTokenReq{
+	if _, tokenErr := n.ctx.UpdateIMToken(config.UpdateIMTokenReq{
 		UID:         botUID,
 		Token:       imToken,
 		DeviceFlag:  config.APP,
 		DeviceLevel: config.DeviceLevelMaster,
-	})
+	}); tokenErr != nil {
+		n.Warn("notification bot UpdateIMToken failed — bot may be unable to deliver messages", zap.Error(tokenErr))
+	}
 
 	// Step 5: Sync bot name to WuKongIM
 	n.syncBotNameToWuKongIM(botUID, notifyBotName)
@@ -134,12 +136,14 @@ func (n *Notify) repairBotIfNeeded(botUID string) {
 	).Exec()
 
 	imToken := util.GenerUUID()
-	_, _ = n.ctx.UpdateIMToken(config.UpdateIMTokenReq{
+	if _, tokenErr := n.ctx.UpdateIMToken(config.UpdateIMTokenReq{
 		UID:         botUID,
 		Token:       imToken,
 		DeviceFlag:  config.APP,
 		DeviceLevel: config.DeviceLevelMaster,
-	})
+	}); tokenErr != nil {
+		n.Warn("notification bot UpdateIMToken failed", zap.Error(tokenErr))
+	}
 }
 
 // deleteUser removes user record (only used for create compensation rollback).

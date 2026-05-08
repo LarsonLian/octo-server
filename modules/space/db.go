@@ -2,6 +2,7 @@ package space
 
 import (
 	"errors"
+	"log"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -330,12 +331,15 @@ func (d *DB) updateInvitation(code string, maxUses *int, expiresAt *time.Time) e
 // 返回 space_id 或空字符串（无共同 Space）
 func GetCommonSpaceID(ctx *config.Context, uid1, uid2 string) string {
 	var spaceID string
-	_, _ = ctx.DB().SelectBySql(`
+	_, err := ctx.DB().SelectBySql(`
 		SELECT sm1.space_id FROM space_member sm1
 		INNER JOIN space_member sm2 ON sm1.space_id = sm2.space_id
 		WHERE sm1.uid=? AND sm2.uid=? AND sm1.status=1 AND sm2.status=1
 		LIMIT 1
 	`, uid1, uid2).Load(&spaceID)
+	if err != nil {
+		log.Printf("[WARN] GetCommonSpaceID query failed: uid1=%s uid2=%s err=%v", uid1, uid2, err)
+	}
 	return spaceID
 }
 

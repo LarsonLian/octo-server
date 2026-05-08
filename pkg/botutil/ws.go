@@ -2,6 +2,7 @@ package botutil
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -17,12 +18,10 @@ func DeriveWSURL(cfg *config.Config) string {
 		if idx := strings.Index(host, "/"); idx >= 0 {
 			host = host[:idx]
 		}
-		// Host contains port → direct mode (e.g. 192.168.x.x:8090), use WuKongIM 5200
-		if strings.Contains(host, ":") {
-			if idx := strings.LastIndex(host, ":"); idx >= 0 {
-				host = host[:idx]
-			}
-			return fmt.Sprintf("ws://%s:5200", host)
+		// Try net.SplitHostPort to handle both IPv4:port and [IPv6]:port
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			// Has explicit port → direct mode, use WuKongIM 5200
+			return fmt.Sprintf("ws://%s:5200", h)
 		}
 		// Domain mode → Nginx reverse proxy
 		if strings.HasPrefix(baseURL, "https://") {
@@ -35,8 +34,8 @@ func DeriveWSURL(cfg *config.Config) string {
 	host := apiURL
 	host = strings.TrimPrefix(host, "http://")
 	host = strings.TrimPrefix(host, "https://")
-	if idx := strings.Index(host, ":"); idx >= 0 {
-		host = host[:idx]
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
 	}
 	// External.IP overrides derived host (direct-access deployments)
 	if strings.TrimSpace(cfg.External.IP) != "" {

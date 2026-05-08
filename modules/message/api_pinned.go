@@ -2,9 +2,9 @@ package message
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"runtime/debug"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -229,7 +229,7 @@ func (m *Message) pinnedMessage(c *wkhttp.Context) {
 	}
 	if isSendSystemMsg {
 		var payloadMap map[string]interface{}
-		if len(message.Payload) > MaxSyncPayloadSize {
+		if len(message.Payload) > LargePayloadThreshold {
 			// 置顶系统消息拼接只需 type / content 等字段，超大 payload 走截断避免完整反序列化
 			payloadMap = TruncatedPayload(message.Payload)
 		} else {

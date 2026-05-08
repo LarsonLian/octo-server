@@ -6,6 +6,9 @@ import (
 	"html"
 	"strings"
 
+	"github.com/Mininglamp-OSS/octo-lib/common"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/message"
 	"github.com/Mininglamp-OSS/octo-server/modules/thread"
@@ -13,9 +16,6 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/pkg/log"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-server/pkg/util"
-	"github.com/Mininglamp-OSS/octo-lib/common"
-	"github.com/Mininglamp-OSS/octo-lib/config"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"go.uber.org/zap"
 )
 
@@ -367,8 +367,9 @@ func (s *Search) global(c *wkhttp.Context) {
 				payloadMap = map[string]interface{}{
 					"type": common.SignalError.Int(),
 				}
-			} else if len(msg.Payload) > message.MaxSyncPayloadSize {
-				log.Warn("搜索结果消息 payload 超过大小阈值，已截断",
+			} else if len(msg.Payload) > message.LargePayloadThreshold {
+				// 超过 caller 阈值进入 TruncatedPayload：Text 按 rune 截，其它类型原样下发。
+				log.Warn("搜索结果消息 payload 超过大小阈值，进入 TruncatedPayload 处理",
 					zap.Int64("message_id", msg.MessageID),
 					zap.String("from_uid", msg.FromUID),
 					zap.String("channel_id", msg.ChannelID),

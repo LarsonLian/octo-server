@@ -2,17 +2,24 @@ package message
 
 import (
 	"encoding/base64"
-	"os"
-	"runtime/debug"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/Mininglamp-OSS/octo-lib/common"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/network"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/channel"
 	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
@@ -24,27 +31,24 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
-	"github.com/Mininglamp-OSS/octo-lib/common"
-	"github.com/Mininglamp-OSS/octo-lib/config"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/network"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gocraft/dbr/v2"
 	"github.com/pkg/errors"
 	"github.com/sendgrid/rest"
 	"go.uber.org/zap"
 )
 
-// MaxSyncPayloadSize 同步接口返回的单条消息 payload 最大字节数，超过则截断。
-// 避免超大 payload 导致前端 SDK 递归解码栈溢出 (issue #1097)。
+// LargePayloadThreshold caller 用此字节阈值决定是否调用 TruncatedPayload 走类型
+// 感知的截断流程；不是真正的 payload 上限。历史背景：issue #1097 中 Bot 把嵌套
+// JSON 对象塞进 type=Text 的 content，前端按 string 解析时递归 JSON.parse 爆栈。
+// CoerceTextPayloadContent 已防御性把 Text content 规约为 string，根因消除后
+// 只对 Text 按 rune 截（issue #1310），其它类型 content 携带结构化数据，原样
+// 下发不截断。
 // hardParsePayloadLimit 更高一级的硬上限：超过则不再尝试 JSON 解析，直接占位。
 const (
-	MaxSyncPayloadSize        = 10 * 1024
-	hardParsePayloadLimit     = 1 * 1024 * 1024
-	truncatedContentHeadBytes = 1024
-	truncatedContentSuffix    = "...[消息过大]"
+	LargePayloadThreshold  = 10 * 1024
+	hardParsePayloadLimit  = 1 * 1024 * 1024
+	TextContentMaxRunes    = 4000
+	truncatedContentSuffix = "...[消息过大]"
 )
 
 // truncatedFallback 极端场景下（解析失败 / 无 content 字段 / 超过硬上限）的占位。
@@ -63,37 +67,70 @@ func truncatedFallback(m map[string]interface{}) map[string]interface{} {
 	return safe
 }
 
-// TruncatedPayload 在 payload 字节长度超过阈值时，尽量保留原有 type / visibles 等元信息，
-// 只对 content 字段做前缀截取 + 占位后缀；解析失败或无 content 字段时回退为只含
-// type / visibles 的安全占位，确保超大 payload 一定被截断。
+// TruncatedPayload 仅对 type=Text (=1) 按 rune 数截 content（issue #1310）；
+// 其它类型（媒体 Image/Voice/Video/File、富文本 RichText、群通知/客服等系统消息）
+// content 携带结构化关键信息，按字节切片会破坏前端解析，全部原样下发。
+//
+// 仅在以下场景产生占位：
+//   - 超过 1MB 硬上限（hardParsePayloadLimit）
+//   - JSON 解析失败或得到空 map
+//
+// Text 类型 content 已被 CoerceTextPayloadContent 规约为 string，无递归解码风险。
+//
+// 内部对 raw 反序列化产生的 map 进行就地修改，调用方拿到的返回值即同一个 map；
+// 由于 raw []byte 来自 caller，map 是 TruncatedPayload 自己 Unmarshal 出来的，
+// 不存在外部别名引用，因此就地修改是安全的。
+//
 // 导出供 search 等其他路径复用。
 func TruncatedPayload(raw []byte) map[string]interface{} {
 	if len(raw) > hardParsePayloadLimit {
-		return map[string]interface{}{
-			"type":    common.ContentError.Int(),
-			"content": truncatedContentSuffix,
-		}
+		return placeholderPayload()
 	}
 	var m map[string]interface{}
 	if err := util.ReadJsonByByte(raw, &m); err != nil || len(m) == 0 {
-		return map[string]interface{}{
-			"type":    common.ContentError.Int(),
-			"content": truncatedContentSuffix,
-		}
+		return placeholderPayload()
 	}
-	if _, exists := m["content"]; !exists {
-		// 无 content 字段但整体超大：只保留 type / visibles，丢弃其他未知大字段。
+	CoerceTextPayloadContent(m)
+	if isTextType(m) {
+		return truncateTextPayload(m)
+	}
+	return m
+}
+
+func placeholderPayload() map[string]interface{} {
+	return map[string]interface{}{
+		"type":    common.ContentError.Int(),
+		"content": truncatedContentSuffix,
+	}
+}
+
+// isTextType 判断 payload type 是否为 common.Text（=1）。兼容 json.Number / float64 / int
+// 几种反序列化结果；string 类型的 "1" 不识别为 Text，避免误命中。
+func isTextType(m map[string]interface{}) bool {
+	switch v := m["type"].(type) {
+	case float64:
+		return int(v) == common.Text.Int()
+	case int:
+		return v == common.Text.Int()
+	case json.Number:
+		i, err := v.Int64()
+		return err == nil && int(i) == common.Text.Int()
+	}
+	return false
+}
+
+// truncateTextPayload 仅对 content 按 rune 数截断，其它字段原样保留。
+// 前置约束：CoerceTextPayloadContent 已保证 content 为 string。
+func truncateTextPayload(m map[string]interface{}) map[string]interface{} {
+	s, ok := m["content"].(string)
+	if !ok {
+		// CoerceTextPayloadContent 已确保 string；防御性兜底为占位。
 		return truncatedFallback(m)
 	}
-	s := contentToString(m["content"])
-	m["content"] = truncateUTF8(s, truncatedContentHeadBytes) + truncatedContentSuffix
-	// 终检：截断 content 后，若其他未知字段仍把整体撑过阈值，回退到白名单只保留
-	// type / visibles / content，避免自定义扩展字段塞超大内容泄漏到前端。
-	if b, err := json.Marshal(m); err == nil && len(b) > MaxSyncPayloadSize {
-		fallback := truncatedFallback(m)
-		fallback["content"] = m["content"]
-		return fallback
+	if utf8.RuneCountInString(s) <= TextContentMaxRunes {
+		return m
 	}
+	m["content"] = truncateRunes(s, TextContentMaxRunes) + truncatedContentSuffix
 	return m
 }
 
@@ -143,15 +180,19 @@ func contentToString(v interface{}) string {
 	}
 }
 
-// truncateUTF8 按字节上限截断，回退到最近的合法 UTF-8 边界，避免在多字节字符中间切断。
-func truncateUTF8(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
+// truncateRunes 按 rune（字符）数上限截断，确保中英文等长度感知一致。
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
 	}
-	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
-		maxBytes--
+	count := 0
+	for i := range s {
+		if count == maxRunes {
+			return s[:i]
+		}
+		count++
 	}
-	return s[:maxBytes]
+	return s
 }
 
 // Message 消息相关API
@@ -172,13 +213,13 @@ type Message struct {
 	userService         user.IService
 	groupService        group.IService
 	// robotService 仅用于 GetCreatorUID (YUJ-60 允许 bot 创建者撤回自己 bot 发的消息)。
-	robotService        robot.IService
-	commonService       commonapi.IService
-	fileService         file.IService
-	channelService      chservice.IService
-	threadDB            *thread.DB
-	mutex               sync.Mutex
-	stopChan            chan struct{}
+	robotService   robot.IService
+	commonService  commonapi.IService
+	fileService    file.IService
+	channelService chservice.IService
+	threadDB       *thread.DB
+	mutex          sync.Mutex
+	stopChan       chan struct{}
 }
 
 // New New
@@ -202,12 +243,12 @@ func New(ctx *config.Context) *Message {
 		pinnedDB:            newPinnedDB(ctx),
 		userService:         user.NewService(ctx),
 		// robotService: 只读 robot 服务，用于 hasRevokePermission 判断 bot 所有者。
-		robotService:        robot.NewService(ctx),
-		commonService:       commonapi.NewService(ctx),
-		fileService:         file.NewService(ctx),
-		channelService:      channel.NewService(ctx),
-		threadDB:            thread.NewDB(ctx),
-		stopChan:            make(chan struct{}),
+		robotService:   robot.NewService(ctx),
+		commonService:  commonapi.NewService(ctx),
+		fileService:    file.NewService(ctx),
+		channelService: channel.NewService(ctx),
+		threadDB:       thread.NewDB(ctx),
+		stopChan:       make(chan struct{}),
 	}
 	m.ctx.AddEventListener(event.GroupMemberAdd, m.handleGroupMemberAddEvent)
 	m.ctx.AddEventListener(event.GroupMemberScanJoin, m.handleGroupMemberScanJoinEvent)
@@ -2328,9 +2369,11 @@ func newSyncChannelMessageResp(resp *config.SyncChannelMessageResp, loginUID str
 	if len(resp.Messages) > 0 {
 		messageIDs := make([]string, 0, len(resp.Messages))
 		for _, message := range resp.Messages {
-			// 超大 payload 最终会被 TruncatedPayload 截断并丢失 reply 信息，
-			// 这里跳过解析避免对同一 []byte 反复反序列化。
-			if len(message.Payload) <= MaxSyncPayloadSize {
+			// 字节超过 LargePayloadThreshold 时跳过 reply 解析，纯性能权衡——避免对超大
+			// payload 重复反序列化。新 TruncatedPayload 仅对 Text 按 rune 截
+			// （issue #1310），其余类型原样下发，所以这里跳过的代价仅是个别长消息
+			// 失去 reply 富化（content 本身完整下发）。
+			if len(message.Payload) <= LargePayloadThreshold {
 				var payloadMap map[string]interface{}
 				err := util.ReadJsonByByte(message.Payload, &payloadMap)
 				if err != nil {
@@ -2355,9 +2398,10 @@ func newSyncChannelMessageResp(resp *config.SyncChannelMessageResp, loginUID str
 		}
 		// 修改消息扩展字段
 		for _, message := range resp.Messages {
-			// 超大 payload 会走 TruncatedPayload 的白名单路径，reply 信息本就会丢失，
-			// 这里跳过避免再次反序列化同一 []byte 以及写回后又被截断的无用功。
-			if len(message.Payload) > MaxSyncPayloadSize {
+			// 字节超过阈值时跳过 reply 富化，纯性能权衡——避免对超大 payload 重复反序列化。
+			// TruncatedPayload 仅 Text 按 rune 截（issue #1310），其余原样下发，
+			// 跳过仅意味着个别长消息失去 reply 富化，content 完整下发。
+			if len(message.Payload) > LargePayloadThreshold {
 				continue
 			}
 			var payloadMap map[string]interface{}
@@ -2522,38 +2566,38 @@ type syncReq struct {
 
 // MgSyncResp 消息同步请求
 type MsgSyncResp struct {
-	Header        messageHeader          `json:"header"`                    // 消息头部
-	Setting       uint8                  `json:"setting"`                   // 设置
-	MessageID     int64                  `json:"message_id"`                // 服务端的消息ID(全局唯一)
-	MessageIDStr  string                 `json:"message_idstr"`             // 服务端的消息ID(全局唯一)字符串形式
-	MessageSeq    uint32                 `json:"message_seq"`               // 消息序列号 （用户唯一，有序递增）
-	ClientMsgNo   string                 `json:"client_msg_no"`             // 客户端消息唯一编号
-	StreamNo      string                 `json:"stream_no,omitempty"`       // 流编号
-	FromUID       string                 `json:"from_uid"`                  // 发送者UID
+	Header       messageHeader `json:"header"`              // 消息头部
+	Setting      uint8         `json:"setting"`             // 设置
+	MessageID    int64         `json:"message_id"`          // 服务端的消息ID(全局唯一)
+	MessageIDStr string        `json:"message_idstr"`       // 服务端的消息ID(全局唯一)字符串形式
+	MessageSeq   uint32        `json:"message_seq"`         // 消息序列号 （用户唯一，有序递增）
+	ClientMsgNo  string        `json:"client_msg_no"`       // 客户端消息唯一编号
+	StreamNo     string        `json:"stream_no,omitempty"` // 流编号
+	FromUID      string        `json:"from_uid"`            // 发送者UID
 	// 外部来源标识：仅在 /message/channel/sync 群聊路径填充，供前端在外部群渲染来源 Space 徽标。
 	// 详见 Mininglamp-OSS/octo-server#1188。
-	FromIsExternal      int    `json:"from_is_external"`                // 发送者是否为外部成员 0.否 1.是
+	FromIsExternal      int    `json:"from_is_external"`                 // 发送者是否为外部成员 0.否 1.是
 	FromSourceSpaceName string `json:"from_source_space_name,omitempty"` // 发送者来源 Space 名称（为空则前端不渲染）
 	// 归属 Space（YUJ-63 / #1208）：外部/内部语义由前端"相对当前查看 Space"判断。
 	// 外部成员：from_home_space_id = 发送者来源 space_id；
 	// 内部成员：from_home_space_id = 群自身 space_id。
 	// 后端 from_is_external / from_source_space_name 原语义保留。
-	FromHomeSpaceID   string `json:"from_home_space_id,omitempty"`   // 发送者归属 Space ID
-	FromHomeSpaceName string `json:"from_home_space_name,omitempty"` // 发送者归属 Space 名称
-	ToUID         string                 `json:"to_uid,omitempty"`          // 接受者uid
-	ChannelID     string                 `json:"channel_id"`                // 频道ID
-	ChannelType   uint8                  `json:"channel_type"`              // 频道类型
-	Expire        uint32                 `json:"expire,omitempty"`          // expire
-	Timestamp     int32                  `json:"timestamp"`                 // 服务器消息时间戳(10位，到秒)
-	Payload       map[string]interface{} `json:"payload"`                   // 消息内容
-	SignalPayload string                 `json:"signal_payload"`            // signal 加密后的payload base64编码,TODO: 这里为了兼容没加密的版本，所以新用SignalPayload字段
-	ReplyCount    int                    `json:"reply_count,omitempty"`     // 回复集合
-	ReplyCountSeq string                 `json:"reply_count_seq,omitempty"` // 回复数量seq
-	ReplySeq      string                 `json:"reply_seq,omitempty"`       // 回复seq
-	Reactions     []*reactionSimpleResp  `json:"reactions,omitempty"`       // 回应数据
-	IsDeleted     int                    `json:"is_deleted"`                // 是否已删除
-	VoiceStatus   int                    `json:"voice_status,omitempty"`    // 语音状态 0.未读 1.已读
-	Streams       []*streamItemResp      `json:"streams,omitempty"`         // 流数据
+	FromHomeSpaceID   string                 `json:"from_home_space_id,omitempty"`   // 发送者归属 Space ID
+	FromHomeSpaceName string                 `json:"from_home_space_name,omitempty"` // 发送者归属 Space 名称
+	ToUID             string                 `json:"to_uid,omitempty"`               // 接受者uid
+	ChannelID         string                 `json:"channel_id"`                     // 频道ID
+	ChannelType       uint8                  `json:"channel_type"`                   // 频道类型
+	Expire            uint32                 `json:"expire,omitempty"`               // expire
+	Timestamp         int32                  `json:"timestamp"`                      // 服务器消息时间戳(10位，到秒)
+	Payload           map[string]interface{} `json:"payload"`                        // 消息内容
+	SignalPayload     string                 `json:"signal_payload"`                 // signal 加密后的payload base64编码,TODO: 这里为了兼容没加密的版本，所以新用SignalPayload字段
+	ReplyCount        int                    `json:"reply_count,omitempty"`          // 回复集合
+	ReplyCountSeq     string                 `json:"reply_count_seq,omitempty"`      // 回复数量seq
+	ReplySeq          string                 `json:"reply_seq,omitempty"`            // 回复seq
+	Reactions         []*reactionSimpleResp  `json:"reactions,omitempty"`            // 回应数据
+	IsDeleted         int                    `json:"is_deleted"`                     // 是否已删除
+	VoiceStatus       int                    `json:"voice_status,omitempty"`         // 语音状态 0.未读 1.已读
+	Streams           []*streamItemResp      `json:"streams,omitempty"`              // 流数据
 	// ---------- 旧字段 这些字段都放到MessageExtra对象里了 ----------
 	Readed       int    `json:"readed"`                 // 是否已读（针对于自己）
 	Revoke       int    `json:"revoke,omitempty"`       // 是否撤回
@@ -2602,8 +2646,10 @@ func (m *MsgSyncResp) from(msgResp *config.MessageResp, loginUID string, message
 		payloadMap = map[string]interface{}{
 			"type": common.SignalError.Int(),
 		}
-	} else if len(msgResp.Payload) > MaxSyncPayloadSize {
-		log.Warn("消息 payload 超过大小阈值，已截断",
+	} else if len(msgResp.Payload) > LargePayloadThreshold {
+		// 超过 caller 阈值进入 TruncatedPayload：Text 按 rune 截，其它类型原样下发，
+		// 是否真截断由 TruncatedPayload 内部按 type 决定。
+		log.Warn("消息 payload 超过大小阈值，进入 TruncatedPayload 处理",
 			zap.Int64("message_id", msgResp.MessageID),
 			zap.String("from_uid", msgResp.FromUID),
 			zap.String("channel_id", msgResp.ChannelID),

@@ -24,6 +24,7 @@ func clearVoiceEnv() {
 	os.Unsetenv("VOICE_QWEN_KEY")
 	os.Unsetenv("VOICE_QWEN_TIMEOUT")
 	os.Unsetenv("VOICE_PROMPT_FILE")
+	os.Unsetenv("VOICE_EMOTION_EMOJI")
 	os.Unsetenv("VOICE_MAX_VOICE_CONTEXT_LENGTH")
 	os.Unsetenv("VOICE_MAX_CONTEXT_TEXT_LENGTH")
 	os.Unsetenv("VOICE_MAX_CHAT_CONTEXT_LENGTH")
@@ -559,4 +560,50 @@ func TestNewVoiceConfigFromEnv_MaxLengthInvalidValue(t *testing.T) {
 	assert.Equal(t, 5000, cfg.MaxContextTextLength)
 	assert.Equal(t, 20000, cfg.MaxChatContextLength)
 	assert.Equal(t, 5000, cfg.MaxMemberContextLength)
+}
+
+// --- EmotionEmoji config tests ---
+
+func TestNewVoiceConfigFromEnv_EmotionEmoji_DefaultTrue(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	cfg := NewVoiceConfigFromEnv()
+	assert.True(t, cfg.EmotionEmoji)
+}
+
+func TestNewVoiceConfigFromEnv_EmotionEmoji_SetFalse(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_EMOTION_EMOJI", "false")
+	cfg := NewVoiceConfigFromEnv()
+	assert.False(t, cfg.EmotionEmoji)
+}
+
+func TestNewVoiceConfigFromEnv_EmotionEmoji_SetZero(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_EMOTION_EMOJI", "0")
+	cfg := NewVoiceConfigFromEnv()
+	assert.False(t, cfg.EmotionEmoji)
+}
+
+func TestNewVoiceConfigFromEnv_EmotionEmoji_SetTrue(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_EMOTION_EMOJI", "true")
+	cfg := NewVoiceConfigFromEnv()
+	assert.True(t, cfg.EmotionEmoji)
+}
+
+func TestNewVoiceConfigFromEnv_EmotionEmoji_OtherValues(t *testing.T) {
+	clearVoiceEnv()
+	defer clearVoiceEnv()
+
+	os.Setenv("VOICE_EMOTION_EMOJI", "yes")
+	cfg := NewVoiceConfigFromEnv()
+	assert.True(t, cfg.EmotionEmoji)
 }

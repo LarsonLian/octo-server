@@ -57,6 +57,8 @@ type VoiceConfig struct {
 
 	PromptFile string // Path to voice_prompts.yaml (env: VOICE_PROMPT_FILE)
 
+	EmotionEmoji bool // Enable emotion emoji annotation in output (env: VOICE_EMOTION_EMOJI, default: true)
+
 	MaxVoiceContextLength  int // max personal voice context runes (env: VOICE_MAX_VOICE_CONTEXT_LENGTH)
 	MaxContextTextLength   int // max context_text runes (env: VOICE_MAX_CONTEXT_TEXT_LENGTH)
 	MaxChatContextLength   int // max chat_context runes (env: VOICE_MAX_CHAT_CONTEXT_LENGTH)
@@ -176,6 +178,11 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 
 	if v := os.Getenv("VOICE_PROMPT_FILE"); v != "" {
 		cfg.PromptFile = v
+	}
+
+	cfg.EmotionEmoji = true
+	if v := os.Getenv("VOICE_EMOTION_EMOJI"); v == "false" || v == "0" {
+		cfg.EmotionEmoji = false
 	}
 
 	cfg.MaxVoiceContextLength = getEnvInt("VOICE_MAX_VOICE_CONTEXT_LENGTH", defaultMaxVoiceContextLength)

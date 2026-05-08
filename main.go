@@ -5,21 +5,25 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
-	_ "github.com/Mininglamp-OSS/octo-server/internal"
-	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
-	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
-	"github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/module"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/server"
+	_ "github.com/Mininglamp-OSS/octo-server/internal"
+	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	"github.com/Mininglamp-OSS/octo-server/pkg/metrics"
+	"github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
 	rd "github.com/go-redis/redis"
 	"github.com/judwhite/go-svc"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/robfig/cron"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -91,6 +95,13 @@ func runAPI(ctx *config.Context) {
 	replaceWebConfig(ctx.GetConfig())
 	// 初始化api
 	s.GetRoute().UseGin(ctx.Tracer().GinMiddle()) // 需要放在 api.Route(s.GetRoute())的前面
+	// HTTP 入口指标(per-route latency / status / in-flight)。
+	// 装在 tracer 之后, 以便未来 histogram exemplar 能拿到 trace context;
+	// 装在 RateLimit 之前, 以记录 429 响应(被限流的请求也是真实流量)。
+	// 指标走全局 DefaultRegisterer, 与 modules/oidc/metrics.go 共享 /metrics 端点。
+	httpMetrics := metrics.NewHTTPMetrics(prometheus.DefaultRegisterer)
+	s.GetRoute().UseGin(httpMetrics.GinMiddleware())
+	metricsSrv := startMetricsScrapeServer()
 	s.GetRoute().UseGin(func(c *gin.Context) {
 		ingorePaths := ingorePaths()
 		for _, ingorePath := range ingorePaths {
@@ -148,8 +159,20 @@ func runAPI(ctx *config.Context) {
 	// 打印服务器信息
 	printServerInfo(ctx)
 
-	// 运行
+	// 运行: 阻塞直到 go-svc 收到 SIGINT/SIGTERM 并完成业务 Stop。
 	err = svc.Run(s)
+
+	// 业务停下后再 graceful shutdown metrics scrape 端点 — 时序上避开和 go-svc
+	// 的信号处理竞态(go-svc 自己调 signal.Notify, 我们不再额外抢信号)。
+	// 此时业务已停, /metrics 是最后一项可达服务, 让 Prometheus 拿到末次状态再断开。
+	if metricsSrv != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutdownErr := metricsSrv.Shutdown(shutdownCtx); shutdownErr != nil {
+			log.Warn("metrics scrape graceful shutdown error", zap.Error(shutdownErr))
+		}
+	}
+
 	if err != nil {
 		panic(err)
 	}
@@ -211,6 +234,38 @@ tttttttttttttttttttttttttttttttttttttttt
 	infoStr = strings.Replace(infoStr, "#apiAddr#", cfg.Addr, -1)
 	infoStr = strings.Replace(infoStr, "#configPath#", cfg.ConfigFileUsed(), -1)
 	fmt.Println(infoStr)
+}
+
+// startMetricsScrapeServer 在独立端口暴露 /metrics scrape 端点,
+// 返回的 *http.Server 由调用方在业务退出后 Shutdown(graceful drain)。
+// 当 DM_METRICS_ENABLED 未设为 "true" 时返回 nil。
+//
+// 配置(均通过环境变量,延续 DM_* 前缀约定):
+//   - DM_METRICS_ENABLED: 默认 false(opt-in),设 "true" 才启用,
+//     避免新版本默默开启端口与运维既有部署冲突。
+//   - DM_METRICS_ADDR:   监听地址,默认 ":9090"。
+//
+// 端口失败不让进程挂掉,只记错 — 业务可用性优先于可观测性。
+func startMetricsScrapeServer() *http.Server {
+	if !strings.EqualFold(os.Getenv("DM_METRICS_ENABLED"), "true") {
+		// 单行 audit log,让运维 grep 启动日志能确认"是关掉的,不是配错"。
+		log.Info("metrics scrape endpoint disabled (set DM_METRICS_ENABLED=true to enable)")
+		return nil
+	}
+	addr := os.Getenv("DM_METRICS_ADDR")
+	if addr == "" {
+		addr = ":9090"
+	}
+	srv := metrics.NewScrapeServer(addr)
+	// 文案用 "starting" 而非 "listening" — bind 失败时日志序列才不会
+	// 误导成"先成功后崩"(starting → stopped 比 listening → stopped 自洽)。
+	log.Info("starting metrics scrape endpoint", zap.String("addr", addr))
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("metrics scrape endpoint stopped", zap.Error(err))
+		}
+	}()
+	return srv
 }
 
 func ingorePaths() []string {

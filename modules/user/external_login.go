@@ -6,11 +6,23 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"strings"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"go.uber.org/zap"
 )
+
+// sanitizeExternalName 把 IdP 返回的 name 里的 @ 字符替换为 _。
+//
+// token cache key 用 `uid@name@role` 三段,name 中的 @ 会让恶意 IdP 通过类似
+// `admin@0@admin` 的取值伪造角色字段实现权限提升。GitHub/Gitee 路径
+// (api_github.go:91、api_gitee.go:162)沿用此约定,OIDC 也走同样逻辑。
+//
+// 用替换而非拒绝,是因为 SSO 场景下 name 是 IdP 控制的,登录失败比静默清洗更糟。
+func sanitizeExternalName(name string) string {
+	return strings.ReplaceAll(name, "@", "_")
+}
 
 // ExternalLoginReq external IdP（OIDC / OAuth）登录入参。
 //
@@ -20,8 +32,11 @@ import (
 type ExternalLoginReq struct {
 	ExistingUID string
 
-	// 新建用户场景下使用,ExistingUID 非空时忽略
-	UID   string // 调用方生成的 UID（避免重复 GenerUUID 后还要再回传）
+	// UID 仅新建用户场景下使用,ExistingUID 非空时忽略。
+	UID string // 调用方生成的 UID（避免重复 GenerUUID 后还要再回传）
+
+	// Name 在两条路径都用:新建时写入 user.name;ExistingUID 非空时与库中
+	// user.name 比较,不同则同步覆盖(issue #1307)。两条路径都会做 @ → _ 消毒。
 	Name  string
 	Email string
 	Phone string
@@ -79,6 +94,25 @@ func (u *User) externalLoginExisting(ctx context.Context, req ExternalLoginReq) 
 		return nil, errors.New("用户不存在")
 	}
 
+	// 重复登录:IdP 返回的 name 与库中不一致时同步覆盖,保证 OCTO 改名能反映到 IM。
+	// 仅在 IdP 明确给了非空 name 时才动 — 偶发不返 name 不应破坏已有数据(issue #1307)。
+	// 必须先消毒再比较,否则 IdP 反复给 `evil@0@admin` 会每次都触发 update。
+	if req.Name != "" {
+		newName := sanitizeExternalName(req.Name)
+		if newName != userInfoM.Name {
+			if err := u.db.UpdateUsersWithField("name", newName, req.ExistingUID); err != nil {
+				// 名字同步失败不阻断登录,记 warn 让运维事后追溯。
+				u.Warn("OIDC 重复登录同步 name 失败",
+					zap.String("uid", req.ExistingUID),
+					zap.String("old_name", userInfoM.Name),
+					zap.String("new_name", newName),
+					zap.Error(err))
+			} else {
+				userInfoM.Name = newName
+			}
+		}
+	}
+
 	loginResp, err := u.execLogin(userInfoM, req.DeviceFlag, toDeviceReq(req.Device), ctx)
 	if err != nil {
 		return nil, err
@@ -110,13 +144,13 @@ func (u *User) externalLoginCreate(ctx context.Context, req ExternalLoginReq) (*
 	}()
 
 	createUser := &createUserModel{
-		UID:      req.UID,
-		Name:     req.Name,
-		Email:    req.Email,
-		Phone:    req.Phone,
-		Zone:     req.Zone,
-		Flag:     int(req.DeviceFlag.Uint8()),
-		Device:   toDeviceReq(req.Device),
+		UID:    req.UID,
+		Name:   sanitizeExternalName(req.Name), // 消毒同 externalLoginExisting,防 token cache key 注入
+		Email:  req.Email,
+		Phone:  req.Phone,
+		Zone:   req.Zone,
+		Flag:   int(req.DeviceFlag.Uint8()),
+		Device: toDeviceReq(req.Device),
 	}
 
 	loginResp, err := u.createUserWithRespAndTx(ctx, createUser, req.PublicIP, nil, tx, func() error {

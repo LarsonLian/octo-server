@@ -427,10 +427,12 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 		return
 	}
 
-	// 部分 IdP(如 Aegis)只在 /userinfo 暴露 email/phone,ID Token 仅含 sub。
-	// 自动绑定历史账号必须依赖 email/phone,所以缺啥就拉一次 /userinfo 补啥。
+	// 部分 IdP(如 Aegis / OCTO)只在 /userinfo 暴露 email/phone/name,ID Token 仅含 sub。
+	// 自动绑定历史账号必须依赖 email/phone;name 缺失会让新建用户落到随机汉名兜底
+	// (modules/user/api.go createUserWithRespAndTx 的 Names[] 分支),用户体验极差。
+	// 所以缺啥就拉一次 /userinfo 补啥(issue #1307)。
 	// userinfo 失败不阻断登录,只是失去自动绑定能力,等价于 IdP 没返这些 claim。
-	if claims.Email == "" || claims.PhoneNumber == "" {
+	if claims.Email == "" || claims.PhoneNumber == "" || claims.Name == "" {
 		ui, uerr := o.client.UserInfo(c.Request.Context(), tok)
 		if uerr != nil {
 			o.Warn("OIDC callback userinfo 拉取失败,跳过补全",
@@ -453,6 +455,9 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 			if claims.PhoneNumber == "" {
 				claims.PhoneNumber = ui.PhoneNumber
 				claims.PhoneVerified = ui.PhoneVerified
+			}
+			if claims.Name == "" {
+				claims.Name = ui.Name
 			}
 		}
 	}

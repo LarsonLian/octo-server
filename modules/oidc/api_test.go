@@ -843,6 +843,93 @@ func TestFailWithAuthcode_LongSubject_TruncatesAuditUID(t *testing.T) {
 	}
 }
 
+// callback 应在 ID Token 缺 name 时调 /userinfo 补全 name,避免新建用户时
+// 落到 createUserWithRespAndTx 的随机汉名兜底分支(issue #1307)。
+// 场景:OCTO 等 IdP 把 name 仅放在 /userinfo,ID Token 只含 sub/email/phone。
+func TestAPI_Callback_BackfillsNameFromUserInfo(t *testing.T) {
+	mp := NewMockProvider(t)
+	// ID Token 含 email 但不含 name(模拟 OCTO 行为)
+	mp.PrepUser("sub-octo", map[string]interface{}{
+		"email":          "bob@example.com",
+		"email_verified": true,
+	})
+	// /userinfo 暴露 name
+	mp.PrepUserInfoOnly("sub-octo", map[string]interface{}{
+		"name": "Bob Real Name",
+	})
+
+	users := &fakeUserLookup{
+		loginResp: &IssueSessionResp{UID: "u-new", IsNewUser: true, LoginRespJSON: `{"token":"t"}`},
+	}
+	o := newTestOIDC(t, mp, users, newFakeIdentityStore())
+	r := newTestRouter(o)
+
+	req := httptest.NewRequest("GET", "/v1/auth/oidc/aegis/authorize?authcode=ac-name&return_to=/", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	authURL, _ := url.Parse(w.Header().Get("Location"))
+	state := authURL.Query().Get("state")
+	mp.PrepCode("idp-code", "sub-octo", authURL.Query().Get("nonce"))
+
+	req2 := httptest.NewRequest("GET",
+		"/v1/auth/oidc/aegis/callback?state="+state+"&code=idp-code", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, body=%s", w2.Code, w2.Body.String())
+	}
+	if len(users.loginCalls) != 1 {
+		t.Fatalf("expected 1 IssueSession call, got %d", len(users.loginCalls))
+	}
+	if got := users.loginCalls[0].Name; got != "Bob Real Name" {
+		t.Errorf("IssueSession.Name = %q, want %q (userinfo.name 应回填到 claims.Name)", got, "Bob Real Name")
+	}
+}
+
+// ID Token 已含 name 时,即便 /userinfo 也返 name,以 ID Token 为准
+// (ID Token 是已签名权威源;userinfo 仅在 ID Token 缺字段时补全)。
+func TestAPI_Callback_IDTokenNameWinsOverUserInfo(t *testing.T) {
+	mp := NewMockProvider(t)
+	mp.PrepUser("sub-both", map[string]interface{}{
+		"email": "carol@example.com",
+		"name":  "Carol From IDToken",
+	})
+	mp.PrepUserInfoOnly("sub-both", map[string]interface{}{
+		"name": "Carol From UserInfo",
+	})
+	// 注意:ID Token 已经有 email + name,触发 userinfo 拉取需要 phone 缺失
+	// 这里 PhoneNumber 默认空,会触发 userinfo,但 claims.Name 已非空,不应被覆盖。
+
+	users := &fakeUserLookup{
+		loginResp: &IssueSessionResp{UID: "u-c", IsNewUser: true, LoginRespJSON: `{"token":"t"}`},
+	}
+	o := newTestOIDC(t, mp, users, newFakeIdentityStore())
+	r := newTestRouter(o)
+
+	req := httptest.NewRequest("GET", "/v1/auth/oidc/aegis/authorize?authcode=ac-both&return_to=/", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	authURL, _ := url.Parse(w.Header().Get("Location"))
+	state := authURL.Query().Get("state")
+	mp.PrepCode("idp-code", "sub-both", authURL.Query().Get("nonce"))
+
+	req2 := httptest.NewRequest("GET",
+		"/v1/auth/oidc/aegis/callback?state="+state+"&code=idp-code", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, body=%s", w2.Code, w2.Body.String())
+	}
+	if len(users.loginCalls) != 1 {
+		t.Fatalf("expected 1 IssueSession call, got %d", len(users.loginCalls))
+	}
+	if got := users.loginCalls[0].Name; got != "Carol From IDToken" {
+		t.Errorf("IssueSession.Name = %q, want ID Token's %q (ID Token 优先)", got, "Carol From IDToken")
+	}
+}
+
 func mustQueryParam(t *testing.T, rawURL, name string) string {
 	t.Helper()
 	u, err := url.Parse(rawURL)

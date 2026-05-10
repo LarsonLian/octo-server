@@ -521,13 +521,44 @@ func (u *User) uploadAvatar(c *wkhttp.Context) {
 		targetUID = loginUID
 	}
 
-	// 若 targetUID 与 loginUID 不同，需确认 loginUID 是该 bot 的创建者
+	// 若 targetUID 与 loginUID 不同，需确认 loginUID 有权限修改该头像
 	if targetUID != loginUID {
 		var creatorUID string
 		err := u.ctx.DB().Select("IFNULL(creator_uid,'')").From("robot").Where("robot_id=? and status=1", targetUID).LoadOne(&creatorUID)
 		if err != nil || creatorUID != loginUID {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
-			return
+			// User Bot 校验失败，尝试 App Bot 权限校验
+			var appBot struct {
+				Scope   string `db:"scope"`
+				SpaceID string `db:"space_id"`
+			}
+			cnt, appErr := u.ctx.DB().SelectBySql(
+				"SELECT scope, IFNULL(space_id,'') as space_id FROM app_bot WHERE uid=? LIMIT 1", targetUID,
+			).Load(&appBot)
+			if appErr != nil || cnt == 0 {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
+				return
+			}
+			switch appBot.Scope {
+			case "platform":
+				if err := c.CheckLoginRoleIsSuperAdmin(); err != nil {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
+					return
+				}
+			case "space":
+				var member struct {
+					Role int `db:"role"`
+				}
+				mCnt, mErr := u.ctx.DB().SelectBySql(
+					"SELECT role FROM space_member WHERE space_id=? AND uid=? AND status=1 LIMIT 1", appBot.SpaceID, loginUID,
+				).Load(&member)
+				if mErr != nil || mCnt == 0 || member.Role < 1 {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
+					return
+				}
+			default:
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
+				return
+			}
 		}
 	}
 

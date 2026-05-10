@@ -4,8 +4,13 @@ package user_test
 // module.Setup 只会跑"已被 import 模块"的迁移。某些 user 测试路径(如
 // createUserWithRespAndTx 写 event 表、空间相关的 user 字段 ALTER 等)需要
 // 这些模块的表/列已存在,所以这里 blank import 触发它们的 init() 注册。
+//
+// YUJ-403:integration 测试读 user_oidc_identity 表,oidc 模块的 SQL 迁移
+// 必须跑完才能 INSERT。oidc 包 import user 不会形成 compile cycle,因为
+// 这是 user_test package(test-only),test 和 non-test 处于不同 include 闭包。
 import (
 	_ "github.com/Mininglamp-OSS/octo-server/modules/base"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/group"
+	_ "github.com/Mininglamp-OSS/octo-server/modules/oidc"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/robot"
 )

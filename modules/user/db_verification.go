@@ -2,6 +2,7 @@ package user
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,8 +12,26 @@ import (
 
 // verificationModel 对应 user_verification 表。
 //
+// ⚠️ 此表是 Aegis identity_verification claims 的 **local read-through cache**,
+// 不是 source of truth。权威源永远是 Aegis IdP,本表只缓存最近一次拉取到的快照,
+// 供 OCTO profile 接口着色徽章用(避免每次 profile 查询都同步打 Aegis admin API)。
+//
+// 写入触发点(2026-05-10 起 Aegis OIDC 直切之后):
+//  1. OIDC 登录 callback (modules/oidc/api.go) —— 用户走 IdP 登录时顺带同步
+//  2. POST /v1/internal/realname/pull-from-aegis (YUJ-398) —— 前端主动 pull,
+//     覆盖「去认证」新窗回跳 + didMount opportunistic refresh 两个场景
+//
+// (YUJ-399 TTL refresh worker 方案曾是 3rd 写入点,2026-05-10 归档,低变化
+// 频率数据不宜用 TTL 轮询范式;follow-up YUJ-368 已立 Aegis webhook push,
+// blocked-external。见 scope cleanup commit 36279c34。)
+//
+// 读取路径默认可能 stale,最大滞后取决于上面 2 个写入触发点的触发频率;
+// "别人看我徽章"用户最差情况下要等对方或自己再次触发 pull / OIDC 重登才会刷新。
+// 需要强一致读(比如"用户刚认证完立刻要徽章亮")的场景应走 pull-from-aegis
+// 强刷一次,而不是依赖本表缓存。
+//
 // 自 2026-05-10 起（YUJ-382 / Aegis OIDC Phase 1),OIDC callback(modules/oidc/api.go)
-// 是 user_verification 表的唯一写入方,权威源从 dmwork-verify-service 迁移到 Aegis IdP。
+// 首次成为 user_verification 表的写入方,权威源从 dmwork-verify-service 迁移到 Aegis IdP。
 // 历史:此前由 dmwork-verify-service 经 HMAC POST /v1/internal/verification/complete
 //       写入,该链路已随 Aegis OIDC 直切方案废弃;api_verification.go 整个文件被删除。
 //
@@ -120,4 +139,92 @@ func nullableVerificationString(s string) dbr.NullString {
 		return dbr.NullString{}
 	}
 	return dbr.NullString{NullString: sql.NullString{String: s, Valid: true}}
+}
+
+// DeleteByUID 删除单个用户的实名记录(YUJ-398 Round 1 Jerry-Xin Crit 2 + YUJ-399 Round 3 Crit 4)。
+//
+// 背景:user_verification 是 local read-through cache,Aegis 才是权威源。
+// 当 Aegis 侧用户"取消实名" / "账号注销" / "is_verified=false" 权威态时,
+// 如果不清 local row,service.go::GetUserDetail 只要查到任意行就标 RealnameVerified=true,
+// 会造成**徽章永久假阳**(Aegis 说未实名,OCTO 徽章仍亮)。
+//
+// 调用合同(严格限定,任何一点错都会造成误删):
+//   必须在 Aegis **权威确认**用户未实名时才调,具体是:
+//     1. pull-from-aegis / refresh worker 从 Aegis admin API 拿到 2xx 响应且 is_verified=false
+//     2. pull-from-aegis / refresh worker 从 Aegis admin API 拿到 404
+//   严禁在以下场景调:
+//     - ErrFetcherUnavailable(Aegis 整体不可达 / 5xx / token 拿不到)→ 保守保留旧 row
+//     - JSON 解析失败 / 配置错 → 同上
+//     - DB 查询错误 → 不触及
+//   误删代价:某一次 Aegis 短暂抖动,所有 pulled 用户 cache 被清,下次 pull 又 upsert 回来 ——
+//   但中间这段窗口 OCTO 徽章会误显示"未实名",用户发 support ticket。保守是这里的默认。
+//
+// 语义:
+//   - uid 空串 → no-op + nil err(防御编程错误,不让 DELETE FROM ... WHERE user_id='' 误删)
+//   - 行不存在 → 仍 nil err(幂等);调用方不依赖"是否删掉了"的返回值
+//   - DB error → 原样返回给调用方记 warn
+func (d *verificationDB) DeleteByUID(uid string) error {
+	if strings.TrimSpace(uid) == "" {
+		return nil
+	}
+	_, err := d.session.DeleteFrom("user_verification").Where("user_id=?", uid).Exec()
+	return err
+}
+
+// LookupAegisSubjectByUID 查 user_oidc_identity 表拿某个本地 uid 对应的
+// Aegis(OIDC IdP)subject。YUJ-398 Round 2 Crit B + YUJ-403(PR #1367 R5)
+// Jerry + lml2468 共识 Critical:subject provenance gate。
+//
+// 背景(R5 收敛):
+//   本地 uid 由 util.GenerUUID() 生成(见 modules/oidc/user_adapter.go:45),
+//   **不等于** Aegis IdP 侧的 sub claim。pull-from-aegis 需要一个"可信的"
+//   Aegis subject 作为 /admin/users/{key} 的 key。
+//
+//   之前(R4 前)的实现先读 user_verification.source_sub,但该字段 **不一定是
+//   Aegis subject** —— 原表给 dmwork-verify-service callback 用,historical
+//   value 可能是 CAS user_id / 企业微信 corp_id:user_id / 飞书 open_id / 其他
+//   legacy IdP subject。直接把 legacy sub 当 Aegis key 传会让 Aegis 返 404,
+//   fetcher 归一成 (nil,nil) → handler 误走 authoritative_unverified 分支,
+//   把用户 **正确的** user_verification 记录清掉 → 徽章瞬间熄灭,直到下次
+//   OIDC 重登才恢复。
+//
+//   修法:本函数只查 issuer = Aegis OIDC provider issuer 的 identity 行。
+//   查到 → 返的 subject 一定是 Aegis 权威 subject(provenance: trusted);
+//   查不到 → 返 ""(调用方再退到 legacy source_sub / uid fallback,但要以
+//   trusted=false 语义对待后续的 404 信号)。
+//
+// 为什么不复用 oidc.DB.QueryIdentitiesByUID:
+//   modules/oidc 已经 import modules/user(UpsertVerificationFromOIDC),
+//   user → oidc 会形成循环。同一张表直接 session.Select 不算 "跨模块拷贝语义",
+//   查询极小(单条 LIMIT 1 + WHERE uid+issuer 复合索引),维护成本可忽略。
+//
+// 行为:
+//   - 空 uid → ("", nil),不查库
+//   - 空 issuer → ("", nil),不查库(调用方降级为 trusted=false,保守不清 cache)
+//   - 多条 identity(同 uid+issuer)→ 取 last_login_at DESC 最近登录的一条
+//     (同一 issuer 下同 uid 多行理论上不会,但历史 schema 没强制约束,防御性 LIMIT 1)。
+//   - 无匹配行 → ("", nil),调用方走 legacy / uid fallback(但 trusted=false)
+//   - DB error → ("", err),调用方记 warn 后继续(trusted=false)
+func (d *verificationDB) LookupAegisSubjectByUID(uid, issuer string) (string, error) {
+	if strings.TrimSpace(uid) == "" {
+		return "", nil
+	}
+	if strings.TrimSpace(issuer) == "" {
+		// issuer 缺失(DM_OIDC_PROVIDER_ISSUER 未配)→ 降级为 "查不到 Aegis
+		// identity",调用方走 trusted=false 保守策略,**不**清 cache。
+		return "", nil
+	}
+	var subjects []string
+	_, err := d.session.Select("IFNULL(subject,'')").From("user_oidc_identity").
+		Where("uid=? AND issuer=?", uid, issuer).
+		OrderBy("COALESCE(last_login_at, linked_at) DESC").
+		Limit(1).
+		Load(&subjects)
+	if err != nil {
+		return "", fmt.Errorf("lookup aegis subject by uid=%q issuer=%q: %w", uid, issuer, err)
+	}
+	if len(subjects) == 0 {
+		return "", nil
+	}
+	return subjects[0], nil
 }

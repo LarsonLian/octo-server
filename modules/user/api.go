@@ -269,23 +269,22 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 
 	}
 
+	// /v1/internal/verify-token —— Aegis OIDC Phase 2d 翻译层 (YUJ-394)
+	//
 	// 老的 verify-service HMAC 回调 /v1/internal/verification/complete 与 5 分钟 JWT
 	// 签发 /v1/internal/verify-token 已随 Aegis OIDC 直切(YUJ-382 / Aegis OIDC Phase 1)
 	// 全部废弃,新链路走 oidc callback 直接写 user_verification。
-	//
-	// 为兼容已发布的老 App 客户端(调用 /v1/internal/verify-token 才能拿到跳转 URL),
-	// 保留 /verify-token 路由但恒回 410 Gone + 升级提示;不挂 AuthMiddleware ——
-	// 方案文档 v3 明确:老客户端的 token 可能已过期,先告知升级比先拒 401 更友好。
 	// /verification/complete 彻底删除:合法客户端只有 verify-service 自己,该服务已下线。
-	gone := r.Group("/v1/internal")
+	//
+	// 但已发布的老 App 仍会调用 /v1/internal/verify-token 来获取一个"跳转 URL"去做实名。
+	// Phase 1 临时改成 410 Gone,会让老 App 点去认证就报错 —— 用户体验不可接受。
+	// Phase 2d 恢复该接口为"翻译层":认证后直接返回 Aegis 账户页 URL,不再签任何
+	// HMAC/JWT,只是代理返回一个稳定 URL。
+	// 保留 AuthMiddleware —— 不能让未登录用户拿到携带 return_to 的认证跳转。
+	internal := r.Group("/v1/internal", u.ctx.AuthMiddleware(r))
 	{
-		gone.POST("/verify-token", func(c *wkhttp.Context) {
-			c.AbortWithStatusJSON(http.StatusGone, gin.H{
-				"status":      "gone",
-				"message":     "实名认证功能已升级，请更新 App 到最新版本",
-				"upgrade_url": "https://accounts.example.com/profile/info?anchor=verification",
-			})
-		})
+		internal.GET("/verify-token", u.verifyTokenAegisRedirect)
+		internal.POST("/verify-token", u.verifyTokenAegisRedirect)
 	}
 
 	u.ctx.AddOnlineStatusListener(u.onlineService.listenOnlineStatus) // 监听在线状态
@@ -3320,6 +3319,44 @@ func ValidateName(name string) error {
 	return nil
 }
 
+
+// ==================== Aegis OIDC Phase 2d — verify-token 翻译层 ====================
+
+// verifyTokenAegisURL 是老 App 调 /v1/internal/verify-token 后我们要返回的跳转地址。
+// 直接指向 Aegis 账户页实名锚点，并带上 return_to=dmwork:// 深链让 App 认证完能跳回来。
+//
+// 注意:
+//   - URL 是硬编码常量;YUJ-394 明确要求不再签 HMAC / JWT,只是稳定代理一个地址。
+//   - return_to 必须是 dmwork:// 深链,不能是 https://,避免钓鱼。
+//   - 一旦未来 Aegis 把 URL 改了,需要回到这里改常量。
+const verifyTokenAegisURL = "https://accounts.example.com/profile/info?anchor=verification&return_to=octo://verified"
+
+// verifyTokenAegisExpiresIn 老 App 合同里 expires_in 是秒数;Aegis URL 本身没有过期概念,
+// 但老 App 拿到后会在这个窗口内打开浏览器,保持 5 分钟这个历史默认值即可。
+const verifyTokenAegisExpiresIn = 300
+
+// verifyTokenAegisRedirect 是 /v1/internal/verify-token 的 Aegis 翻译层 handler。
+//
+// Phase 1 把该接口改成 410 Gone,导致老 App 点"去认证"直接报错;Phase 2d 恢复为翻译层:
+// 已登录用户请求 → 200 + {url: Aegis 账户页, expires_in: 300};
+// 未登录用户 → AuthMiddleware 自动拒 401。
+//
+// 与老 verify-service 版本的区别:
+//   - 不再签 5 分钟 JWT,URL 里没有任何用户态。
+//   - 不携带 HMAC 签名,只是一个稳定的公开 URL。
+//   - Aegis 页面自己走 OIDC session 识别用户,dmworkim 这边只负责把老 App 导过去。
+func (u *User) verifyTokenAegisRedirect(c *wkhttp.Context) {
+	// AuthMiddleware 已经保证未登录会被拒;这里再 double-check 一次 LoginUID,
+	// 避免将来有人不小心把中间件摘掉导致 return_to 泄露给匿名用户。
+	if strings.TrimSpace(c.GetLoginUID()) == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "login required"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"url":        verifyTokenAegisURL,
+		"expires_in": verifyTokenAegisExpiresIn,
+	})
+}
 
 // ==================== Auth Verify API (for Gateway / Microservices) ====================
 

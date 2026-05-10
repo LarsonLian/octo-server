@@ -68,8 +68,23 @@ func (d *verificationDB) QueryByUIDs(uids []string) (map[string]*verificationMod
 	return result, nil
 }
 
-// Upsert 按 user_id 幂等写入。存在则全字段更新,不存在则插入。
-// OIDC callback(modules/oidc/api.go)是唯一写入方,对同一用户仅保留最新一次实名结果。
+// Upsert 按 user_id 幂等写入。存在则更新,不存在则插入。
+// OIDC callback(modules/oidc/api.go)是唯一写入方,对同一用户每次 OIDC 再登录都会被调用。
+//
+// 🚨 Phase 1 NULL overwrite 热修(Mininglamp-OSS/octo-server#1334 / YUJ-390,2026-05-10):
+// 旧版 SQL 对所有列无条件 `col = VALUES(col)`,会把 OIDC claims 里未返回的
+// emp_id / dept / mobile(NullString{}) 以及空 sub 全部冲掉历史值,造成再登录
+// 一次原先由 verify-service 写入的工号/部门/手机号/来源 sub 全部变 NULL。
+//
+// 修复语义(与字段是否 NOT NULL 对齐):
+//   - emp_id / dept / mobile(DEFAULT NULL):`COALESCE(VALUES(col), col)` —
+//     新值为 NULL 时保留旧值,新值非 NULL 时正常覆盖。
+//   - source_sub(NOT NULL VARCHAR,空串合法但表示"上游未提供"):
+//     `IF(VALUES(source_sub)='', source_sub, VALUES(source_sub))` — 空串视为
+//     "保留旧值"。COALESCE 在这里不适用(空串不是 NULL)。
+//   - real_name / source / email / verified_at:继续 VALUES(col) 直接覆盖 —
+//     这些都是每次 OIDC callback 明确给出的权威字段,允许再登录刷新。
+//     email 目前不在保护列表,若未来 claims 允许"已注册但隐藏邮箱"再加保护。
 func (d *verificationDB) Upsert(m *verificationModel) error {
 	if m == nil || m.UserID == "" {
 		return nil
@@ -81,8 +96,13 @@ func (d *verificationDB) Upsert(m *verificationModel) error {
 			"(user_id, real_name, source, source_sub, emp_id, dept, email, mobile, verified_at) "+
 			"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "+
 			"ON DUPLICATE KEY UPDATE "+
-			"real_name=VALUES(real_name), source=VALUES(source), source_sub=VALUES(source_sub), "+
-			"emp_id=VALUES(emp_id), dept=VALUES(dept), email=VALUES(email), mobile=VALUES(mobile), "+
+			"real_name=VALUES(real_name), "+
+			"source=VALUES(source), "+
+			"source_sub=IF(VALUES(source_sub)='', source_sub, VALUES(source_sub)), "+
+			"emp_id=COALESCE(VALUES(emp_id), emp_id), "+
+			"dept=COALESCE(VALUES(dept), dept), "+
+			"email=VALUES(email), "+
+			"mobile=COALESCE(VALUES(mobile), mobile), "+
 			"verified_at=VALUES(verified_at)",
 		m.UserID, m.RealName, m.Source, m.SourceSub,
 		m.EmpID, m.Dept, m.Email, m.Mobile, m.VerifiedAt,

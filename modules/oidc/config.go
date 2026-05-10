@@ -104,6 +104,14 @@ func loadProvider() (ProviderConfig, error) {
 		ClientID:     getStringWithAlias("DM_OIDC_PROVIDER_CLIENT_ID", "DM_OIDC_AEGIS_CLIENT_ID", ""),
 		ClientSecret: getStringWithAlias("DM_OIDC_PROVIDER_CLIENT_SECRET", "DM_OIDC_AEGIS_CLIENT_SECRET", ""),
 		RedirectURI:  getStringWithAlias("DM_OIDC_PROVIDER_REDIRECT_URI", "DM_OIDC_AEGIS_REDIRECT_URI", ""),
+		// 默认回归通用 OIDC core scopes,不含 Aegis 私有 scope。
+		// 历史上这里硬编码了 "identity_verification" —— 对 Aegis 好使,
+		// 但 Keycloak / Auth0 / Okta 等严格 IdP 看到未注册的 scope 会直接
+		// `/authorize?error=invalid_scope` 拒绝授权,全站 SSO 登录挂掉。
+		// Aegis 部署必须在 env (DM_OIDC_PROVIDER_SCOPES 或 DM_OIDC_AEGIS_SCOPES)
+		// 里显式配置 "openid profile email phone offline_access identity_verification"。
+		// 缺失 identity_verification 时 is_verified 等 claim 不会返回,callback 静默
+		// 跳过 upsert(已在 claims.IsVerified=false 分支保护),不影响登录。
 		Scopes: getStringSliceWithAlias("DM_OIDC_PROVIDER_SCOPES", "DM_OIDC_AEGIS_SCOPES",
 			[]string{"openid", "profile", "email", "phone", "offline_access"}),
 

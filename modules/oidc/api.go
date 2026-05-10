@@ -81,6 +81,22 @@ type OIDC struct {
 	worker     *SyncWorker
 	tickLock   *RedisTickLock
 	cbGuard    *CallbackGuard
+
+	// verification 由 Init() 注入(user.IService 的子集),OIDC callback 拿到 IdP
+	// identity_verification claims 后调用 UpsertVerificationFromOIDC 写 user_verification。
+	//
+	// 小接口而非直接持 user.IService 是为了让 api_test 里的 newTestOIDC 可以注入
+	// fake,和已有 fakeUserLookup / fakeIdentityStore 的风格一致。nil 时 callback
+	// 不会尝试写库,等价于该 IdP 没返 identity_verification scope(fail-open,不阻断登录)。
+	verification verificationUpserter
+}
+
+// verificationUpserter OIDC callback 写 user_verification 的最小依赖接口。
+//
+// 生产路径下由 user.IService 直接实现(user.Service 已加 UpsertVerificationFromOIDC);
+// 测试可注入 fake 断言参数。
+type verificationUpserter interface {
+	UpsertVerificationFromOIDC(ctx context.Context, uid string, claims user.OIDCVerificationClaims) error
 }
 
 // New 构造 OIDC 模块(生产路径)。
@@ -156,6 +172,11 @@ func (o *OIDC) Init() error {
 		return fmt.Errorf("oidc: Init: expected user.IService, got %T", raw)
 	}
 	o.service = newService(o.cfg.Provider, o.store, newUserAdapter(userSvc, o.db))
+	// user.IService 已在本 PR 加 UpsertVerificationFromOIDC,直接作为 verificationUpserter 使用。
+	// 单测场景下 o.verification 可由 newTestOIDC 提前塞入 fake,跳过此赋值。
+	if o.verification == nil {
+		o.verification = userSvc
+	}
 
 	// SyncWorker:Aegis 侧账号状态变更(封号/改密/登出)→ DMWork 主动感知。
 	// Interval=0 视为禁用,适合本地开发 / DB 还没准备好 RT 行的早期阶段。
@@ -432,7 +453,20 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 	// (modules/user/api.go createUserWithRespAndTx 的 Names[] 分支),用户体验极差。
 	// 所以缺啥就拉一次 /userinfo 补啥(issue #1307)。
 	// userinfo 失败不阻断登录,只是失去自动绑定能力,等价于 IdP 没返这些 claim。
-	if claims.Email == "" || claims.PhoneNumber == "" || claims.Name == "" {
+	//
+	// identity_verification scope 类似(YUJ-382 + codex review 多轮):部分 Aegis
+	// 部署把 5 个字段全放 ID Token,另一些只在 /userinfo 暴露,还有一些只放部分
+	// 字段。为覆盖所有部署形态:只要 scope 已配置 **且** 任一必需字段未就位
+	// (IsVerified=false、VerifiedAt=0、VerifiedProvider 空、LegalName 空),
+	// 都触发 /userinfo 合并。代价:未实名用户每次登录多一跳 /userinfo 请求
+	// (IdP 端幂等、本地 http 超时兜底已有),换 Phase 1 直切方案在生产各种
+	// 部署形态下稳定生效。
+	needUserInfo := claims.Email == "" || claims.PhoneNumber == "" || claims.Name == ""
+	if !needUserInfo && hasIdentityVerificationScope(o.cfg.Provider.Scopes) &&
+		!hasCompleteVerificationClaims(claims) {
+		needUserInfo = true
+	}
+	if needUserInfo {
 		ui, uerr := o.client.UserInfo(c.Request.Context(), tok)
 		if uerr != nil {
 			o.Warn("OIDC callback userinfo 拉取失败,跳过补全",
@@ -458,6 +492,25 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 			}
 			if claims.Name == "" {
 				claims.Name = ui.Name
+			}
+			// identity_verification 合并:只在 ID Token 对应字段为空(或 is_verified 未置)
+			// 时才取 userinfo 的,避免 IdP 两边不一致时静默覆盖(ID Token 是签名权威,
+			// 优先保留)。IsVerified 本身只有 true 能向 false 走过 IdP 明确撤销的语义,
+			// 所以 userinfo 的 true 可以覆盖 ID Token 的 false(更新语义)。
+			if ui.IsVerified {
+				claims.IsVerified = true
+			}
+			if claims.VerifiedAt == 0 {
+				claims.VerifiedAt = ui.VerifiedAt
+			}
+			if claims.VerifiedProvider == "" {
+				claims.VerifiedProvider = ui.VerifiedProvider
+			}
+			if claims.LegalName == "" {
+				claims.LegalName = ui.LegalName
+			}
+			if claims.LegalEmail == "" {
+				claims.LegalEmail = ui.LegalEmail
 			}
 		}
 	}
@@ -549,6 +602,29 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 				claims.PhoneNumber, boolToInt(claims.PhoneVerified)); uerr != nil {
 				o.Error("更新 identity login info 失败", zap.Error(uerr))
 			}
+		}
+	}
+
+	// Aegis OIDC 直切(YUJ-382 / Aegis OIDC Phase 1):若 IdP 返回 identity_verification
+	// claims,登录时顺手 upsert user_verification 表。权威写入口从 dmwork-verify-service
+	// 的 HMAC 回调迁移到 oidc callback,前端协议/表 schema 均无变化。
+	//
+	// **失败只告警不阻断登录**:实名状态刷不了是 P2,用户登不进系统是 P0。
+	// 不满足条件(未配 upserter / is_verified=false / legal_name 空)直接跳过,不报错。
+	if o.verification != nil && claims.IsVerified.Bool() && claims.LegalName != "" && sessResp.UID != "" {
+		vclaims := user.OIDCVerificationClaims{
+			Subject:          claims.Subject,
+			VerifiedProvider: claims.VerifiedProvider,
+			VerifiedAt:       claims.VerifiedAt.Int64(),
+			LegalName:        claims.LegalName,
+			LegalEmail:       claims.LegalEmail,
+		}
+		if verr := o.verification.UpsertVerificationFromOIDC(c.Request.Context(), sessResp.UID, vclaims); verr != nil {
+			o.Warn("OIDC callback upsert verification failed (非致命,不阻断登录)",
+				zap.String("trace_id", traceID),
+				zap.String("sub_hash", subHash(claims.Subject)),
+				zap.String("provider", claims.VerifiedProvider),
+				zap.Error(verr))
 		}
 	}
 
@@ -839,4 +915,35 @@ func maskEmail(email string) string {
 		return email
 	}
 	return email[:1] + "***" + email[at:]
+}
+
+// hasIdentityVerificationScope 判断配置的 scopes 是否包含 identity_verification。
+//
+// 用于决定"ID Token 里的实名字段不完整时要不要再跑一趟 /userinfo 兜底" ——
+// 只有明确配置了 identity_verification 的部署才值得多这一跳 HTTP;否则(老部署
+// /不跑实名的 IdP)保持原有"email/phone/name 缺才 fetch"的最小干预语义。
+func hasIdentityVerificationScope(scopes []string) bool {
+	for _, s := range scopes {
+		if s == "identity_verification" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCompleteVerificationClaims 判断 ID Token 里的 identity_verification claims
+// 是否已经齐备到可以直接走 upsert。四个必需字段都就位才算 "完整":
+//
+//   - IsVerified=true:Aegis 明确标记该 sub 已实名
+//   - VerifiedAt > 0  :实名时间戳有效(UpsertVerificationFromOIDC 会拒 0)
+//   - VerifiedProvider:allowlist 校验源
+//   - LegalName       :实名姓名非空(upsert 的真正写入字段)
+//
+// 任一缺失则认为 ID Token 里的实名信息不可靠,需要 /userinfo 合并。LegalEmail
+// 允许空,不在完整性判断内。
+func hasCompleteVerificationClaims(c *IDTokenClaims) bool {
+	if c == nil {
+		return false
+	}
+	return c.IsVerified.Bool() && c.VerifiedAt > 0 && c.VerifiedProvider != "" && c.LegalName != ""
 }

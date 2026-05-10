@@ -1,14 +1,127 @@
 package oidc
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
+
+// IsVerifiedClaim 兜底 is_verified 的 bool / number / string 三种序列化形态。
+//
+// 背景:Aegis 当前实测把 is_verified 返成 JSON bool,但对接文档又写成 string
+// ("true" / "false")。Keycloak / Auth0 / Okta 等 IdP 的自定义 claim 写法也普遍
+// 按厂商管控面下发成 string(管理后台手动填值,UI 落 JSON 时加了引号)。
+//
+// aud 字段历史踩过一次类似坑(Verify 阶段 json.Unmarshal TypeError 直接挂掉所有登录,
+// 见 IDTokenClaims 的 aud 注释)。为防下次 IdP 把 wire 类型改了就全站登录失败,
+// is_verified 用 Custom Unmarshal 接 bool / number / string / null。
+//
+// 语义映射:
+//   - JSON bool  true / false       → true / false
+//   - JSON number 0/1 及其他         → 非零为 true
+//   - JSON string "true" / "1" /
+//     "yes"(大小写/空白不敏感)     → true
+//   - 其他字符串 / null / 缺字段     → false(保守,等价于 "未实名")
+//   - 类型完全无法识别时保留 error,落到 decode 阶段 → 登录失败但会带可读错误,
+//     而不是整个 Unmarshal 静默吞掉其他字段
+type IsVerifiedClaim bool
+
+// Bool 返回内部 bool 值,用于和 Go 原生 bool 互转(比如写 user 模块时)。
+func (c IsVerifiedClaim) Bool() bool { return bool(c) }
+
+func (c *IsVerifiedClaim) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		*c = false
+		return nil
+	}
+	// try JSON bool
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		*c = IsVerifiedClaim(b)
+		return nil
+	}
+	// try JSON number (int / float)
+	var n float64
+	if err := json.Unmarshal(data, &n); err == nil {
+		*c = IsVerifiedClaim(n != 0)
+		return nil
+	}
+	// try JSON string("true"/"1"/"yes" 视为 true,其他为 false)
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "true", "1", "yes":
+			*c = true
+		default:
+			*c = false
+		}
+		return nil
+	}
+	return fmt.Errorf("oidc: IsVerifiedClaim: unsupported JSON type: %s", string(data))
+}
+
+// VerifiedAtClaim 兜底 verified_at 的 number / string 两种序列化形态(Unix 秒)。
+//
+// 背景:Aegis 当前实测返 JSON number(Unix 秒),但:
+//   - 部分 IdP 管理后台把数字类型 claim 落成 string("1778331902")
+//   - 某些前置网关把大数用 JSON number 下发时会变成 JS float(1.778e9),
+//     Go 直接 Unmarshal 成 int64 会 TypeError(float64 不能收 int64)
+//
+// 处理:接 int64 / float64 / string("123")/ null / 缺字段。非法值返回 0,
+// 下游 hasCompleteVerificationClaims / UpsertVerificationFromOIDC 已在 VerifiedAt<=0
+// 分支拒写库,不会污染 user_verification 表。
+type VerifiedAtClaim int64
+
+// Int64 返回内部 Unix 秒(与 time.Unix(sec, 0) 对齐)。
+func (c VerifiedAtClaim) Int64() int64 { return int64(c) }
+
+func (c *VerifiedAtClaim) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		*c = 0
+		return nil
+	}
+	// try JSON int64(最常见,也最准确,不走 float 丢精度)
+	var i int64
+	if err := json.Unmarshal(data, &i); err == nil {
+		*c = VerifiedAtClaim(i)
+		return nil
+	}
+	// try JSON float(JS/网关 Stringify 过一遍的 Unix 秒)
+	var f float64
+	if err := json.Unmarshal(data, &f); err == nil {
+		*c = VerifiedAtClaim(int64(f))
+		return nil
+	}
+	// try JSON string("1778331902")
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*c = 0
+			return nil
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			*c = VerifiedAtClaim(n)
+			return nil
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			*c = VerifiedAtClaim(int64(f))
+			return nil
+		}
+		// 字符串非数字:保守当 0(未提供实名时间),让下游 VerifiedAt<=0 分支保护。
+		*c = 0
+		return nil
+	}
+	return fmt.Errorf("oidc: VerifiedAtClaim: unsupported JSON type: %s", string(data))
+}
 
 // ClientConfig OIDC Client 构造参数。从 ProviderConfig 派生,只保留 Client 自身需要的字段。
 type ClientConfig struct {
@@ -101,6 +214,10 @@ func (c *Client) Refresh(ctx context.Context, refreshToken string) (*oauth2.Toke
 //
 // /userinfo 比 ID Token 通常更新(IdP 侧后台变更可立即反映),
 // 是登录后做"账户信息同步"的权威源。
+//
+// identity_verification scope 下的 5 个字段也从 /userinfo 解出:部分 Aegis
+// 部署把它们放 ID Token,另一些只在 /userinfo 暴露,拉完 /userinfo 后由
+// callback 合并到 IDTokenClaims(YUJ-382 codex review 点)。
 type UserInfoClaims struct {
 	Subject       string `json:"sub"`
 	Email         string `json:"email"`
@@ -108,6 +225,13 @@ type UserInfoClaims struct {
 	PhoneNumber   string `json:"phone_number"`
 	PhoneVerified bool   `json:"phone_number_verified"`
 	Name          string `json:"name"`
+
+	// identity_verification scope 字段。类型与 IDTokenClaims 一致(POC 实测 + bool/number/string 兜底)。
+	IsVerified       IsVerifiedClaim `json:"is_verified"`
+	VerifiedAt       VerifiedAtClaim `json:"verified_at"`
+	VerifiedProvider string          `json:"verified_provider"`
+	LegalName        string          `json:"legal_name"`
+	LegalEmail       string          `json:"legal_email"`
 }
 
 // UserInfo 用 oauth2.Token 拉 /userinfo claims。
@@ -151,6 +275,26 @@ type IDTokenClaims struct {
 	Nonce         string `json:"nonce"`
 	IssuedAt      int64  `json:"iat"`
 	Expiry        int64  `json:"exp"`
+
+	// Aegis identity_verification scope claims(YUJ-382 / Aegis OIDC Phase 1)。
+	//
+	// 类型按 POC 实测 + wire-format 兜底:Aegis 对接文档把 is_verified / verified_at 写成 string,
+	// 实际 token payload 里 is_verified 是 JSON bool、verified_at 是 Unix 秒(number)。
+	// 任何一端改了 wire 类型(比如切 Keycloak/Auth0,或 Aegis 管理后台把字段重落 string)
+	// 就直接全站登录失败(json.Unmarshal TypeError),aud 字段历史已经踩过一次坑。
+	// 这里用 IsVerifiedClaim / VerifiedAtClaim 自定义 UnmarshalJSON 兜底 bool/number/string。
+	//
+	// 语义:
+	//   - IsVerified=true + LegalName != "" 视为"该 IdP 返回了一次有效实名结果",
+	//     dmworkim 侧据此 upsert user_verification 表。
+	//   - VerifiedProvider 是具体来源域名(如 "cas.example.com"),strip 到一级
+	//     (cas/wecom/feishu)再写库 + allowlist 校验,防 Aegis 返回意外值污染 source。
+	//   - LegalEmail 允许空,LegalName 必填(空字符串视为未实名,不写库)。
+	IsVerified       IsVerifiedClaim `json:"is_verified"`
+	VerifiedAt       VerifiedAtClaim `json:"verified_at"`
+	VerifiedProvider string          `json:"verified_provider"`
+	LegalName        string          `json:"legal_name"`
+	LegalEmail       string          `json:"legal_email"`
 }
 
 // VerifyIDToken 用 issuer JWKS 验签 ID Token,并把 claims 解码到 IDTokenClaims。

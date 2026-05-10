@@ -88,6 +88,17 @@ type IService interface {
 	// 内部委托给 *User 实现,需要在模块初始化时通过 (*Service).SetExternalLoginHandler 注入。
 	// 未注入或调用方为 *Service 以外的 IService 实现时,返回 ErrExternalLoginNotConfigured。
 	LoginByExternalIdentity(ctx context.Context, req ExternalLoginReq) (*ExternalLoginResp, error)
+
+	// UpsertVerificationFromOIDC 基于 Aegis OIDC identity_verification scope
+	// 返回的 claims 写入 user_verification 表(YUJ-382 / Aegis OIDC Phase 1 直切)。
+	//
+	// 自 2026-05-10 起替代原先的 verify-service HMAC 回调链路;权威写入口从
+	// /v1/internal/verification/complete 转移到 oidc callback(登录时即写)。
+	//
+	// 语义:幂等 upsert,冲突按 user_id 主键全字段覆盖。调用方(oidc callback)
+	// 负责判断 IsVerified / LegalName 非空 — 本方法再做一次防御式校验,空则 no-op。
+	// verifiedProvider 必须在 allowlist 白名单内(cas/wecom/feishu),否则返错不写。
+	UpsertVerificationFromOIDC(ctx context.Context, uid string, claims OIDCVerificationClaims) error
 }
 
 // ErrExternalLoginNotConfigured 外部登录未注入 handler（通常是单测中未走 user.New 完整初始化）
@@ -126,6 +137,98 @@ func (s *Service) LoginByExternalIdentity(ctx context.Context, req ExternalLogin
 		return nil, ErrExternalLoginNotConfigured
 	}
 	return s.extLogin.LoginByExternalIdentity(ctx, req)
+}
+
+// OIDCVerificationClaims 从 OIDC id_token / userinfo claims 里摘出的实名字段子集。
+//
+// 在 user 包定义(而不是直接引用 oidc.IDTokenClaims),避免 user → oidc 反向 import
+// 环 —— oidc 模块已经 import user。字段命名与 oidc 层一致,方便调用方直接拷贝。
+type OIDCVerificationClaims struct {
+	// Subject OIDC sub,作为 user_verification.source_sub 写入。
+	Subject string
+	// VerifiedProvider Aegis 返回的 provider 全名,如 "cas.example.com"。
+	// 存库前 strip 到一级(cas),不在 allowlist 内会被拒写。
+	VerifiedProvider string
+	// VerifiedAt Unix 秒,0 视为"未提供实名完成时间",Upsert 拒绝写入。
+	VerifiedAt int64
+	// LegalName 实名姓名。空字符串视为未实名,Upsert 拒绝写入。
+	LegalName string
+	// LegalEmail 实名邮箱,允许空。
+	LegalEmail string
+}
+
+// oidcVerificationProviderAllowlist 限定可写入 user_verification.source 的 provider 一级名。
+// 与 dmwork-verify-service / user_verification 表历史契约保持一致。
+//
+// Aegis 侧返回的 VerifiedProvider 是完整域名(如 "cas.example.com"),
+// strip 到首段后必须命中本集合;未知值(文档外的 IdP / 拼写错误 / 恶意篡改)
+// 直接 return error,不写脏数据到生产表。
+var oidcVerificationProviderAllowlist = map[string]struct{}{
+	"cas":    {},
+	"wecom":  {},
+	"feishu": {},
+}
+
+// UpsertVerificationFromOIDC 详见 IService 注释。
+//
+// 语义检查顺序:
+//  1. uid / VerifiedAt / LegalName 基本必填(防 oidc callback 上游误调)
+//  2. VerifiedProvider strip domain → allowlist 白名单
+//  3. 复用 verificationDB.Upsert(与 verify-service 写入同一 SQL 路径)
+func (s *Service) UpsertVerificationFromOIDC(ctx context.Context, uid string, claims OIDCVerificationClaims) error {
+	if uid == "" {
+		return errors.New("user: UpsertVerificationFromOIDC: uid required")
+	}
+	if claims.LegalName == "" {
+		return errors.New("user: UpsertVerificationFromOIDC: legal_name empty")
+	}
+	if claims.VerifiedAt <= 0 {
+		return errors.New("user: UpsertVerificationFromOIDC: verified_at invalid")
+	}
+	// VerifiedProvider 允许为空兜底,但仅当 Aegis 不返回 provider 字段时 ——
+	// 目前规范里是必填的,这里空 → 直接拒,防 source 列落 "" 这种脏值。
+	source := stripOIDCVerifiedProvider(claims.VerifiedProvider)
+	if source == "" {
+		return fmt.Errorf("user: UpsertVerificationFromOIDC: verified_provider empty")
+	}
+	if _, ok := oidcVerificationProviderAllowlist[source]; !ok {
+		return fmt.Errorf("user: UpsertVerificationFromOIDC: provider %q not in allowlist", source)
+	}
+
+	verifiedAt := time.Unix(claims.VerifiedAt, 0).UTC()
+	// source_sub = OIDC sub:跨 Aegis 重签发后可保证同一实名记录被覆盖而非分裂。
+	// 空 sub 兜底成空字符串,Upsert SQL 的 source_sub 列是 NOT NULL VARCHAR,空串合法。
+	sub := claims.Subject
+
+	m := &verificationModel{
+		UserID:     uid,
+		RealName:   claims.LegalName,
+		Source:     source,
+		SourceSub:  sub,
+		Email:      nullableVerificationString(claims.LegalEmail),
+		VerifiedAt: verifiedAt,
+	}
+	if err := s.verificationDB.Upsert(m); err != nil {
+		return fmt.Errorf("user: UpsertVerificationFromOIDC: db upsert: %w", err)
+	}
+	return nil
+}
+
+// stripOIDCVerifiedProvider 把 Aegis 返回的 verified_provider(如 "cas.example.com")
+// 截到首段("cas"),再做 allowlist 白名单校验。
+//
+// 采用 strings.SplitN(..., 2) 而非 Split(..., ".") 是为了保留"provider 名里本身含点"
+// 这种未来扩展可能性(届时只改 allowlist,不改 strip 逻辑)。空串 / 仅 "." 前缀
+// 等畸形输入直接返回空串,调用方拒写。
+func stripOIDCVerifiedProvider(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	// SplitN(p, ".", 2) 对 "cas" 返回 ["cas"],对 "cas.example.com" 返回
+	// ["cas", "example.com"] —— 取 [0] 即目标一级名。
+	first := strings.SplitN(p, ".", 2)[0]
+	return strings.ToLower(strings.TrimSpace(first))
 }
 
 // NewService NewService

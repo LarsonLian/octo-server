@@ -1,6 +1,26 @@
 # OCTO 实名认证链路（YUJ-354 / GH#1300）
 
-> 闭合 OCTO 后端 ↔ dmwork-verify-service（accounts.example.com）的实名回写链路。
+> **⚠️ 2026-05-10 起废弃（YUJ-382 / Aegis OIDC Phase 1）。**
+>
+> 本文档描述的 HMAC 回调链路（`/v1/internal/verification/complete`）和
+> 短时 JWT 签发（`/v1/internal/verify-token`）已随 dmwork-verify-service
+> 整体下线。新链路:Aegis IdP 在 ID Token / userinfo 里直接下发
+> `identity_verification` scope claims(`is_verified` / `verified_at` /
+> `verified_provider` / `legal_name` / `legal_email`),OIDC callback
+> 登录时即 upsert `user_verification` 表。
+>
+> - 权威入口：`modules/oidc/api.go` 的 `callback` handler
+> - 写库实现：`user.Service.UpsertVerificationFromOIDC`(`modules/user/service.go`)
+> - 表 schema（`user_verification`）完全保持不变,历史数据有效
+> - `OCTO_INTERNAL_HMAC_SECRET` / `OCTO_JWT_SECRET` / `OCTO_VERIFY_URL_BASE`
+>   / `OCTO_VERIFY_RETURN_TO_DEFAULT` 均已从部署 env 中删除
+> - 为兼容老 App,`/v1/internal/verify-token` 路由保留但恒回 `410 Gone`
+>   + 升级提示;`/v1/internal/verification/complete` 已彻底删除
+>
+> 下方描述仅供历史追溯,**不要据此实现或排障**。最新方案见
+> `docs/octo-aegis/aegis-oidc-migration-plan.md` v3。
+
+---
 
 ## 总体链路
 

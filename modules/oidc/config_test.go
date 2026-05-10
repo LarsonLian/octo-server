@@ -37,7 +37,12 @@ func TestLoadConfigFromEnv_Defaults(t *testing.T) {
 	}
 	wantScopes := []string{"openid", "profile", "email", "phone", "offline_access"}
 	if len(cfg.Provider.Scopes) != len(wantScopes) {
-		t.Fatalf("default scopes mismatch: %v", cfg.Provider.Scopes)
+		t.Fatalf("default scopes mismatch: got=%v want=%v", cfg.Provider.Scopes, wantScopes)
+	}
+	for i, s := range wantScopes {
+		if cfg.Provider.Scopes[i] != s {
+			t.Fatalf("default scopes[%d]=%q want=%q (full=%v)", i, cfg.Provider.Scopes[i], s, cfg.Provider.Scopes)
+		}
 	}
 	if cfg.Provider.SyncInterval != 15*time.Minute {
 		t.Fatalf("default sync_interval: %v", cfg.Provider.SyncInterval)

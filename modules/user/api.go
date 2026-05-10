@@ -269,10 +269,24 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 
 	}
 
-	// OCTO 实名认证链路（YUJ-354 / GH#1300）——
-	// /v1/internal/verification/complete 由 verify-service 回调，HMAC 鉴权；
-	// /v1/internal/verify-token 由 OCTO 前端调用，需登录态。
-	u.routeVerification(r)
+	// 老的 verify-service HMAC 回调 /v1/internal/verification/complete 与 5 分钟 JWT
+	// 签发 /v1/internal/verify-token 已随 Aegis OIDC 直切(YUJ-382 / Aegis OIDC Phase 1)
+	// 全部废弃,新链路走 oidc callback 直接写 user_verification。
+	//
+	// 为兼容已发布的老 App 客户端(调用 /v1/internal/verify-token 才能拿到跳转 URL),
+	// 保留 /verify-token 路由但恒回 410 Gone + 升级提示;不挂 AuthMiddleware ——
+	// 方案文档 v3 明确:老客户端的 token 可能已过期,先告知升级比先拒 401 更友好。
+	// /verification/complete 彻底删除:合法客户端只有 verify-service 自己,该服务已下线。
+	gone := r.Group("/v1/internal")
+	{
+		gone.POST("/verify-token", func(c *wkhttp.Context) {
+			c.AbortWithStatusJSON(http.StatusGone, gin.H{
+				"status":      "gone",
+				"message":     "实名认证功能已升级，请更新 App 到最新版本",
+				"upgrade_url": "https://accounts.example.com/profile/info?anchor=verification",
+			})
+		})
+	}
 
 	u.ctx.AddOnlineStatusListener(u.onlineService.listenOnlineStatus) // 监听在线状态
 	u.ctx.AddOnlineStatusListener(u.handleOnlineStatus)               // 需要放在listenOnlineStatus之后

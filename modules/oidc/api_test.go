@@ -103,6 +103,9 @@ func newTestOIDC(t *testing.T, mp *MockProvider, users *fakeUserLookup, store *f
 			AllowNewUser:         true,
 			RequireEmailVerified: true,
 			ReturnToHosts:        []string{"app.example.com"},
+			// YUJ-382:带上 identity_verification scope,确保
+			// hasIdentityVerificationScope 返回 true,测试覆盖 userinfo-only 实名合并路径。
+			Scopes: []string{"openid", "profile", "email", "identity_verification"},
 		},
 	}
 	return &OIDC{

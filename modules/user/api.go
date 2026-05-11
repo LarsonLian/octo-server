@@ -3484,14 +3484,26 @@ func ValidateName(name string) error {
 
 // ==================== Aegis OIDC Phase 2d — verify-token 翻译层 ====================
 
-// verifyTokenAegisURL 是老 App 调 /v1/internal/verify-token 后我们要返回的跳转地址。
-// 直接指向 Aegis 账户页实名锚点，并带上 return_to=dmwork:// 深链让 App 认证完能跳回来。
+// getVerifyTokenAegisURL 返回老 App 调 /v1/internal/verify-token 后我们要返回的跳转地址。
+//
+// OSS 部署者必须通过 OCTO_VERIFY_URL 环境变量配置自己的 Aegis/verify 服务入口。
+// 内部线上环境通过部署脚本注入对应值，不再硬编码到源码里。
+//
+// 为保持向后兼容（没设置 env 时行为），保留了原 Mininglamp 内部 URL 作为默认值 ——
+// 这样 internal dev / staging 不会因为漏配 env 而 regress。OSS release 流水线会通过
+// module_rewrites 把这个 default 改成 example.com。
 //
 // 注意:
-//   - URL 是硬编码常量;YUJ-394 明确要求不再签 HMAC / JWT,只是稳定代理一个地址。
+//   - URL 本身不再签 HMAC / JWT（YUJ-394），只是稳定代理一个地址。
 //   - return_to 必须是 dmwork:// 深链,不能是 https://,避免钓鱼。
-//   - 一旦未来 Aegis 把 URL 改了,需要回到这里改常量。
-const verifyTokenAegisURL = "https://accounts.example.com/profile/info?anchor=verification&return_to=octo://verified"
+func getVerifyTokenAegisURL() string {
+	if v := os.Getenv("OCTO_VERIFY_URL"); v != "" {
+		return v
+	}
+	// Internal default for backward compat (pre-env config). OSS
+	// builds rewrite this string via octo-release module_rewrites.
+	return "https://accounts.example.com/profile/info?anchor=verification&return_to=octo://verified"
+}
 
 // verifyTokenAegisExpiresIn 老 App 合同里 expires_in 是秒数;Aegis URL 本身没有过期概念,
 // 但老 App 拿到后会在这个窗口内打开浏览器,保持 5 分钟这个历史默认值即可。
@@ -3515,7 +3527,7 @@ func (u *User) verifyTokenAegisRedirect(c *wkhttp.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"url":        verifyTokenAegisURL,
+		"url":        getVerifyTokenAegisURL(),
 		"expires_in": verifyTokenAegisExpiresIn,
 	})
 }

@@ -72,76 +72,92 @@ func (sc *ServiceCOS) getClient() (*minio.Client, error) {
 }
 
 // publicEndpoint resolves the browser-facing parent domain used to issue
-// presigned URLs. COS uses virtual-hosted-style addressing
-// (`<bucket>.<host>/<key>`), so the value passed to the minio SDK is the
-// *parent* domain WITHOUT the bucket subdomain — the SDK adds the bucket
-// prefix back when constructing the signed request URL.
+// presigned URLs, and reports the addressing style (DNS vs path) the
+// minio SDK should use to reach it.
 //
-// Resolution order:
+// COS canonically uses virtual-hosted-style addressing
+// (`<bucket>.<host>/<key>`), but operators front the bucket with a
+// custom CDN / accelerator that exposes the bucket *path-style*
+// (`<host>/<bucket>/<key>`). Both shapes are supported:
 //
-//  1. `cosConfig.BucketURL` — the documented browser-facing endpoint.
-//     Operators using a custom domain (CNAME, CDN, or alternate COS
-//     region hostname) MUST set this. The host is expected to start with
-//     `<Bucket>.` per the documented shape (e.g.
-//     `https://my-bucket-12345678.cos.example.com`); that prefix is
-//     stripped here so what we hand the SDK is the parent domain
-//     (`cos.example.com`). The SDK's BucketLookupDNS then re-prefixes
-//     `my-bucket-12345678.` and the resulting URL host matches BucketURL
-//     exactly. No post-sign host rewrite is performed — the URL is
-//     signed against the host the browser will actually hit.
+//  1. Bucket-subdomain BucketURL (e.g.
+//     `https://my-bucket-12345678.cos.example.com`) — the documented
+//     shape. The `<bucket>.` prefix is stripped here so what we hand
+//     the SDK is the parent domain (`cos.example.com`); the SDK's
+//     `BucketLookupDNS` then re-attaches `<bucket>.` and the signed
+//     URL host matches BucketURL exactly.
 //
-//  2. Default SDK endpoint `cos.<region>.myqcloud.com` — used when
-//     BucketURL is empty. The SDK virtual-hosts to
-//     `<bucket>.cos.<region>.myqcloud.com`, which is the COS canonical
-//     shape and is reachable from the browser when deployers do not
-//     stand up a custom domain.
+//  2. Path-style BucketURL (e.g. `https://cdn.example.com`,
+//     `https://files.example.com`) — typical of a CDN that fronts the
+//     bucket without bucket-as-subdomain DNS. Detection key: the host
+//     does NOT start with `<bucket>.`. We hand the host to the SDK
+//     verbatim and request `BucketLookupPath`, so the SDK signs and
+//     produces `https://cdn.example.com/<bucket>/<key>` — the host
+//     the browser actually resolves.
 //
-// Limitation — non-bucket-prefixed BucketURL: a custom CDN / accelerator
-// domain that does NOT carry a `<bucket>.` subdomain (e.g.
-// `BucketURL=https://cdn.example.com`) is currently not supported. The
-// SDK is configured with `BucketLookupDNS` (line 66 / 160 below), so it
-// will virtual-host the bucket back onto whatever host we hand it,
-// producing `https://<bucket>.cdn.example.com` — a hostname that does
-// not exist in DNS. If your CDN routes `cdn.example.com/<bucket>/...`
-// in path-style instead, drop BucketURL (use the default SDK endpoint)
-// and front it with a plain reverse proxy, or open a tracker to add a
-// `BucketLookupPath` override knob here. The supported BucketURL shapes
-// are documented in `configs/tsdd.yaml` and the `docker/octo` config.
+//  3. BucketURL empty — fall back to the SDK canonical endpoint
+//     `cos.<region>.myqcloud.com` with `BucketLookupDNS`. This is the
+//     "no custom domain" deployment shape.
+//
+// In every case the URL is signed against the same host the browser
+// will hit. SigV4 covers `host` in the signed headers, so any post-sign
+// host rewrite would invalidate the signature — see the R6→R7 fix
+// history in this file.
 //
 // Returned `host` is the bare host[:port] suitable for `minio.New` (no
-// scheme, no path). `secure` reflects the URL scheme — `http://` flips it
-// to false so HTTP-only deployments (e.g. local emulators) do not get
-// silently upgraded to HTTPS.
-func (sc *ServiceCOS) publicEndpoint() (host string, secure bool) {
+// scheme, no path). `secure` reflects the URL scheme — `http://` flips
+// it to false so HTTP-only deployments (e.g. local emulators) do not
+// get silently upgraded to HTTPS. `lookup` is the SDK addressing style
+// to pair with `host` — DNS for bucket-subdomain BucketURL, Path for
+// path-style BucketURL.
+//
+// Hotfix history: the path-style branch is YUJ-846 (PR#50 R7→R8
+// follow-up). Before this fix the function returned only `(host,
+// secure)` and `newPublicClient` hardcoded `BucketLookupDNS`, so a
+// path-style BucketURL like `https://cdn.example.com` was silently
+// rewritten by the SDK into `https://<bucket>.cdn.example.com` — a
+// hostname that did not exist in DNS, producing
+// `net::ERR_NAME_NOT_RESOLVED` on every browser PUT.
+func (sc *ServiceCOS) publicEndpoint() (host string, secure bool, lookup minio.BucketLookupType) {
 	cosConfig := sc.ctx.GetConfig().COS
 	defaultHost := fmt.Sprintf("cos.%s.myqcloud.com", cosConfig.Region)
 
 	base := strings.TrimSpace(cosConfig.BucketURL)
 	if base == "" {
-		return defaultHost, true
+		return defaultHost, true, minio.BucketLookupDNS
 	}
 	parsed, err := url.Parse(strings.TrimRight(base, "/"))
 	if err != nil || parsed == nil || parsed.Host == "" {
 		sc.Warn("cos.bucketURL 解析失败，回退到默认 COS 域名", zap.String("bucketURL", base))
-		return defaultHost, true
+		return defaultHost, true, minio.BucketLookupDNS
 	}
 
+	secure = !strings.EqualFold(parsed.Scheme, "http")
 	h := parsed.Host
-	// Strip the documented `<bucket>.` subdomain so that BucketLookupDNS
-	// can re-prefix it without producing `<bucket>.<bucket>.cos...`.
+
 	if cosConfig.Bucket != "" {
 		bucketPrefix := cosConfig.Bucket + "."
-		h = strings.TrimPrefix(h, bucketPrefix)
+		if strings.HasPrefix(h, bucketPrefix) {
+			// Bucket-subdomain shape: strip the `<bucket>.` prefix so
+			// that BucketLookupDNS can re-attach it without producing
+			// `<bucket>.<bucket>.cos...`.
+			h = strings.TrimPrefix(h, bucketPrefix)
+			if h == "" {
+				// Bucket-name-only host (no parent domain) is degenerate
+				// and not a valid endpoint. Fall back to the default.
+				sc.Warn("cos.bucketURL 仅包含 bucket 子域，无父域可用作签名 endpoint，回退到默认 COS 域名",
+					zap.String("bucketURL", base))
+				return defaultHost, true, minio.BucketLookupDNS
+			}
+			return h, secure, minio.BucketLookupDNS
+		}
 	}
-	if h == "" {
-		// Bucket-name-only host (no parent domain) is degenerate and not
-		// a valid endpoint. Fall back to the default.
-		sc.Warn("cos.bucketURL 仅包含 bucket 子域，无父域可用作签名 endpoint，回退到默认 COS 域名",
-			zap.String("bucketURL", base))
-		return defaultHost, true
-	}
-	secure = !strings.EqualFold(parsed.Scheme, "http")
-	return h, secure
+
+	// Path-style: BucketURL host has no `<bucket>.` prefix, so the
+	// operator clearly intends the host to be reached as-is and the
+	// bucket to live in the URL path. SDK signs against `host`
+	// directly and emits `<host>/<bucket>/<key>`.
+	return h, secure, minio.BucketLookupPath
 }
 
 // newPublicClient builds a COS client signing against the browser-facing
@@ -152,6 +168,14 @@ func (sc *ServiceCOS) publicEndpoint() (host string, secure bool) {
 // signature is valid for — no rewriting needed. Same hazard MinIO closed
 // at PR#50 R3+; this is the COS-side mirror.
 //
+// The bucket addressing style (`BucketLookupDNS` vs `BucketLookupPath`)
+// is decided by `publicEndpoint` from the BucketURL shape — see that
+// function for the rules. We propagate the chosen style through to the
+// SDK so signing matches the URL we will hand the browser:
+// virtual-hosted (`<bucket>.<host>/<key>`) for bucket-subdomain
+// BucketURL, path-style (`<host>/<bucket>/<key>`) for CDN / accelerator
+// BucketURL without a `<bucket>.` subdomain.
+//
 // `Region` is set explicitly so the SDK skips a GetBucketLocation
 // preflight on first use — that preflight is the wrong thing to do for
 // pure URL signing (it is network I/O against a host the test
@@ -159,7 +183,7 @@ func (sc *ServiceCOS) publicEndpoint() (host string, secure bool) {
 // becomes deterministic / offline.
 func (sc *ServiceCOS) newPublicClient() (*minio.Client, error) {
 	cosConfig := sc.ctx.GetConfig().COS
-	host, secure := sc.publicEndpoint()
+	host, secure, lookup := sc.publicEndpoint()
 	region := strings.TrimSpace(cosConfig.Region)
 	if region == "" {
 		// SDK default; only reached if operator left region blank.
@@ -169,7 +193,7 @@ func (sc *ServiceCOS) newPublicClient() (*minio.Client, error) {
 		Creds:        credentials.NewStaticV4(cosConfig.SecretID, cosConfig.SecretKey, ""),
 		Secure:       secure,
 		Region:       region,
-		BucketLookup: minio.BucketLookupDNS,
+		BucketLookup: lookup,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("创建COS公网客户端失败: %w", err)
@@ -331,17 +355,78 @@ func extractFilenameFromDisposition(cd string) string {
 	return ""
 }
 
+// DownloadURL builds a browser-facing object URL that respects the
+// addressing style chosen by `publicEndpoint`. The result MUST land on
+// the same host (and path shape) as the presigned GET URL emitted by
+// `PresignedGetURL`, otherwise an upload-then-download flow returns
+// 404 even when the PUT succeeded.
+//
+// Hotfix history: this function previously concatenated `BucketURL`
+// with the object key directly, which silently dropped the bucket
+// segment for path-style CDN deployments (BucketURL=`https://cdn.example.com`):
+//
+//   - PresignedPutURL → `https://cdn.example.com/<bucket>/<prefix>/<key>` ✅
+//     (signed by `newPublicClient` with `BucketLookupPath`)
+//   - DownloadURL     → `https://cdn.example.com/<prefix>/<key>`           ❌
+//     (missing bucket segment → next browser GET = 404)
+//
+// `PresignedPutURL` calls `DownloadURL` to populate the
+// `downloadUrl` field returned by `/v1/file/upload-credentials`, so
+// the mismatch shipped to every browser client. This is the YUJ-848
+// follow-up to the YUJ-846 path-style fix in PR#56 — the sibling
+// `PresignedPutURL` / `PresignedGetURL` paths got `BucketLookupPath`
+// in PR#56, and this function now matches.
 func (sc *ServiceCOS) DownloadURL(ph string, filename string) (string, error) {
-	cosConfig := sc.ctx.GetConfig().COS
+	return sc.publicURL(ph), nil
+}
 
-	downloadBase := cosConfig.BucketURL
-	if strings.TrimSpace(downloadBase) == "" {
-		downloadBase = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cosConfig.Bucket, cosConfig.Region)
+// publicURL constructs a browser-facing object URL for `objectPath`,
+// respecting the BucketLookup addressing style decided by
+// `publicEndpoint`. It is the URL-construction sibling of
+// `newPublicClient` — both must agree on whether the bucket lives in
+// the host (DNS-style) or in the path (path-style), or the GET URL
+// will not address the same object as the signed PUT URL.
+//
+// Branches:
+//
+//  1. BucketURL empty — fall back to the SDK canonical endpoint
+//     `https://<bucket>.cos.<region>.myqcloud.com/<key>`. This mirrors
+//     `publicEndpoint` returning `BucketLookupDNS` against the default
+//     host; the bucket lives in the subdomain so we just append the key.
+//
+//  2. BucketURL is bucket-subdomain shape (host begins with `<bucket>.`) —
+//     `publicEndpoint` returns `BucketLookupDNS`. The bucket is already
+//     in the host, so `<BucketURL>/<key>` is the correct browser URL.
+//
+//  3. BucketURL is path-style (no `<bucket>.` subdomain, e.g.
+//     `https://cdn.example.com`) — `publicEndpoint` returns
+//     `BucketLookupPath`. The bucket must appear in the URL path, so
+//     the browser URL is `<BucketURL>/<bucket>/<key>`. Skipping the
+//     bucket segment here was the original YUJ-848 bug.
+//
+// `withPrefix` is applied identically in all three branches so the
+// env-prefix routing keeps working (multi-env shared bucket layout).
+func (sc *ServiceCOS) publicURL(objectPath string) string {
+	cosConfig := sc.ctx.GetConfig().COS
+	key := sc.withPrefix(objectPath)
+
+	base := strings.TrimRight(strings.TrimSpace(cosConfig.BucketURL), "/")
+	if base == "" {
+		// BucketURL empty: canonical bucket-as-subdomain shape.
+		base = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cosConfig.Bucket, cosConfig.Region)
+		result, _ := url.JoinPath(base, key)
+		return result
 	}
 
-	ph = sc.withPrefix(ph)
-	result, _ := url.JoinPath(downloadBase, ph)
-	return result, nil
+	_, _, lookup := sc.publicEndpoint()
+	if lookup == minio.BucketLookupPath {
+		// Path-style: bucket lives in the URL path, not the host.
+		result, _ := url.JoinPath(base, cosConfig.Bucket, key)
+		return result
+	}
+	// DNS-style: bucket already in the BucketURL host; just append key.
+	result, _ := url.JoinPath(base, key)
+	return result
 }
 
 // PresignedGetURL 生成预签名 GET URL，带 response-content-disposition 用于下载。

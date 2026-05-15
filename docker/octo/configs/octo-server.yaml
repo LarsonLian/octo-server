@@ -86,12 +86,10 @@ wukongIM:
 #   * Custom domain that carries the `<bucket>.` subdomain — e.g.
 #     `https://my-bucket-12345678.cos.example.com`. Stripped + re-prefixed
 #     internally so the signed URL host matches the browser's DNS view.
-#
-# Tencent COS — NOT supported: custom CDN / accelerator domains without
-# a `<bucket>.` subdomain (e.g. `https://cdn.example.com`). The SDK's
-# BucketLookupDNS will produce `<bucket>.cdn.example.com` which does not
-# resolve. Either front the default COS host with a plain reverse proxy
-# or open a tracker for a BucketLookupPath override.
+#   * Custom CDN / accelerator domain WITHOUT a `<bucket>.` subdomain —
+#     e.g. `https://cdn.example.com`. The server switches the SDK to
+#     BucketLookupPath and signs path-style URLs of the form
+#     `https://cdn.example.com/<bucket>/<key>`. Added in YUJ-846 hotfix.
 #
 # Aliyun OSS — V1 signing does NOT cover Content-Length or
 # Content-Disposition: deviating values at PUT time are silently

@@ -85,10 +85,32 @@ func (s *ServiceOSS) GetFile(path string) (io.ReadCloser, string, error) {
 	return nil, "", fmt.Errorf("GetFile not supported for OSS, use DownloadURL instead")
 }
 
+// DownloadURL returns the public anonymous-GET URL for an object stored in
+// the configured OSS bucket. The input `path` is the same shape that the
+// file API at `modules/file/api.go` produces — `<fileType>/<...>` (e.g.
+// `chat/2025/x.png`) — possibly with a leading slash.
+//
+// The path is routed through `normalizeOSSObjectKey` before being joined
+// with `BucketURL` so that the resulting URL points at the same OSS object
+// the upload paths actually wrote: `UploadFile` and `PresignedPutURL` both
+// strip a leading `<BucketName>/` segment to avoid double-bucketing the
+// stored key. Without that normalization step here, the asymmetric case
+// where the deployer's bucket name happens to equal a `fileType` prefix
+// (e.g. `OSS.BucketName == "chat"`, `path == "chat/2025/x.png"` → object
+// stored as `2025/x.png`) would emit a URL like
+// `<BucketURL>/chat/2025/x.png` and 404. PR#50 R5 codex finding 2.4 closed
+// this asymmetry on the upload side; lml2468 surfaced the surviving
+// download-side mismatch in PR#50 R6.
+//
+// The `filename` argument is preserved for API symmetry with other
+// backends but is not used for OSS V1 download URLs (operators wanting
+// per-request filename overrides should call `PresignedGetURL` instead,
+// which embeds `response-content-disposition` in the signed URL).
 func (s *ServiceOSS) DownloadURL(path string, filename string) (string, error) {
 	ossCfg := s.ctx.GetConfig().OSS
 
-	rpath, _ := url.JoinPath(ossCfg.BucketURL, path)
+	key := s.normalizeOSSObjectKey(path)
+	rpath, _ := url.JoinPath(ossCfg.BucketURL, key)
 	return rpath, nil
 }
 
@@ -122,7 +144,27 @@ func (s *ServiceOSS) normalizeOSSObjectKey(objectPath string) string {
 // upload time. We therefore include it in the signed headers so the client
 // echoes the same value, and the OSS gateway records it on the resulting
 // object.
-func (s *ServiceOSS) PresignedPutURL(objectPath string, contentType string, contentDisposition string, expires time.Duration) (uploadURL string, downloadURL string, err error) {
+//
+// fileSize is signed via `oss.ContentLength` so the OSS gateway rejects
+// any PUT whose Content-Length deviates from the value the server
+// committed to. This is the OSS-side analogue of the SigV4
+// Content-Length signing on MinIO/COS — both close the size-bypass gap
+// where any authenticated caller could otherwise upload arbitrary bytes
+// under an allowed extension. Pass a non-positive `fileSize` and the
+// function errors out rather than silently producing an unbounded URL.
+//
+// Caveat — Content-Disposition on OSS V1: the OSS V1 canonical-string
+// algorithm does NOT include Content-Disposition in the signed headers,
+// so a deviating value at PUT time does NOT produce SignatureDoesNotMatch
+// the way it does on MinIO/COS. The browser-supplied Content-Disposition
+// (or absence of one) is silently persisted. Operators who need strict
+// disposition enforcement should migrate to a SigV4 backend or run a
+// post-upload validator. See `getUploadCredentials` docstring for the
+// full deviation matrix.
+func (s *ServiceOSS) PresignedPutURL(objectPath string, contentType string, contentDisposition string, fileSize int64, expires time.Duration) (uploadURL string, downloadURL string, err error) {
+	if fileSize <= 0 {
+		return "", "", fmt.Errorf("预签名上传必须提供正向的 fileSize（字节数），用于在签名中固定 Content-Length")
+	}
 	client, err := s.newClient()
 	if err != nil {
 		return "", "", err
@@ -138,7 +180,7 @@ func (s *ServiceOSS) PresignedPutURL(objectPath string, contentType string, cont
 		return "", "", fmt.Errorf("空对象路径，无法生成预签名URL")
 	}
 
-	opts := []oss.Option{}
+	opts := []oss.Option{oss.ContentLength(fileSize)}
 	if contentType != "" {
 		opts = append(opts, oss.ContentType(contentType))
 	}

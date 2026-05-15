@@ -172,6 +172,87 @@ func TestPresignedURLs_SignAgainstPublicEndpoint(t *testing.T) {
 
 }
 
+// TestPresignedURLs_RejectPathPrefixedDownloadURL is the regression test
+// for the host:port-only contract on `cfg.Minio.DownloadURL`. R3 attempted
+// to support path-prefixed values like `https://octo.example.com/minio` by
+// hand-rolling the SigV4 canonical URI; that approach does not survive
+// nginx `proxy_pass <upstream>/` strip semantics (the canonical URI the
+// gateway sees no longer matches the one the signer signed). R4 drops
+// path-prefix support entirely and rejects the configuration up front so
+// operators upgrading from R3 see a clear error instead of an opaque
+// SignatureDoesNotMatch on every PUT/GET.
+//
+// The test pins three things:
+//
+//  1. PresignedPutURL returns the host:port-only error for path-prefixed
+//     values.
+//  2. PresignedGetURL returns the same error from the same input — the
+//     contract is symmetric across PUT and GET.
+//  3. The error message names the configuration key (`minio.downloadURL`)
+//     and points operators at the supported deployment shapes, not just a
+//     bare validation failure.
+func TestPresignedURLs_RejectPathPrefixedDownloadURL(t *testing.T) {
+	internalURL, _ := newFakeMinioServer(t)
+
+	cases := []struct {
+		name        string
+		downloadURL string
+	}{
+		{"single-segment path prefix", "https://octo.example.com/minio"},
+		{"trailing-slash path prefix", "https://octo.example.com/minio/"},
+		{"multi-segment path prefix", "https://octo.example.com/svc/minio"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.New()
+			cfg.Test = true
+			cfg.Minio.URL = internalURL
+			cfg.Minio.UploadURL = internalURL
+			cfg.Minio.DownloadURL = tc.downloadURL
+			cfg.Minio.AccessKeyID = "test-access-key"
+			cfg.Minio.SecretAccessKey = "test-secret-access-key-1234567890"
+
+			svc := file.NewServiceMinio(testutil.NewTestContext(cfg))
+
+			_, _, putErr := svc.PresignedPutURL("chat/abc.jpg", "image/jpeg", "", time.Minute)
+			require.Error(t, putErr,
+				"PresignedPutURL must reject path-prefixed downloadURL %q", tc.downloadURL)
+			assert.Contains(t, putErr.Error(), "minio.downloadURL",
+				"error must name the offending config key; got %v", putErr)
+			assert.Contains(t, putErr.Error(), "host:port",
+				"error must point operators at the supported shape; got %v", putErr)
+
+			_, getErr := svc.PresignedGetURL("chat/abc.jpg", "x.jpg", "attachment", time.Minute)
+			require.Error(t, getErr,
+				"PresignedGetURL must reject path-prefixed downloadURL %q", tc.downloadURL)
+			assert.Contains(t, getErr.Error(), "minio.downloadURL",
+				"error must name the offending config key; got %v", getErr)
+			assert.Contains(t, getErr.Error(), "host:port",
+				"error must point operators at the supported shape; got %v", getErr)
+		})
+	}
+
+	t.Run("trailing-slash-only is accepted", func(t *testing.T) {
+		// `https://host/` (single trailing slash, no path segment) is
+		// equivalent to host:port and must not trip the validator. This
+		// is the operator-friendly accept boundary called out in
+		// validatePublicDownloadURL's docstring.
+		cfg := config.New()
+		cfg.Test = true
+		cfg.Minio.URL = internalURL
+		cfg.Minio.UploadURL = internalURL
+		cfg.Minio.DownloadURL = "https://public.example.com/"
+		cfg.Minio.AccessKeyID = "test-access-key"
+		cfg.Minio.SecretAccessKey = "test-secret-access-key-1234567890"
+
+		svc := file.NewServiceMinio(testutil.NewTestContext(cfg))
+		_, _, err := svc.PresignedPutURL("chat/abc.jpg", "image/jpeg", "", time.Minute)
+		require.NoError(t, err,
+			"trailing-slash-only downloadURL must be accepted as host:port-equivalent")
+	})
+}
+
 // TestPresignedPutURL_ConcurrentBucketBootstrap exercises the concurrency
 // requirement called out in the PR#50 review: parallel presigned PUTs to the
 // same fresh bucket must not double-create or race the SetBucketPolicy step.

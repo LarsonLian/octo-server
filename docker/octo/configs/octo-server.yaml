@@ -81,30 +81,43 @@ minio:
   #
   # downloadURL is the BROWSER-FACING base URL: the host the user's browser
   # actually resolves and the host that presigned PUT/GET URLs are signed
-  # against. SigV4 includes `host` in the signed headers, so this MUST be
-  # the URL the browser will hit — there is no post-sign rewriting.
+  # against. SigV4 covers `host` and the canonical URI in the signed
+  # headers, so this MUST be the URL the browser will hit — there is no
+  # post-sign rewriting.
+  #
+  # Strict contract: downloadURL is a `scheme://host[:port]` URL with NO
+  # path component. The MinIO API must be reachable directly at that
+  # endpoint. Path-prefixed values (e.g. `https://octo.example.com/minio`)
+  # are rejected loudly at sign time — they cannot work under standard
+  # nginx `proxy_pass <upstream>/` semantics, where the matched prefix is
+  # stripped before forwarding and the gateway's view of the canonical
+  # URI no longer matches the one SigV4 signed.
   #
   # Typical values:
+  #   - docker-compose default:  http://octo.local:29000
+  #     (MinIO API exposed on host port 29000 — see OCTO_MINIO_API_PORT
+  #      in the deployment repo's docker-compose .env)
+  #   - dedicated subdomain:     https://minio.octo.example.com
+  #     (operator-driven; requires DNS + TLS cert pointing at MinIO)
   #   - direct LAN MinIO:        http://minio.local:9000
-  #   - nginx-proxied (path):    https://octo.example.com/minio
-  #   - nginx-proxied (subdom):  https://files.example.com
-  #   - host-port-mapped (dev):  http://127.0.0.1:9000
+  #
+  # NOT supported (rejected at startup / first sign):
+  #   - https://octo.example.com/minio  (path-prefixed via nginx)
   #
   # If left empty, downloadURL falls back to `url` and presigned URLs will
   # carry the internal `minio:9000` host — which works only when the Go
   # process and the browser share the same DNS view (i.e. for inside-cluster
-  # service-to-service tests, not real users). Set this once your nginx /
-  # reverse-proxy / host-port mapping is finalized.
+  # service-to-service tests, not real users). Set this once your MinIO API
+  # port mapping or subdomain is finalized.
   #
-  # Default: matches the bundled docker-compose stack's nginx route
-  # (octo.local:28080 → /minio/* → minio:9000). Override the host /
-  # port via the OCTO_DOMAIN and OCTO_HTTP_PORT env vars (see
-  # docker-compose.yaml in the deployment repo) when they differ from
-  # the defaults, or replace the whole value when running behind a
-  # different reverse proxy / host-port mapping. The internal hostname
-  # `minio` is intentionally NOT used here because browsers cannot
-  # resolve it.
-  downloadURL: "http://octo.local:28080/minio"
+  # Default: matches the bundled docker-compose stack with the MinIO API
+  # port published to the host. Override the host / port via the
+  # OCTO_DOMAIN and OCTO_MINIO_API_PORT env vars (see docker-compose.yaml
+  # in the deployment repo) when they differ from the defaults, or
+  # replace the whole value when running with a dedicated subdomain. The
+  # internal hostname `minio` is intentionally NOT used here because
+  # browsers cannot resolve it.
+  downloadURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_MINIO_API_PORT:-29000}"
   accessKeyID: "octoadmin"
   secretAccessKey: "CHANGE_ME_MINIO_PASSWORD"
 

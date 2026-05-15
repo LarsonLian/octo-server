@@ -11,17 +11,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
-	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
-	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
-	"github.com/gocraft/dbr/v2"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	rd "github.com/go-redis/redis"
+	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
 )
 
@@ -1066,9 +1066,9 @@ func (s *Space) getInvitePreview(c *wkhttp.Context) {
 		MaxUses:     invitation.MaxUses,
 		UsedCount:   invitation.UsedCount,
 		ExpiresAt:   expiresAtStr,
-		MemberCount: 0,            // 不暴露精确成员数量
+		MemberCount: 0,              // 不暴露精确成员数量
 		JoinMode:    space.JoinMode, // 告知客户端是否需要审批
-		Bots:        nil,          // 不暴露 Bot 列表
+		Bots:        nil,            // 不暴露 Bot 列表
 	})
 }
 
@@ -1546,20 +1546,18 @@ func (s *Space) notifyAdminsNewJoinApply(applicantUID, spaceId, spaceName string
 		content := fmt.Sprintf("有新的 Space 加入申请\n\n用户: %s (%s)\n\n空间: %s%s\n\n审批链接: %s",
 			applicantName, applicantUID, spaceName, emailText, approveURL)
 		notifyPayload := map[string]interface{}{
-			"content":  content,
-			"type":     common.Text,
-			"space_id": spaceId,
+			"content": content,
+			"type":    common.Text,
 		}
-		payload := []byte(util.ToJson(notifyPayload))
-		if err := s.ctx.SendMessage(&config.MsgSendReq{
-			FromUID:     s.ctx.GetConfig().Account.SystemUID,
-			ChannelID:   admin.UID,
-			ChannelType: common.ChannelTypePerson.Uint8(),
-			Payload:     payload,
-			Header: config.MsgHeader{
-				RedDot: 1,
-			},
-		}); err != nil {
+		// YUJ-674 / Mininglamp-OSS#37: PERSONAL DM via NewPersonalMsgSendReq builder.
+		// spaceId 是当前申请的 Space，作为 senderSpaceID 即权威值。
+		if err := s.ctx.SendMessage(config.NewPersonalMsgSendReq(
+			admin.UID,
+			s.ctx.GetConfig().Account.SystemUID,
+			notifyPayload,
+			spaceId,
+			config.PersonalMsgOptions{Header: config.MsgHeader{RedDot: 1}},
+		)); err != nil {
 			s.Warn("发送加入申请通知失败", zap.Error(err), zap.String("adminUID", admin.UID), zap.String("spaceId", spaceId))
 		}
 	}
@@ -1575,20 +1573,17 @@ func (s *Space) notifyApplicantJoinResult(applicantUID, spaceId, spaceName strin
 	}
 
 	resultPayload := map[string]interface{}{
-		"content":  content,
-		"type":     common.Text,
-		"space_id": spaceId,
+		"content": content,
+		"type":    common.Text,
 	}
-	payload := []byte(util.ToJson(resultPayload))
-	_ = s.ctx.SendMessage(&config.MsgSendReq{
-		FromUID:     s.ctx.GetConfig().Account.SystemUID,
-		ChannelID:   applicantUID,
-		ChannelType: common.ChannelTypePerson.Uint8(),
-		Payload:     payload,
-		Header: config.MsgHeader{
-			RedDot: 1,
-		},
-	})
+	// YUJ-674 / Mininglamp-OSS#37: PERSONAL DM via NewPersonalMsgSendReq builder.
+	_ = s.ctx.SendMessage(config.NewPersonalMsgSendReq(
+		applicantUID,
+		s.ctx.GetConfig().Account.SystemUID,
+		resultPayload,
+		spaceId,
+		config.PersonalMsgOptions{Header: config.MsgHeader{RedDot: 1}},
+	))
 }
 
 // joinApprovePage 返回 H5 审批页面（注入 apiURL）
@@ -1845,4 +1840,3 @@ func (s *Space) loadKnownSpaceIDs() {
 	spacepkg.RegisterSpaceIDs(ids)
 	s.Info("已注册 spaceId 到 ParseChannelID 缓存", zap.Int("count", len(ids)), zap.Strings("ids", ids))
 }
-

@@ -3,7 +3,6 @@ package app_bot
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -1075,9 +1074,22 @@ func (ab *AppBot) applyBot(c *wkhttp.Context) {
 	ab.fixFriendVersion(req.RobotUID, loginUID)
 
 	// 3. IM Whitelist (bidirectional, with space prefix if applicable)
+	// For space-scoped bots, use bot.SpaceID directly. createBot persists the
+	// authoritative scope in app_bot.space_id but does NOT add the App Bot UID
+	// into space_member, so space.GetCommonSpaceID (which joins space_member
+	// for both UIDs) returns "" for valid space-scoped bots. That would cause
+	// NewPersonalMsgSendReq below to fail-closed strip payload.space_id and
+	// the welcome DM would not be attributed to its authoritative Space.
+	// The membership check above already validated loginUID belongs to
+	// bot.SpaceID.
 	userChannelID := loginUID
 	botChannelID := req.RobotUID
-	spaceID := space.GetCommonSpaceID(ab.ctx, loginUID, req.RobotUID)
+	var spaceID string
+	if bot.Scope == "space" {
+		spaceID = bot.SpaceID
+	} else {
+		spaceID = space.GetCommonSpaceID(ab.ctx, loginUID, req.RobotUID)
+	}
 	if spaceID != "" {
 		userChannelID = fmt.Sprintf("s%s_%s", spaceID, loginUID)
 		botChannelID = fmt.Sprintf("s%s_%s", spaceID, req.RobotUID)
@@ -1121,23 +1133,20 @@ func (ab *AppBot) applyBot(c *wkhttp.Context) {
 	if bot.WelcomeMsg != "" {
 		welcomeContent = bot.WelcomeMsg
 	}
+	// YUJ-674 / Mininglamp-OSS#37: PERSONAL DM 走 NewPersonalMsgSendReq builder。
+	// spaceID 来自上方对 App Bot 的 Space 解析，非空时即为权威值；为空表示
+	// Bot 没有归属 Space，builder 会 fail-closed strip。
 	msgPayload := map[string]interface{}{
 		"content": welcomeContent,
 		"type":    common.Text,
 	}
-	if spaceID != "" {
-		msgPayload["space_id"] = spaceID
-	}
-	payload, _ := json.Marshal(msgPayload)
-	_ = ab.ctx.SendMessage(&config.MsgSendReq{
-		FromUID:     req.RobotUID,
-		ChannelID:   loginUID,
-		ChannelType: common.ChannelTypePerson.Uint8(),
-		Payload:     payload,
-		Header: config.MsgHeader{
-			RedDot: 1,
-		},
-	})
+	_ = ab.ctx.SendMessage(config.NewPersonalMsgSendReq(
+		loginUID,
+		req.RobotUID,
+		msgPayload,
+		spaceID,
+		config.PersonalMsgOptions{Header: config.MsgHeader{RedDot: 1}},
+	))
 
 	c.Response(gin.H{"status": "approved", "message": "\u5df2\u81ea\u52a8\u901a\u8fc7\uff0c\u53ef\u4ee5\u5f00\u59cb\u804a\u5929"})
 }
@@ -1161,4 +1170,3 @@ func generateAppBotToken() (string, error) {
 	}
 	return AppBotTokenPrefix + hex.EncodeToString(b), nil
 }
-

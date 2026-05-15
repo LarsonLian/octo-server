@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/group"
-	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
-	"github.com/Mininglamp-OSS/octo-server/pkg/util"
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/model"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/register"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
+	"github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -41,10 +41,18 @@ func (ch *Channel) Route(r *wkhttp.WKHttp) {
 	auth := r.Group("/v1", ch.ctx.AuthMiddleware(r))
 	{
 		auth.GET("/channel/state", ch.state)
-		auth.GET("/channels/:channel_id/:channel_type", ch.channelGet)                                  // 获取频道信息
-		auth.POST("/channels/:channel_id/:channel_type/message/autodelete", ch.setAutoDeleteForMessage) // 设置消息定时删除时间
-		auth.POST("/channels/:channel_id/:channel_type/message/clear", ch.clearChannelMessages)         // 清空频道消息
-		auth.GET("/channels/:channel_id/:channel_type/storyline", ch.getStoryline)                      // 获取群聊个人故事线
+		auth.GET("/channels/:channel_id/:channel_type", ch.channelGet)                          // 获取频道信息
+		auth.POST("/channels/:channel_id/:channel_type/message/clear", ch.clearChannelMessages) // 清空频道消息
+		auth.GET("/channels/:channel_id/:channel_type/storyline", ch.getStoryline)              // 获取群聊个人故事线
+	}
+
+	// Routes that build PERSONAL MsgSendReq need SpaceMiddleware so the
+	// PERSONAL branch can read a SpaceMiddleware-validated space_id from the
+	// gin context (spacepkg.GetSpaceID); without this, payload.space_id would
+	// be fail-closed stripped by the NewPersonalMsgSendReq builder.
+	spaceAuth := r.Group("/v1", ch.ctx.AuthMiddleware(r), spacepkg.SpaceMiddleware(ch.ctx))
+	{
+		spaceAuth.POST("/channels/:channel_id/:channel_type/message/autodelete", ch.setAutoDeleteForMessage) // 设置消息定时删除时间
 	}
 }
 
@@ -335,7 +343,11 @@ func (ch *Channel) setAutoDeleteForMessage(c *wkhttp.Context) {
 		return
 	}
 	if req.MsgAutoDelete > 0 {
-		payload := []byte(util.ToJson(map[string]interface{}{
+		// YUJ-674 / Mininglamp-OSS#37: PERSONAL 走 NewPersonalMsgSendReq builder
+		// (sender SpaceID 取自 SpaceMiddleware-validated context)。
+		// GROUP / COMMUNITY_TOPIC / 其它 channel_type 保留旧路径 — payload.space_id
+		// 的服务端权威注入依赖上游 enrichPayloadWithSpaceID（不在本 issue 范围）。
+		autoDeletePayloadMap := map[string]interface{}{
 			"content": fmt.Sprintf("{0}设置消息在 %s 后自动删除", formatSecondToDisplayTime(req.MsgAutoDelete)),
 			"type":    common.Tip,
 			"data": map[string]interface{}{
@@ -348,16 +360,27 @@ func (ch *Channel) setAutoDeleteForMessage(c *wkhttp.Context) {
 					Name: c.GetLoginName(),
 				},
 			},
-		}))
-		err := ch.ctx.SendMessage(&config.MsgSendReq{
-			FromUID:     loginUID,
-			ChannelID:   channelID,
-			ChannelType: channelType,
-			Payload:     payload,
-			Header: config.MsgHeader{
-				RedDot: 1,
-			},
-		})
+		}
+		var err error
+		if channelType == common.ChannelTypePerson.Uint8() {
+			err = ch.ctx.SendMessage(config.NewPersonalMsgSendReq(
+				channelID,
+				loginUID,
+				autoDeletePayloadMap,
+				spacepkg.GetSpaceID(c),
+				config.PersonalMsgOptions{Header: config.MsgHeader{RedDot: 1}},
+			))
+		} else {
+			err = ch.ctx.SendMessage(&config.MsgSendReq{
+				FromUID:     loginUID,
+				ChannelID:   channelID,
+				ChannelType: channelType,
+				Payload:     []byte(util.ToJson(autoDeletePayloadMap)),
+				Header: config.MsgHeader{
+					RedDot: 1,
+				},
+			})
+		}
 		if err != nil {
 			ch.Error("发送消息失败！", zap.Error(err))
 			c.ResponseError(errors.New("发送消息失败！"))

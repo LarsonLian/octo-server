@@ -27,8 +27,8 @@ type BotFriendApply struct {
 	ApplyName string `json:"apply_name"`
 	RobotID   string `json:"robot_id"`
 	Remark    string `json:"remark"`
-	Token     string `json:"token"`     // friend apply token from cache
-	SpaceID   string `json:"space_id"`  // 申请来源 Space，用于隔离通知
+	Token     string `json:"token"`    // friend apply token from cache
+	SpaceID   string `json:"space_id"` // 申请来源 Space，用于隔离通知
 	CreatedAt int64  `json:"created_at"`
 }
 
@@ -239,18 +239,14 @@ func (h *commandHandler) approveFriend(ownerUID string, applyUID string, robotID
 		"content": content,
 		"type":    common.Tip,
 	}
-	if applySpaceID != "" {
-		tipPayload["space_id"] = applySpaceID
-	}
-	_ = h.ctx.SendMessage(&config.MsgSendReq{
-		FromUID:     robotID,
-		ChannelID:   applyUID,
-		ChannelType: common.ChannelTypePerson.Uint8(),
-		Payload:     []byte(util.ToJson(tipPayload)),
-		Header: config.MsgHeader{
-			RedDot: 1,
-		},
-	})
+	// YUJ-674 / Mininglamp-OSS#37: PERSONAL DM via NewPersonalMsgSendReq builder.
+	_ = h.ctx.SendMessage(config.NewPersonalMsgSendReq(
+		applyUID,
+		robotID,
+		tipPayload,
+		applySpaceID,
+		config.PersonalMsgOptions{Header: config.MsgHeader{RedDot: 1}},
+	))
 
 	// 8. 清理 Redis
 	_ = h.DeleteBotFriendApply(robotID, applyUID)

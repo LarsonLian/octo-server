@@ -987,6 +987,11 @@ func (o *OIDC) redirectToBindPage(c *wkhttp.Context, sd *StateData, jti string) 
 	}
 	q := target.Query()
 	q.Set("token", jti)
+	// provider 段在 bind API 路径里 (/v1/auth/oidc/<provider>/bind/*),前端从
+	// query 取出后拼回 API URL;缺失时前端兜底到 legacyProviderPathID="aegis"。
+	if o.cfg.Provider.ID != "" {
+		q.Set("provider", o.cfg.Provider.ID)
+	}
 	if sd != nil && sd.ClientAuthcode != "" {
 		q.Set("authcode", sd.ClientAuthcode)
 	}
@@ -998,6 +1003,13 @@ func (o *OIDC) redirectToBindPage(c *wkhttp.Context, sd *StateData, jti string) 
 		}
 	}
 	target.RawQuery = q.Encode()
+	// Referrer-Policy: no-referrer 仅保护这一跳:浏览器从 callback URL 跳到
+	// bind 页时不会把 callback 的 ?code=... &state=... 经 Referer 泄漏给 bind
+	// 页 host。bind 页加载之后,其内部子资源是否泄漏"含 token/authcode 的
+	// bind 页 URL",取决于 bind 页**自己**的 Referrer-Policy(响应头或 meta),
+	// 后端无法跨域强制。前端 host 应同步下发 Referrer-Policy: no-referrer
+	// 作为纵深防御。
+	c.Header("Referrer-Policy", "no-referrer")
 	c.Redirect(http.StatusFound, target.String())
 }
 
@@ -1037,6 +1049,11 @@ func (o *OIDC) redirectAfterCallback(c *wkhttp.Context, sd *StateData, failed bo
 		}
 		target = target + sep + "oidc_error=1"
 	}
+	// 与 redirectToBindPage 同语义:防止 callback URL(IdP 回填的 code/state +
+	// 我们注入的 oidc_error 标记)在跳到 return_to 那一跳经 Referer 泄漏。code
+	// 是单次消费的,但 state 与时间窗内的 code 组合对反查仍有价值。无论成功还
+	// 是失败 callback 都走这条路径,所以统一加上。
+	c.Header("Referrer-Policy", "no-referrer")
 	c.Redirect(http.StatusFound, target)
 }
 

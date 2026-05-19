@@ -70,6 +70,13 @@ func TestDB_QueryUIDsByEmail_Integration(t *testing.T) {
 		"INSERT INTO user(uid, username, name, email, short_no, vercode, status, is_destroy) VALUES ('u-c','uc','C','same@x.com','sc','vc@1',1,1)",
 	).Exec()
 	require.NoError(t, err)
+	// 已封禁用户(status=0)也不该返回:之前缺这个过滤,SMS bind 会给停用账号
+	// 写 user_oidc_identity 行,然后 IssueSession 才拒绝,残留脏数据让该用户
+	// 后续 OIDC 登录持续失败。
+	_, err = ctx.DB().InsertBySql(
+		"INSERT INTO user(uid, username, name, email, short_no, vercode, status, is_destroy) VALUES ('u-d','ud','D','same@x.com','sd','vd@1',0,0)",
+	).Exec()
+	require.NoError(t, err)
 
 	uids, err := d.QueryUIDsByEmail("same@x.com")
 	require.NoError(t, err)
@@ -169,12 +176,22 @@ func TestDB_QueryUIDsByPhone_Integration(t *testing.T) {
 		"INSERT INTO user(uid, username, name, zone, phone, short_no, vercode, status, is_destroy) VALUES ('u-p1','up1','P1','0086','13900000001','sp1','vp1@1',1,0)",
 	).Exec()
 	require.NoError(t, err)
+	// 停用账号(status=0)不该出现在 bind locator 结果里,与 email 路径同款回归。
+	_, err = ctx.DB().InsertBySql(
+		"INSERT INTO user(uid, username, name, zone, phone, short_no, vercode, status, is_destroy) VALUES ('u-p2','up2','P2','0086','13900000002','sp2','vp2@1',0,0)",
+	).Exec()
+	require.NoError(t, err)
 
 	uids, err := d.QueryUIDsByPhone("0086", "13900000001")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"u-p1"}, uids)
 
-	none, err := d.QueryUIDsByPhone("0086", "13800000000")
+	// status=0 用户的 phone 查不到 (anti-binding-to-disabled-account)
+	none, err := d.QueryUIDsByPhone("0086", "13900000002")
+	require.NoError(t, err)
+	assert.Empty(t, none, "disabled (status=0) user must not appear in bind locator results")
+
+	none, err = d.QueryUIDsByPhone("0086", "13800000000")
 	require.NoError(t, err)
 	assert.Empty(t, none)
 
@@ -317,4 +334,44 @@ func TestDB_InsertAudit_Integration(t *testing.T) {
 		IP:      "127.0.0.1",
 		TraceID: "trace-1",
 	}))
+}
+
+// TestDB_UkUidIssuer_RejectsDuplicate_Integration 锁定迁移
+// 20260515000001_oidc_bind_uniques.sql 引入的 uk_uid_issuer 行为:
+//   - 同 (uid, issuer) 第二次插入(sub 不同)必须被 DB 唯一约束拒绝
+//   - 同 uid 跨不同 issuer 仍允许(多 IdP 绑定保留)
+//
+// 这是 OIDC 自助绑定 P0 FR-5.3 / SR-5 的硬保证 —— confirm 路径上层应用
+// 的 CAS 是次要防护,DB 约束才是兜底。
+func TestDB_UkUidIssuer_RejectsDuplicate_Integration(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	d := NewDB(ctx)
+
+	require.NoError(t, d.InsertIdentity(&IdentityModel{
+		UID: "u-uk", Issuer: "https://idp-a", Subject: "sub-1", LinkedAt: time.Now(),
+	}))
+
+	// 同 uid 同 issuer + 不同 sub: 必须被 uk_uid_issuer 拒绝,
+	// 而不是被 uk_issuer_subject(那条约束只看 issuer+subject)误判通过。
+	err := d.InsertIdentity(&IdentityModel{
+		UID: "u-uk", Issuer: "https://idp-a", Subject: "sub-2", LinkedAt: time.Now(),
+	})
+	require.Error(t, err, "duplicate (uid, issuer) must be rejected")
+	assert.True(t, isDuplicateKeyError(err),
+		"expected MySQL 1062 duplicate-key, got %v", err)
+	// 断言具体约束名,避免未来引入别的 unique key 时误判通过 ——
+	// MySQL 1062 错误消息携带 key 名,例如:
+	//   "Duplicate entry 'u-uk-https://idp-a' for key 'user_oidc_identity.uk_uid_issuer'"
+	assert.Contains(t, err.Error(), "uk_uid_issuer",
+		"rejection must come from uk_uid_issuer, not another constraint")
+
+	// 同 uid + 不同 issuer 允许(同一用户绑多个 IdP)
+	require.NoError(t, d.InsertIdentity(&IdentityModel{
+		UID: "u-uk", Issuer: "https://idp-b", Subject: "sub-3", LinkedAt: time.Now(),
+	}))
+
+	rows, err := d.QueryIdentitiesByUID("u-uk")
+	require.NoError(t, err)
+	assert.Len(t, rows, 2)
 }

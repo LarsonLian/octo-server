@@ -189,7 +189,7 @@ func (f *fakeOBOStore) findActiveGrantsForChannel(channelID string, channelType 
 	return out, nil
 }
 
-func (f *fakeOBOStore) insertGrant(grantorUID, granteeBotUID, mode string) (int64, error) {
+func (f *fakeOBOStore) insertGrant(grantorUID, granteeBotUID, mode, personaPrompt string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failInsertGrant != nil {
@@ -210,6 +210,7 @@ func (f *fakeOBOStore) insertGrant(grantorUID, granteeBotUID, mode string) (int6
 		Mode:          mode,
 		GlobalEnabled: 0,
 		Active:        1,
+		PersonaPrompt: personaPrompt,
 	}
 	return id, nil
 }
@@ -250,7 +251,7 @@ func (f *fakeOBOStore) findGrantByID(id int64) (*oboGrantModel, error) {
 	return &cp, nil
 }
 
-func (f *fakeOBOStore) updateGrant(id int64, mode string, globalEnabled *int) error {
+func (f *fakeOBOStore) updateGrant(id int64, mode string, globalEnabled *int, personaPrompt *string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ensureInit()
@@ -267,6 +268,9 @@ func (f *fakeOBOStore) updateGrant(id int64, mode string, globalEnabled *int) er
 			v = 1
 		}
 		g.GlobalEnabled = v
+	}
+	if personaPrompt != nil {
+		g.PersonaPrompt = *personaPrompt
 	}
 	return nil
 }
@@ -364,6 +368,93 @@ func (f *fakeOBOStore) reactivateGrant(id int64) error {
 	g.GlobalEnabled = 0
 	g.RevokedAt = nil
 	return nil
+}
+
+// deactivateOtherActiveGrants — removed in PR#109 R3 alongside the prod
+// impl. The atomic createOrReactivateGrantAtomic path is the only
+// supported entry point for the v2 mutex semantics.
+
+// createOrReactivateGrantAtomic — YUJ-1471 / PR#109 review blocker #2 + #3.
+// In-memory analogue of the prod transactional path. The fake's outer mu
+// already serializes all writes, so the mutex semantics fall out
+// naturally; we only need to express the (insert | reactivate) + demote
+// sequence and the "reactivation always overwrites persona_prompt"
+// invariant.
+//
+// Error injection: respects `failInsertGrant` so existing tests that
+// model an insert failure continue to surface the same error class
+// through the atomic API.
+func (f *fakeOBOStore) createOrReactivateGrantAtomic(grantorUID, granteeBotUID, mode, personaPrompt string) (*oboGrantModel, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensureInit()
+	if grantorUID == "" || granteeBotUID == "" {
+		return nil, false, errors.New("obo: grantor_uid and grantee_bot_uid are required")
+	}
+	if mode == "" {
+		mode = "auto"
+	}
+
+	// Look for an existing (grantor, bot) row — same predicate the
+	// prod UNIQUE KEY enforces.
+	var existing *oboGrantModel
+	for _, g := range f.grants {
+		if g.GrantorUID == grantorUID && g.GranteeBotUID == granteeBotUID {
+			existing = g
+			break
+		}
+	}
+
+	var (
+		target      *oboGrantModel
+		reactivated bool
+		now         = time.Now()
+	)
+
+	if existing == nil {
+		// Fresh insert path — honor the insert-failure injection hook so
+		// tests that asserted insertGrant errors still see them here.
+		if f.failInsertGrant != nil {
+			return nil, false, f.failInsertGrant
+		}
+		f.nextID++
+		id := f.nextID
+		target = &oboGrantModel{
+			ID:            id,
+			GrantorUID:    grantorUID,
+			GranteeBotUID: granteeBotUID,
+			Mode:          mode,
+			GlobalEnabled: 0,
+			Active:        1,
+			PersonaPrompt: personaPrompt,
+		}
+		f.grants[id] = target
+	} else if existing.Active == 1 {
+		// Live duplicate — surface the same 409 sentinel prod returns.
+		return nil, false, errOBOGrantAlreadyActive
+	} else {
+		// Reactivation — always overwrite persona_prompt, including
+		// when caller supplied "" (the "clear the prompt" signal).
+		existing.Active = 1
+		existing.GlobalEnabled = 0
+		existing.RevokedAt = nil
+		existing.PersonaPrompt = personaPrompt
+		target = existing
+		reactivated = true
+	}
+
+	// Demote every other active grant under the same grantor.
+	for _, g := range f.grants {
+		if g.GrantorUID != grantorUID || g.ID == target.ID || g.Active != 1 {
+			continue
+		}
+		g.Active = 0
+		g.GlobalEnabled = 0
+		g.RevokedAt = &now
+	}
+
+	cp := *target
+	return &cp, reactivated, nil
 }
 
 // findScopeOwner — O(1) lookup in the fake; mirrors prod JOIN result.

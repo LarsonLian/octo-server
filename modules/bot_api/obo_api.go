@@ -53,12 +53,25 @@ func (ba *BotAPI) registerOBORoutes(r *wkhttp.WKHttp) {
 
 // ==================== Request DTOs ====================
 
+// oboPersonaPromptMaxBytes caps the length of `persona_prompt` accepted on
+// the wire (PR#109 / YUJ-1471). The fan-out path appends the prompt to
+// every dispatched copy's `obo_system_hint`; an unbounded value would
+// balloon storage, the fan-out payload, and downstream LLM token budgets.
+// 4096 bytes is generous for natural-language guidance and matches the
+// cap surfaced by the persona editor in octo-web.
+const oboPersonaPromptMaxBytes = 4096
+
 type oboCreateGrantReq struct {
 	GranteeBotUID string `json:"grantee_bot_uid"`
 	// Mode defaults to "auto" on the server. v0 rejects anything else so a
 	// client can't quietly set "draft" and expect functionality. The field
 	// is kept on the wire for forward-compat with v1.
 	Mode string `json:"mode,omitempty"`
+	// PersonaPrompt — YUJ-1465 / Mininglamp-OSS/octo-server#108 (OBO v2).
+	// Optional free-form prompt the fan-out path appends to the synthetic
+	// `obo_system_hint` string. Empty / absent preserves legacy behavior
+	// (no prompt). Stored verbatim, including newlines and Unicode.
+	PersonaPrompt string `json:"persona_prompt,omitempty"`
 }
 
 type oboUpdateGrantReq struct {
@@ -67,6 +80,9 @@ type oboUpdateGrantReq struct {
 	// "field set to 0" are distinguishable on the wire. Per RFC §5.1
 	// PUT semantics: only provided fields are updated.
 	GlobalEnabled *int `json:"global_enabled,omitempty"`
+	// PersonaPrompt — YUJ-1465. Pointer so callers can distinguish
+	// "leave unchanged" (omit) from "clear the prompt" (empty string).
+	PersonaPrompt *string `json:"persona_prompt,omitempty"`
 }
 
 type oboCreateScopeReq struct {
@@ -99,6 +115,23 @@ type oboCreateScopeReq struct {
 //     pair (review #2 P1-1). global_enabled is intentionally reset to 0
 //     on reactivation so the caller must re-issue a PUT to enable fan-out
 //     — matches the fail-closed default for a brand-new grant.
+//
+// PR#109 / YUJ-1471 — review fixes:
+//   - The INSERT/reactivate + deactivate-others sequence now runs in a
+//     single MySQL transaction (createOrReactivateGrantAtomic) with
+//     `SELECT ... FOR UPDATE` on the grantor's user row, so two
+//     concurrent creates for different bots under the same grantor
+//     cannot both succeed and then mutually demote each other to
+//     active=0. Demotion failure rolls back the entire operation and
+//     surfaces a 500-class error (was previously a logged no-op that
+//     still returned 200).
+//   - Reactivation now always overwrites persona_prompt with the
+//     request value — including the empty string, which is the
+//     explicit "clear the prompt" signal. The previous behavior
+//     silently inherited the prior persona's prompt when a caller
+//     recreated a revoked grant without specifying one.
+//   - PersonaPrompt is capped at oboPersonaPromptMaxBytes; oversize
+//     payloads are rejected with HTTP 400 before any DB work.
 func (ba *BotAPI) oboCreateGrant(c *wkhttp.Context) {
 	uid := c.GetLoginUID()
 	if uid == "" {
@@ -127,6 +160,15 @@ func (ba *BotAPI) oboCreateGrant(c *wkhttp.Context) {
 		c.ResponseError(errors.New("mode 仅支持 auto (v0)"))
 		return
 	}
+	// PR#109 / YUJ-1471 — persona_prompt length cap. Fan-out appends
+	// the prompt to every dispatched copy; a runaway-size prompt would
+	// balloon storage, the obo_system_hint payload, and the LLM token
+	// budget. 4096 bytes is generous for natural-language guidance and
+	// matches the cap UI surfaces (see web persona editor).
+	if len(req.PersonaPrompt) > oboPersonaPromptMaxBytes {
+		c.ResponseError(errors.New("persona_prompt 长度超过上限 (最多 4096 字节)"))
+		return
+	}
 
 	// PR#82 review #1 P1-2 / review #2 P2-3 — grantee_bot_uid must be a bot
 	// the caller owns. Lookup hits the robot table (creator_uid) joined to
@@ -150,51 +192,17 @@ func (ba *BotAPI) oboCreateGrant(c *wkhttp.Context) {
 		return
 	}
 
-	id, err := ba.oboStoreOrDefault().insertGrant(uid, req.GranteeBotUID, mode)
+	grant, _, err := ba.oboStoreOrDefault().createOrReactivateGrantAtomic(uid, req.GranteeBotUID, mode, req.PersonaPrompt)
 	if err != nil {
-		if isDuplicateKeyErr(err) {
-			// Reactivation path: a row already exists. If it's a soft-deleted
-			// row owned by the same caller, flip it back to active and return
-			// the refreshed row. Anything else → 409.
-			existing, lookupErr := ba.oboStoreOrDefault().findGrantByGrantorBot(uid, req.GranteeBotUID)
-			if lookupErr != nil {
-				ba.Error("post-duplicate findGrant lookup failed", zap.Error(lookupErr))
-				c.JSON(http.StatusConflict, gin404("grant already exists"))
-				return
-			}
-			if existing == nil || existing.GrantorUID != uid {
-				// Shouldn't happen — UNIQUE on (grantor, grantee) means the
-				// duplicate must be ours. Defensive: 409 rather than 500.
-				c.JSON(http.StatusConflict, gin404("grant already exists"))
-				return
-			}
-			if existing.Active == 1 {
-				// Live row → genuine duplicate, not a reactivation case.
-				c.JSON(http.StatusConflict, gin404("grant already exists"))
-				return
-			}
-			if reactErr := ba.oboStoreOrDefault().reactivateGrant(existing.ID); reactErr != nil {
-				ba.Error("reactivateGrant failed", zap.Error(reactErr), zap.Int64("id", existing.ID))
-				c.ResponseError(errors.New("内部错误"))
-				return
-			}
-			refreshed, _ := ba.oboStoreOrDefault().findGrantByID(existing.ID)
-			if refreshed != nil {
-				c.Response(refreshed)
-				return
-			}
-			c.Response(map[string]interface{}{"id": existing.ID})
+		if errors.Is(err, errOBOGrantAlreadyActive) {
+			c.JSON(http.StatusConflict, gin404("grant already exists"))
 			return
 		}
-		ba.Error("insertGrant failed", zap.Error(err))
+		ba.Error("createOrReactivateGrantAtomic failed",
+			zap.Error(err),
+			zap.String("grantor", uid),
+			zap.String("bot", req.GranteeBotUID))
 		c.ResponseError(errors.New("内部错误"))
-		return
-	}
-	grant, err := ba.oboStoreOrDefault().findGrantByID(id)
-	if err != nil || grant == nil {
-		// Insert succeeded but read-back failed — return the bare ID so the
-		// client can still call other endpoints.
-		c.Response(map[string]interface{}{"id": id})
 		return
 	}
 	c.Response(grant)
@@ -288,12 +296,18 @@ func (ba *BotAPI) oboUpdateGrant(c *wkhttp.Context) {
 		c.ResponseError(errors.New("mode 仅支持 auto (v0)"))
 		return
 	}
-	if req.Mode == "" && req.GlobalEnabled == nil {
+	// PR#109 / YUJ-1471 — persona_prompt length cap. Same rationale as
+	// the create handler; rejected before any DB work hits the row.
+	if req.PersonaPrompt != nil && len(*req.PersonaPrompt) > oboPersonaPromptMaxBytes {
+		c.ResponseError(errors.New("persona_prompt 长度超过上限 (最多 4096 字节)"))
+		return
+	}
+	if req.Mode == "" && req.GlobalEnabled == nil && req.PersonaPrompt == nil {
 		// Idempotent no-op — return the existing row.
 		c.Response(grant)
 		return
 	}
-	if err := ba.oboStoreOrDefault().updateGrant(id, req.Mode, req.GlobalEnabled); err != nil {
+	if err := ba.oboStoreOrDefault().updateGrant(id, req.Mode, req.GlobalEnabled, req.PersonaPrompt); err != nil {
 		ba.Error("updateGrant failed", zap.Error(err), zap.Int64("id", id))
 		c.ResponseError(errors.New("内部错误"))
 		return

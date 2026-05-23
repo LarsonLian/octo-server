@@ -34,6 +34,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-server/pkg/mentionrewrite"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -521,4 +522,116 @@ func TestReminderSync_SenderExcludedFromBroadcast(t *testing.T) {
 	// And a third party sees both.
 	got = filterChannelLevelByPublisher(rows, "u_bystander")
 	assert.Len(t, got, 2)
+}
+
+// TestGetReminders_AisExpansionDoesNotPolluteReminderRows is the
+// PR#145 review-blocker regression (R3, YUJ-1810).
+//
+// Production flow we are pinning
+// ==============================
+//  1. sendMessage builds the in-memory `payload`.
+//  2. wirePayload = CloneForExpansion(payload) →
+//     ExpandAisToBotUIDs(wirePayload) stamps bot UIDs into
+//     wirePayload["mention"]["uids"].
+//  3. MsgSendReq.Payload = util.ToJson(wirePayload) — WuKongIM
+//     persists the EXPANDED bytes.
+//  4. WuKongIM webhooks back → listenerMessages → getReminders, which
+//     decodes the persisted (expanded) bytes via
+//     config.MessageResp.GetPayloadMap.
+//
+// So `getReminders` sees `mention.uids = [u_alice, bot_a, bot_b]` —
+// NOT the original `[u_alice]`. CloneForExpansion alone is
+// insufficient: it only protects the send-side in-memory map; the
+// listener path doesn't touch that map at all.
+//
+// Required guard
+// ==============
+// getReminders must call robotService.ExistRobot for each UID and
+// skip bots — that's the single source of truth for "no reminder
+// rows for bots", and it covers both server-expanded ais UIDs AND
+// user-typed explicit @bot_x mentions (bots never need a red-dot).
+//
+// What this test pins
+// ===================
+//  1. Wire bytes carry the expansion (legacy-adapter compat —
+//     same assertion as before).
+//  2. When the PERSISTED (= expanded) bytes are fed to getReminders
+//     with a robotService that knows {bot_a, bot_b} are bots, the
+//     emitted reminder set contains exactly ONE row for `u_alice`.
+//     Zero rows for `bot_a`, zero for `bot_b`, zero channel-level
+//     (no `humans=1`).
+//
+// If a future refactor removes the ExistRobot filter, this test
+// fails on bot_a / bot_b leaking into the reminder set.
+func TestGetReminders_AisExpansionDoesNotPolluteReminderRows(t *testing.T) {
+	const channelID = "ch_team"
+
+	// Caller-supplied payload: `@所有 AI + @alice` in a GROUP channel.
+	// The explicit human mention (`u_alice`) MUST still get a per-user
+	// reminder row; the broadcast (`ais=1`) MUST NOT — bots will
+	// respond via the delivery path.
+	original := map[string]interface{}{
+		"type":    1,
+		"content": "@所有 AI plus @alice",
+		"mention": map[string]interface{}{
+			"ais":  json.Number("1"),
+			"uids": []interface{}{"u_alice"},
+		},
+	}
+
+	// Simulate the chokepoint at sendMessage(): clone, expand on the
+	// clone, serialize the clone for the wire. Same shape as the
+	// production code at modules/message/api.go.
+	wire := mentionrewrite.CloneForExpansion(original)
+	wire = mentionrewrite.ExpandAisToBotUIDs(wire, common.ChannelTypeGroup.Uint8(), channelID,
+		func(string) ([]string, error) {
+			return []string{"bot_a", "bot_b"}, nil
+		})
+
+	// Assertion #1: wire bytes carry the expansion so legacy adapter
+	// bots that only inspect `mention.uids` on the WuKongIM payload
+	// still see the `@所有 AI` broadcast.
+	wireMention := wire["mention"].(map[string]interface{})
+	wireUIDs, _ := wireMention["uids"].([]interface{})
+	assert.ElementsMatch(t,
+		[]interface{}{"u_alice", "bot_a", "bot_b"},
+		wireUIDs,
+		"wire payload must include expanded bot UIDs for legacy adapter compat")
+
+	// Assertion #2: feed the EXPANDED wire payload bytes into
+	// getReminders (this is exactly what the listener path sees —
+	// WuKongIM persists the expanded bytes and webhooks them back via
+	// config.MessageResp.GetPayloadMap). The robotService recognizes
+	// bot_a / bot_b as bots, so getReminders' new ExistRobot guard
+	// must filter them out and emit ONLY the row for u_alice.
+	m := newReminderTestMessage(t)
+	m.robotService = &fakeExpandRobotService{
+		exist: map[string]bool{
+			"bot_a":   true,
+			"bot_b":   true,
+			"u_alice": false,
+		},
+	}
+	msg := &config.MessageResp{
+		ChannelID:   channelID,
+		ChannelType: common.ChannelTypeGroup.Uint8(),
+		FromUID:     "u_sender",
+		MessageID:   2024,
+		MessageSeq:  42,
+		ClientMsgNo: "cmn_pr145",
+		Payload:     payloadJSON(t, wire),
+	}
+	got := m.getReminders([]*config.MessageResp{msg})
+
+	// Exactly one reminder, for the human `u_alice`. Zero reminders
+	// for `bot_a` / `bot_b` / the channel-level broadcast (no
+	// `humans=1`, so no `[有人@我]` red-dot either).
+	assert.Len(t, got, 1, "exactly one reminder row, for the explicit human mention")
+	assert.Equal(t, "u_alice", got[0].UID,
+		"reminder must be for the explicit human UID, NOT a server-expanded bot UID")
+	for _, r := range got {
+		assert.NotEqual(t, "bot_a", r.UID, "bot_a must not receive a reminder row")
+		assert.NotEqual(t, "bot_b", r.UID, "bot_b must not receive a reminder row")
+		assert.NotEqual(t, "", r.UID, "no channel-level [有人@我] red-dot for ais-only broadcast")
+	}
 }

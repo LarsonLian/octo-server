@@ -746,16 +746,32 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	//     source_space_id=""），与 decideConvKeepInSpace 同口径 → Finding 2。
 	externalGroupMap, externalErr := co.groupDB.QueryExternalGroupNosForUser(loginUID)
 	if externalErr != nil {
-		// 非致命：缺失 my_source_space_id 不影响 conversation-level
-		// SpaceID 回填；保持空 map 让 fillConversationSpaceIDs 退化为
-		// 仅填 SpaceID。FilterConversationsBySpace 走它自己的失败兜底。
-		co.Warn("查询外部群失败，跳过 my_source_space_id 回填", zap.Error(externalErr))
-		externalGroupMap = make(map[string]string)
+		// Fail-closed (PR #159 review by Jerry-Xin)：
+		// space_memberships 是 authoritative 契约（客户端按 wipe-replace 处理），
+		// 这个 map 也是 buildSpaceMemberships 的输入。如果 fail-open 退化成空 map，
+		// 外部群条目会被序列化进 space_memberships 但缺失 my_source_space_id，
+		// 客户端无法察觉、重建 my-row 缓存时丢失外部群 source Space 链路 →
+		// SpaceFilter 对外部群再次 fail-open，与本 PR 要关闭的泄漏类同根。
+		// 与同 handler 下 GetGroupsWithMemberUID 失败的处理对称（一次 DB 抖动 →
+		// 500 → 客户端重试），保证 200 响应里的 space_memberships 行级完整。
+		co.Error("查询外部群失败！", zap.Error(externalErr))
+		c.ResponseErrorWithStatus(errors.New("查询外部群失败！"), http.StatusInternalServerError)
+		return
 	}
-	// defaultSpaceID 用于外部群 source_space_id="" 的空值兜底。
-	// 查询失败时返回空串，fillConversationSpaceIDs 自然退化为不写
-	// MySourceSpaceID —— omitempty 保持向后兼容。
-	defaultSpaceID := space.GetUserDefaultSpaceID(co.ctx, loginUID)
+	// defaultSpaceID 是外部群 source_space_id="" 的空值兜底（legacy 外部成员行）。
+	// 走 error-returning 变体并 fail-closed：与 QueryExternalGroupNosForUser /
+	// GetGroupsWithMemberUID 的失败处理对称，保证 200 响应里 space_memberships
+	// 的每个外部群行都带可靠的 my_source_space_id。
+	// 旧版 GetUserDefaultSpaceID 吞掉 DB error 返回 ""，会让 resolveMySourceSpaceID
+	// 在 legacy 外部行上回退到 ""，触发 omitempty 丢字段，客户端 wipe-replace 后
+	// 重建的 my-row 缺少 source Space 链路 → SpaceFilter 对外部群再次 fail-open
+	// （PR #159 review by Jerry-Xin / yujiawei P1）。
+	defaultSpaceID, defaultSpaceErr := space.GetUserDefaultSpaceIDE(co.ctx, loginUID)
+	if defaultSpaceErr != nil {
+		co.Error("查询用户默认 Space 失败！", zap.Error(defaultSpaceErr))
+		c.ResponseErrorWithStatus(errors.New("查询用户默认 Space 失败！"), http.StatusInternalServerError)
+		return
+	}
 	fillConversationSpaceIDs(syncUserConversationResps, rawGroupSpaceMap, externalGroupMap, defaultSpaceID)
 
 	// 查询通话中的频道
@@ -763,7 +779,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	joinedGroups, err := co.groupService.GetGroupsWithMemberUID(loginUID)
 	if err != nil {
 		co.Error("查询加入的群聊错误", zap.Error(err))
-		c.ResponseError(errors.New("查询加入的群聊错误"))
+		c.ResponseErrorWithStatus(errors.New("查询加入的群聊错误"), http.StatusInternalServerError)
 		return
 	}
 	callChannelIDs := make([]string, 0)
@@ -772,6 +788,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			callChannelIDs = append(callChannelIDs, g.GroupNo)
 		}
 	}
+	spaceMemberships := buildSpaceMemberships(joinedGroups, externalGroupMap, defaultSpaceID)
 	// 好友
 	friends, err := co.userService.GetFriends(loginUID)
 	if err != nil {
@@ -821,11 +838,12 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	}
 
 	c.Response(SyncUserConversationRespWrap{
-		Conversations: syncUserConversationResps,
-		UID:           loginUID,
-		Users:         users,
-		Groups:        groups,
-		ChannelStates: channelStates,
+		Conversations:    syncUserConversationResps,
+		UID:              loginUID,
+		Users:            users,
+		Groups:           groups,
+		ChannelStates:    channelStates,
+		SpaceMemberships: spaceMemberships,
 	})
 }
 
@@ -1151,11 +1169,22 @@ func (co *Conversation) clearConversationUnread(c *wkhttp.Context) {
 
 // SyncUserConversationRespWrap SyncUserConversationRespWrap
 type SyncUserConversationRespWrap struct {
-	UID           string                      `json:"uid"` // 请求者uid
-	Conversations []*SyncUserConversationResp `json:"conversations"`
-	Users         []*user.UserDetailResp      `json:"users"`          // 用户详情
-	Groups        []*group.GroupResp          `json:"groups"`         // 群
-	ChannelStates []*ChannelState             `json:"channel_status"` // 频道状态
+	UID              string                      `json:"uid"` // 请求者uid
+	Conversations    []*SyncUserConversationResp `json:"conversations"`
+	Users            []*user.UserDetailResp      `json:"users"`             // 用户详情
+	Groups           []*group.GroupResp          `json:"groups"`            // 群
+	ChannelStates    []*ChannelState             `json:"channel_status"`    // 频道状态
+	SpaceMemberships []SpaceMembership           `json:"space_memberships"` // 用户加入的全部群的 Space 归属
+}
+
+// SpaceMembership 是 /v1/conversation/sync 的 Space sideband 数据。
+// conversations[] 仍按增量返回；该字段每次返回用户已加入的全部群，
+// 供客户端刷新 group/my-row 缓存，避免增量批次缺少某个群时 SpaceFilter
+// 因缓存 miss 走 fail-open。
+type SpaceMembership struct {
+	ChannelID       string `json:"channel_id"`                   // 群 channel_id / group_no
+	SpaceID         string `json:"space_id"`                     // 群表权威 Space ID
+	MySourceSpaceID string `json:"my_source_space_id,omitempty"` // 外部群成员的 source Space ID
 }
 
 type clearConversationUnreadReq struct {
@@ -1323,9 +1352,9 @@ func (u userResp) from(user *user.Detail, avatarPath string) userResp {
 
 // SyncUserConversationResp 最近会话离线返回
 type SyncUserConversationResp struct {
-	ChannelID   string `json:"channel_id"`             // 频道ID
-	ChannelType uint8  `json:"channel_type"`           // 频道类型
-	SpaceID     string `json:"space_id,omitempty"`     // Space ID
+	ChannelID   string `json:"channel_id"`         // 频道ID
+	ChannelType uint8  `json:"channel_type"`       // 频道类型
+	SpaceID     string `json:"space_id,omitempty"` // Space ID
 	// MySourceSpaceID 仅在 GROUP / COMMUNITY_TOPIC 频道且当前用户以外部成员
 	// 身份加入时非空。值取自 group_member.source_space_id，对应"我从哪个
 	// Space 加入了这个外部群"。客户端 WebSocket 收到该群实时消息时，可据此
@@ -1521,6 +1550,28 @@ func fillConversationSpaceIDs(
 			}
 		}
 	}
+}
+
+func buildSpaceMemberships(
+	joinedGroups []*group.InfoResp,
+	externalGroupMap map[string]string,
+	defaultSpaceID string,
+) []SpaceMembership {
+	memberships := make([]SpaceMembership, 0, len(joinedGroups))
+	for _, g := range joinedGroups {
+		if g == nil || g.GroupNo == "" {
+			continue
+		}
+		m := SpaceMembership{
+			ChannelID: g.GroupNo,
+			SpaceID:   g.SpaceID,
+		}
+		if src, ok := externalGroupMap[g.GroupNo]; ok {
+			m.MySourceSpaceID = resolveMySourceSpaceID(src, defaultSpaceID)
+		}
+		memberships = append(memberships, m)
+	}
+	return memberships
 }
 
 // resolveMySourceSpaceID 把 externalGroupMap 的 source_space_id 解析为客户端实际

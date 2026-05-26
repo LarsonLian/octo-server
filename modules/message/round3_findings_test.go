@@ -1,6 +1,7 @@
 package message
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-lib/common"
@@ -268,6 +269,166 @@ func TestSpaceID_Round3_SidebarMySourceSpaceID(t *testing.T) {
 		got := sidebarMySourceSpaceID(map[string]string{"g1": ""}, "g1", "")
 		assert.Equal(t, "", got, "都空：退化空串")
 	})
+}
+
+// TestSpaceID_Round3_SpaceMemberships_AllJoinedGroups 验证
+// /v1/conversation/sync 新增的 sideband 契约：无论本批增量 conversations
+// 返回哪些会话，space_memberships 都必须覆盖用户已加入的全部群，供客户端
+// 初始化 group/my-row 缓存，关闭 groupSpaceId=null 与 my-row-not-cached 的
+// fail-open 窗口。
+func TestSpaceID_Round3_SpaceMemberships_AllJoinedGroups(t *testing.T) {
+	joinedGroups := []*group.InfoResp{
+		{GroupNo: "g_default", SpaceID: "minglue_default"},
+		{GroupNo: "g_external", SpaceID: "space_remote"},
+		{GroupNo: "g_legacy_ext", SpaceID: "space_remote"},
+	}
+	externalGroupMap := map[string]string{
+		"g_external":   "space_source",
+		"g_legacy_ext": "", // 旧外部成员行，必须兜底 defaultSpaceID。
+	}
+
+	got := buildSpaceMemberships(joinedGroups, externalGroupMap, "minglue_default")
+
+	require.Len(t, got, 3)
+	byID := make(map[string]SpaceMembership, len(got))
+	for _, m := range got {
+		byID[m.ChannelID] = m
+	}
+
+	assert.Equal(t, SpaceMembership{
+		ChannelID: "g_default",
+		SpaceID:   "minglue_default",
+	}, byID["g_default"])
+	assert.Equal(t, SpaceMembership{
+		ChannelID:       "g_external",
+		SpaceID:         "space_remote",
+		MySourceSpaceID: "space_source",
+	}, byID["g_external"])
+	assert.Equal(t, SpaceMembership{
+		ChannelID:       "g_legacy_ext",
+		SpaceID:         "space_remote",
+		MySourceSpaceID: "minglue_default",
+	}, byID["g_legacy_ext"])
+}
+
+func TestSpaceID_Round3_SpaceMemberships_KeepsLegacyEmptySpace(t *testing.T) {
+	got := buildSpaceMemberships([]*group.InfoResp{
+		nil,
+		{GroupNo: "", SpaceID: "spaceA"},
+		{GroupNo: "g1", SpaceID: ""},
+		{GroupNo: "g2", SpaceID: "spaceB"},
+	}, map[string]string{"g2": ""}, "")
+
+	require.Len(t, got, 2)
+	assert.Equal(t, SpaceMembership{ChannelID: "g1", SpaceID: ""}, got[0])
+	assert.Equal(t, SpaceMembership{ChannelID: "g2", SpaceID: "spaceB"}, got[1])
+}
+
+// TestSpaceID_SpaceMemberships_IndependentOfConversationBatch 是对客户端日志
+// (`space消息串了.txt`) 中 fail-open 泄漏窗口的回归保护：
+//
+//   - 用户在 minglue_default Space，外部 Space (5abbba...) 有 5 个群
+//   - 增量 sync 期间 IM 只返回有新消息的会话；这些群若都没新消息就不会进入
+//     本批 conversations，rawGroupSpaceMap 也不会覆盖它们
+//   - 客户端 SpaceFilter 缓存 miss → my-row-not-cached-fail-open 持续 12 分钟
+//     直到旁路接口补全缓存
+//
+// space_memberships 必须基于 GetGroupsWithMemberUID(loginUID)（用户加入的全部
+// 群），而不是从 conversation 批次推导，才能在增量为空的极端情况下也覆盖全部
+// 成员关系。本测试通过构造"joinedGroups 多于本批 conversations"的场景守护
+// 这条契约：只要 buildSpaceMemberships 接受 joinedGroups 而非 conversations，
+// 它就天然满足。
+func TestSpaceID_SpaceMemberships_IndependentOfConversationBatch(t *testing.T) {
+	// 模拟用户加入了 5 个群（含 1 个 minglue_default + 4 个 5abbba 外部 Space）
+	// 但本批增量 conversations 为空（所有群都没新消息）。
+	joinedGroups := []*group.InfoResp{
+		{GroupNo: "minglue_native_grp", SpaceID: "minglue_default"},
+		{GroupNo: "151a45970e1546afa9e947ac36a5c4e5", SpaceID: "5abbba247fa34bf28cec14a3256fae6a"}, // issue-feed
+		{GroupNo: "3413cadd19df42239d891067623d2bbb", SpaceID: "5abbba247fa34bf28cec14a3256fae6a"}, // dev-discussion
+		{GroupNo: "9ea115c7462b4b45b8c85d07d07e0dde", SpaceID: "5abbba247fa34bf28cec14a3256fae6a"},
+		{GroupNo: "c6717c018f974c2793635f9fa2c0e629", SpaceID: "5abbba247fa34bf28cec14a3256fae6a"},
+	}
+	externalGroupMap := map[string]string{
+		"151a45970e1546afa9e947ac36a5c4e5": "5abbba247fa34bf28cec14a3256fae6a",
+		"3413cadd19df42239d891067623d2bbb": "5abbba247fa34bf28cec14a3256fae6a",
+		"9ea115c7462b4b45b8c85d07d07e0dde": "5abbba247fa34bf28cec14a3256fae6a",
+		"c6717c018f974c2793635f9fa2c0e629": "5abbba247fa34bf28cec14a3256fae6a",
+	}
+
+	got := buildSpaceMemberships(joinedGroups, externalGroupMap, "minglue_default")
+
+	// 全部 5 个群必须返回，否则客户端将继续走 fail-open。
+	require.Len(t, got, 5, "space_memberships 必须覆盖用户已加入的全部群，不依赖本批 conversations")
+
+	byID := make(map[string]SpaceMembership, len(got))
+	for _, m := range got {
+		byID[m.ChannelID] = m
+	}
+	// 4 个外部群都应带正确的 space_id + my_source_space_id。
+	for _, gno := range []string{
+		"151a45970e1546afa9e947ac36a5c4e5",
+		"3413cadd19df42239d891067623d2bbb",
+		"9ea115c7462b4b45b8c85d07d07e0dde",
+		"c6717c018f974c2793635f9fa2c0e629",
+	} {
+		assert.Equal(t, "5abbba247fa34bf28cec14a3256fae6a", byID[gno].SpaceID,
+			"外部群 %s 必须带 space_id=5abbba...，否则客户端 group 表 fail-open", gno)
+		assert.Equal(t, "5abbba247fa34bf28cec14a3256fae6a", byID[gno].MySourceSpaceID,
+			"外部群 %s 必须带 my_source_space_id，否则客户端 my-row fail-open", gno)
+	}
+	// 本 Space 群无 my_source_space_id（非外部群）。
+	assert.Equal(t, SpaceMembership{
+		ChannelID: "minglue_native_grp",
+		SpaceID:   "minglue_default",
+	}, byID["minglue_native_grp"])
+}
+
+// TestSpaceID_SpaceMemberships_LeftGroupDropped 验证用户退群后该群不再
+// 出现在 space_memberships 中，避免客户端缓存里保留过期的成员关系。
+// GetGroupsWithMemberUID 一旦不再返回该群，buildSpaceMemberships 输出
+// 自然剔除——本测试守护这条数据流。
+func TestSpaceID_SpaceMemberships_LeftGroupDropped(t *testing.T) {
+	// 用户退出了 g_left，GetGroupsWithMemberUID 不再返回它，
+	// externalGroupMap 的 stale 行也不应让它"借尸还魂"。
+	joinedGroups := []*group.InfoResp{
+		{GroupNo: "g_kept", SpaceID: "spaceA"},
+	}
+	externalGroupMap := map[string]string{
+		"g_left": "spaceB", // 残留 — 不应注入新条目
+		"g_kept": "spaceA",
+	}
+
+	got := buildSpaceMemberships(joinedGroups, externalGroupMap, "minglue_default")
+
+	require.Len(t, got, 1, "退群后该群必须从 space_memberships 剔除")
+	assert.Equal(t, "g_kept", got[0].ChannelID)
+}
+
+// TestSyncUserConversationRespWrap_SpaceMembershipsSerializesAsEmptyArray 是
+// wire contract 的端到端守护：`SyncUserConversationRespWrap.SpaceMemberships`
+// 在用户加入 0 个群时必须序列化为 `[]` 而不是 `null`，且字段必须存在。
+//
+// 客户端按 "wipe-replace" 处理该字段（不在列表中 = 退群 → 删除本地缓存）。
+// 如果 JSON 编码出 `null`，三端的反序列化分支不一致：
+//   - Go/Kotlin/Swift 默认会把 null 当成"字段缺失" → 客户端跳过缓存重建 →
+//     残留过期成员关系 → SpaceFilter cached-match 继续放行跨 Space 消息
+//   - 部分客户端会把 null 当成空数组 → 触发 wipe-replace → 误删整个本地缓存
+//
+// buildSpaceMemberships 已用 `make([]SpaceMembership, 0, N)` 保证非 nil；
+// 本测试守护 wrapper 字段标签 + 编码结果，避免后续 refactor 不小心加上
+// omitempty 或改成指针类型破坏契约。
+func TestSyncUserConversationRespWrap_SpaceMembershipsSerializesAsEmptyArray(t *testing.T) {
+	wrap := SyncUserConversationRespWrap{
+		UID:              "u1",
+		Conversations:    []*SyncUserConversationResp{},
+		SpaceMemberships: buildSpaceMemberships(nil, nil, ""),
+	}
+	b, err := json.Marshal(wrap)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"space_memberships":[]`,
+		"空 space_memberships 必须序列化为 [] 而非 null；契约要求 empty array is authoritative")
+	assert.NotContains(t, string(b), `"space_memberships":null`,
+		"nil/null 形态会让客户端无法区分'用户无群'和'字段缺失'，破坏 wipe-replace 契约")
 }
 
 // 防止 unused import: group。这里通过引用 InfoResp 类型让 import 有意义。

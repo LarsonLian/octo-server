@@ -94,7 +94,7 @@ func (co *Conversation) Route(r *wkhttp.WKHttp) {
 	}
 	// UID 限流：Web 端轮询叠加易触发全局 per-IP 桶（见 wukongim#92 / octo-server#1086 P2），
 	// 共享 keyspace "ratelimit:uid:{uid}"，配额跨所有挂载端点统一
-	uidLimit := appwkhttp.SharedUIDRateLimiter(co.ctx)
+	uidLimit := appwkhttp.SharedUIDRateLimiter(r, co.ctx)
 
 	coversations := r.Group("/v1/coversations", co.ctx.AuthMiddleware(r), uidLimit, deprecatedLog)
 	{

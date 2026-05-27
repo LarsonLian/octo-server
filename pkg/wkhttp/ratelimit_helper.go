@@ -2,16 +2,12 @@ package wkhttp
 
 import (
 	"context"
-	"os"
-	"strconv"
 	"sync"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	libwkhttp "github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	octoredis "github.com/Mininglamp-OSS/octo-server/pkg/redis"
 	rd "github.com/go-redis/redis"
-	"go.uber.org/zap"
 )
 
 const (
@@ -45,7 +41,7 @@ var (
 //
 //	auth := r.Group("/v1/foo",
 //	    ctx.AuthMiddleware(r),
-//	    appwkhttp.SharedUIDRateLimiter(ctx),
+//	    appwkhttp.SharedUIDRateLimiter(r, ctx),
 //	)
 //
 // 环境变量（进程启动时读取一次，不支持热更新）：
@@ -54,15 +50,15 @@ var (
 //
 // 进程级单例：首次调用时按传入的 ctx 初始化；后续调用忽略 ctx，返回同一个中间件。
 // 在集成测试中若需用不同 Redis 实例重建，调用 resetUIDRateLimiterForTest。
-func SharedUIDRateLimiter(ctx *config.Context) libwkhttp.HandlerFunc {
+func SharedUIDRateLimiter(r *libwkhttp.WKHttp, ctx *config.Context) libwkhttp.HandlerFunc {
 	uidRateLimitMu.Lock()
 	defer uidRateLimitMu.Unlock()
 	if uidRateLimitReady {
 		return uidRateLimitMW
 	}
 
-	rps := ParseRPSFromEnv("DM_API_UID_RATELIMIT_RPS", defaultUIDRateLimitRPS)
-	burst := ParseBurstFromEnv("DM_API_UID_RATELIMIT_BURST", defaultUIDRateLimitBurst)
+	rps := libwkhttp.ParseRPSFromEnv("DM_API_UID_RATELIMIT_RPS", defaultUIDRateLimitRPS)
+	burst := libwkhttp.ParseBurstFromEnv("DM_API_UID_RATELIMIT_BURST", defaultUIDRateLimitBurst)
 
 	// 独立构造 go-redis client 的原因同 main.go：lib 的 redis.Conn 未暴露
 	// Eval/Script 接口，令牌桶 Lua 脚本必须走原生 go-redis。生命周期跟随进程。
@@ -72,39 +68,10 @@ func SharedUIDRateLimiter(ctx *config.Context) libwkhttp.HandlerFunc {
 		o.MaxRetries = 1
 		o.PoolSize = uidRateLimitPoolSize
 	}))
-	uidRateLimitMW = UIDRateLimitMiddleware(context.Background(), client, rps, burst)
+	if r == nil {
+		r = libwkhttp.New()
+	}
+	uidRateLimitMW = r.UIDRateLimitMiddleware(context.Background(), client, rps, burst)
 	uidRateLimitReady = true
 	return uidRateLimitMW
 }
-
-// ParseRPSFromEnv 解析 float 环境变量；缺省或解析失败回退到 def，
-// 无效值（负数 / 非法格式）打 Warn 日志，避免操作配置错误静默失败。
-func ParseRPSFromEnv(key string, def float64) float64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseFloat(v, 64)
-	if err != nil || n <= 0 {
-		log.Warn("invalid rate limit env var, using default",
-			zap.String("key", key), zap.String("value", v), zap.Float64("default", def))
-		return def
-	}
-	return n
-}
-
-// ParseBurstFromEnv 解析 int 环境变量；语义同 ParseRPSFromEnv。
-func ParseBurstFromEnv(key string, def int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		log.Warn("invalid rate limit env var, using default",
-			zap.String("key", key), zap.String("value", v), zap.Int("default", def))
-		return def
-	}
-	return n
-}
-

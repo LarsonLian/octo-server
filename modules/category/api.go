@@ -33,7 +33,7 @@ func New(ctx *config.Context) *Category {
 
 // Route 路由配置
 func (c *Category) Route(r *wkhttp.WKHttp) {
-	uidLimit := appwkhttp.SharedUIDRateLimiter(c.ctx)
+	uidLimit := appwkhttp.SharedUIDRateLimiter(r, c.ctx)
 	spaces := r.Group("/v1/spaces", c.ctx.AuthMiddleware(r), uidLimit)
 	{
 		spaces.POST("/:space_id/categories", c.create)

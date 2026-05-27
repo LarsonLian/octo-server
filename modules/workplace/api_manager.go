@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Mininglamp-OSS/octo-server/pkg/log"
-	"github.com/Mininglamp-OSS/octo-server/pkg/util"
-	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/pkg/log"
+	"github.com/Mininglamp-OSS/octo-server/pkg/util"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"go.uber.org/zap"
 )
 
@@ -35,7 +35,7 @@ func NewManager(ctx *config.Context) *manager {
 
 // Route 路由配置
 func (m *manager) Route(r *wkhttp.WKHttp) {
-	auth := r.Group("/v1/manager/workplace", m.ctx.AuthMiddleware(r), appwkhttp.SharedUIDRateLimiter(m.ctx))
+	auth := r.Group("/v1/manager/workplace", m.ctx.AuthMiddleware(r), appwkhttp.SharedUIDRateLimiter(r, m.ctx))
 	{
 		auth.POST("/category", m.addCategory)                                    // 添加分类
 		auth.GET("/category", m.getCategory)                                     // 获取分类

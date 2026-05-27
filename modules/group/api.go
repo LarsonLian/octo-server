@@ -126,7 +126,7 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 	// 记录。虽然有 AuthMiddleware，但登录用户仍可高频批量调用灌满 Redis。进程级共享的 per-UID
 	// 令牌桶（默认 2 rps, burst 60）把 UID 粒度的配额统一封顶，同时与 /v1/message、/v1/conversation
 	// 等认证路由保持一致的“按登录用户公平”语义，避免 NAT 场景下误伤同办公室合法用户。
-	authInviteGroup := r.Group("/v1/group", g.ctx.AuthMiddleware(r), appwkhttp.SharedUIDRateLimiter(g.ctx))
+	authInviteGroup := r.Group("/v1/group", g.ctx.AuthMiddleware(r), appwkhttp.SharedUIDRateLimiter(r, g.ctx))
 	{
 		authInviteGroup.POST("/invite/authorize", g.groupInviteAuthorize)
 	}
@@ -148,9 +148,9 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 		o.MaxRetries = 1
 		o.PoolSize = 10
 	}))
-	inviteRPS := appwkhttp.ParseRPSFromEnv("DM_API_GROUP_INVITE_RPS", 60.0) // 默认 60 rps ≈ 3600 req/min
-	inviteBurst := appwkhttp.ParseBurstFromEnv("DM_API_GROUP_INVITE_BURST", 200)
-	groupInviteLimit := appwkhttp.StrictIPRateLimitMiddleware(context.Background(), rlRedis, "group_invite", inviteRPS, inviteBurst)
+	inviteRPS := wkhttp.ParseRPSFromEnv("DM_API_GROUP_INVITE_RPS", 60.0) // 默认 60 rps ≈ 3600 req/min
+	inviteBurst := wkhttp.ParseBurstFromEnv("DM_API_GROUP_INVITE_BURST", 200)
+	groupInviteLimit := r.StrictIPRateLimitMiddleware(context.Background(), rlRedis, "group_invite", inviteRPS, inviteBurst)
 
 	openGroup := r.Group("/v1/group")
 	{

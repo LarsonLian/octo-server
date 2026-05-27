@@ -21,7 +21,6 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	octoredis "github.com/Mininglamp-OSS/octo-server/pkg/redis"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
-	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	rd "github.com/go-redis/redis"
 	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
@@ -102,7 +101,7 @@ func (s *Space) Route(r *wkhttp.WKHttp) {
 		o.MaxRetries = 1
 		o.PoolSize = 10
 	}))
-	invitePreviewLimit := appwkhttp.StrictIPRateLimitMiddleware(context.Background(), rlRedis, "space_invite", 10.0/60, 5)
+	invitePreviewLimit := r.StrictIPRateLimitMiddleware(context.Background(), rlRedis, "space_invite", 10.0/60, 5)
 
 	open := r.Group("/v1/space")
 	{

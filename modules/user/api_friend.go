@@ -56,7 +56,7 @@ func NewFriend(ctx *config.Context) *Friend {
 
 // Route 配置路由规则
 func (f *Friend) Route(r *wkhttp.WKHttp) {
-	uidLimit := appwkhttp.SharedUIDRateLimiter(f.ctx)
+	uidLimit := appwkhttp.SharedUIDRateLimiter(r, f.ctx)
 	friend := r.Group("/v1/friend", f.ctx.AuthMiddleware(r), uidLimit)
 	{
 		friend.POST("/apply", f.friendApply)           // 好友申请

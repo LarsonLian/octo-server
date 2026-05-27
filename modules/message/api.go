@@ -276,7 +276,7 @@ func New(ctx *config.Context) *Message {
 // Route 路由配置
 func (m *Message) Route(r *wkhttp.WKHttp) {
 	// UID 限流：所有认证路由组共享同一桶（详见 SharedUIDRateLimiter 注释）
-	uidLimit := appwkhttp.SharedUIDRateLimiter(m.ctx)
+	uidLimit := appwkhttp.SharedUIDRateLimiter(r, m.ctx)
 	// SpaceMiddleware 对齐 /v1/conversation：opt-in，未声明 X-Space-ID / space_id
 	// query 时直接放行；一旦声明就做成员校验并把 validated spaceID 写入 gin
 	// context。syncChannelMessage 的 Person 过滤（YUJ-219-A §4.1）因此读取 context

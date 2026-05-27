@@ -154,7 +154,7 @@ type sidebarSyncResp struct {
 // RegisterSidebarRoutes mounts /v1/sidebar/sync onto the router.
 func RegisterSidebarRoutes(r *wkhttp.WKHttp, ctx *config.Context) {
 	sb := NewSidebar(ctx)
-	uidLimit := appwkhttp.SharedUIDRateLimiter(ctx)
+	uidLimit := appwkhttp.SharedUIDRateLimiter(r, ctx)
 	grp := r.Group("/v1/sidebar", ctx.AuthMiddleware(r), uidLimit, spacepkg.SpaceMiddleware(ctx))
 	{
 		grp.POST("/sync", sb.Sync)

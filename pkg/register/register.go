@@ -1,6 +1,6 @@
 package register
 
-import "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
+import "github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 
 // APIRouter api路由者
 type APIRouter interface {

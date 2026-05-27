@@ -1,7 +1,6 @@
 package wkhttp
 
 import (
-	"os"
 	"testing"
 
 	libwkhttp "github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
@@ -16,80 +15,6 @@ func resetUIDRateLimiterForTest() {
 	defer uidRateLimitMu.Unlock()
 	uidRateLimitMW = nil
 	uidRateLimitReady = false
-}
-
-// setOrUnsetEnv 把 setenv("")（空串）与 unset（变量真正不存在）区分开。
-// os.Getenv 对两者返回值一致，但语义不同——这里按测试用例真实意图设置。
-func setOrUnsetEnv(t *testing.T, key, value string, unset bool) {
-	t.Helper()
-	if unset {
-		prev, had := os.LookupEnv(key)
-		require := func(err error) {
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		require(os.Unsetenv(key))
-		t.Cleanup(func() {
-			if had {
-				_ = os.Setenv(key, prev)
-			} else {
-				_ = os.Unsetenv(key)
-			}
-		})
-		return
-	}
-	t.Setenv(key, value)
-}
-
-func TestParseRPSFromEnv(t *testing.T) {
-	const key = "DM_API_RATELIMIT_TEST_RPS"
-
-	tests := []struct {
-		name  string
-		env   string
-		unset bool
-		def   float64
-		want  float64
-	}{
-		{name: "unset uses default", unset: true, def: 2.0, want: 2.0},
-		{name: "empty string uses default", env: "", def: 2.0, want: 2.0},
-		{name: "valid value", env: "5.5", def: 2.0, want: 5.5},
-		{name: "malformed falls back", env: "2x", def: 2.0, want: 2.0},
-		{name: "zero falls back", env: "0", def: 2.0, want: 2.0},
-		{name: "negative falls back", env: "-1", def: 2.0, want: 2.0},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			setOrUnsetEnv(t, key, tc.env, tc.unset)
-			assert.Equal(t, tc.want, ParseRPSFromEnv(key, tc.def))
-		})
-	}
-}
-
-func TestParseBurstFromEnv(t *testing.T) {
-	const key = "DM_API_RATELIMIT_TEST_BURST"
-
-	tests := []struct {
-		name  string
-		env   string
-		unset bool
-		def   int
-		want  int
-	}{
-		{name: "unset uses default", unset: true, def: 60, want: 60},
-		{name: "empty string uses default", env: "", def: 60, want: 60},
-		{name: "valid value", env: "100", def: 60, want: 100},
-		{name: "malformed falls back", env: "60x", def: 60, want: 60},
-		{name: "zero falls back", env: "0", def: 60, want: 60},
-		{name: "negative falls back", env: "-5", def: 60, want: 60},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			setOrUnsetEnv(t, key, tc.env, tc.unset)
-			assert.Equal(t, tc.want, ParseBurstFromEnv(key, tc.def))
-		})
-	}
 }
 
 // TestSharedUIDRateLimiterSingleton 验证多次调用返回同一实例，

@@ -14,14 +14,15 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/module"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	libwkhttp "github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/server"
 	_ "github.com/Mininglamp-OSS/octo-server/internal"
 	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	octodb "github.com/Mininglamp-OSS/octo-server/pkg/db"
+	octoi18n "github.com/Mininglamp-OSS/octo-server/pkg/i18n"
 	"github.com/Mininglamp-OSS/octo-server/pkg/metrics"
 	octoredis "github.com/Mininglamp-OSS/octo-server/pkg/redis"
-	"github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
 	rd "github.com/go-redis/redis"
 	"github.com/judwhite/go-svc"
@@ -92,19 +93,29 @@ func main() {
 func runAPI(ctx *config.Context) {
 	// 创建server
 	s := server.New(ctx)
-	ctx.SetHttpRoute(s.GetRoute())
+	route := s.GetRoute()
+	ctx.SetHttpRoute(route)
+	route.SetErrorRenderer(octoi18n.NewErrorRenderer(octoi18n.NewLocalizer(os.Getenv("DM_DEFAULT_LANGUAGE"))))
 	// 替换web下的配置文件
 	replaceWebConfig(ctx.GetConfig())
 	// 初始化api
-	s.GetRoute().UseGin(ctx.Tracer().GinMiddle()) // 需要放在 api.Route(s.GetRoute())的前面
+	trustedLangCIDRs, err := octoi18n.ParseCIDRList(os.Getenv("DM_TRUSTED_LANG_HEADER_CIDRS"))
+	if err != nil {
+		panic(fmt.Errorf("parse DM_TRUSTED_LANG_HEADER_CIDRS: %w", err))
+	}
+	route.UseGin(octoi18n.EarlyMiddleware(octoi18n.MiddlewareOptions{
+		DefaultLanguage:        os.Getenv("DM_DEFAULT_LANGUAGE"),
+		TrustedLangHeaderCIDRs: trustedLangCIDRs,
+	}))
+	route.UseGin(ctx.Tracer().GinMiddle()) // 需要放在 api.Route(s.GetRoute())的前面
 	// HTTP 入口指标(per-route latency / status / in-flight)。
 	// 装在 tracer 之后, 以便未来 histogram exemplar 能拿到 trace context;
 	// 装在 RateLimit 之前, 以记录 429 响应(被限流的请求也是真实流量)。
 	// 指标走全局 DefaultRegisterer, 与 modules/oidc/metrics.go 共享 /metrics 端点。
 	httpMetrics := metrics.NewHTTPMetrics(prometheus.DefaultRegisterer)
-	s.GetRoute().UseGin(httpMetrics.GinMiddleware())
+	route.UseGin(httpMetrics.GinMiddleware())
 	metricsSrv := startMetricsScrapeServer()
-	s.GetRoute().UseGin(func(c *gin.Context) {
+	route.UseGin(func(c *gin.Context) {
 		ingorePaths := ingorePaths()
 		for _, ingorePath := range ingorePaths {
 			if ingorePath == c.FullPath() {
@@ -117,8 +128,8 @@ func runAPI(ctx *config.Context) {
 	// （每人 1-2 rps × 数十人），200 余量过小；真实 DDoS 常数千 rps+，底线设 500
 	// 更合理。精细限流交给 UID 层和端点级严格桶（#1090）。
 	// 无效环境变量值回退到默认值 + Warn 日志，行为与 UID 层 helper 一致。
-	rps := wkhttp.ParseRPSFromEnv("DM_API_RATELIMIT_RPS", 500.0)
-	burst := wkhttp.ParseBurstFromEnv("DM_API_RATELIMIT_BURST", 1000)
+	rps := libwkhttp.ParseRPSFromEnv("DM_API_RATELIMIT_RPS", 500.0)
+	burst := libwkhttp.ParseBurstFromEnv("DM_API_RATELIMIT_BURST", 1000)
 	// 限流状态存 Redis，多副本共享配额；与 dmwork-lib 的 GetRedisConn 指向同一实例。
 	// 独立构造 client 的原因：lib 的 redis.Conn 未暴露 Eval/Script 接口，
 	// 而令牌桶需要 Lua 脚本保证原子性。
@@ -129,12 +140,12 @@ func runAPI(ctx *config.Context) {
 		o.MaxRetries = 1
 		o.PoolSize = 10
 	}))
-	s.GetRoute().UseGin(wkhttp.RateLimitMiddleware(context.Background(), rlRedis, rps, burst, "/v1/ping"))
+	route.Use(route.RateLimitMiddleware(context.Background(), rlRedis, rps, burst, "/v1/ping"))
 	// CORS 白名单覆盖：dmwork-lib 的 server.New 默认注入 "*" + Credentials:true，
 	// 本中间件在其后执行，按 DM_CORS_ALLOWED_ORIGINS 重写/剥离 Allow-Origin/Credentials。
 	// 未配置时等价于禁用跨域（剥离所有 CORS 响应头），仅允许同源调用。
-	s.GetRoute().UseGin(wkhttp.SecureCORSOverrideMiddleware(
-		wkhttp.ParseAllowedOrigins(os.Getenv("DM_CORS_ALLOWED_ORIGINS")),
+	route.UseGin(libwkhttp.SecureCORSOverrideMiddleware(
+		libwkhttp.ParseAllowedOrigins(os.Getenv("DM_CORS_ALLOWED_ORIGINS")),
 	))
 	// Legacy-database upgrade shim: rewrite the historical filename IDs in
 	// gorp_migrations to the new timestamp-prefixed format before
@@ -164,7 +175,7 @@ func runAPI(ctx *config.Context) {
 	rewriteCancel()
 
 	// 模块安装
-	err := module.Setup(ctx)
+	err = module.Setup(ctx)
 	if err != nil {
 		panic(err)
 	}

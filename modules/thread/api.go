@@ -3,7 +3,6 @@ package thread
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -13,6 +12,10 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
+	"github.com/Mininglamp-OSS/octo-server/pkg/i18n"
+	"github.com/Mininglamp-OSS/octo-server/pkg/i18n/codes"
 	"go.uber.org/zap"
 )
 
@@ -82,6 +85,74 @@ func (t *Thread) onMessages(messages []*config.MessageResp) {
 	}
 }
 
+func respondThreadError(c *wkhttp.Context, code codes.Code, details i18n.Details) {
+	httperr.ResponseErrorL(c, code, nil, details)
+}
+
+func respondThreadInvalidGroupNo(c *wkhttp.Context) {
+	respondThreadError(c, errcode.ErrThreadGroupNoInvalid, i18n.Details{"field": "group_no"})
+}
+
+func respondThreadInvalidShortID(c *wkhttp.Context) {
+	respondThreadError(c, errcode.ErrThreadShortIDInvalid, i18n.Details{"field": "short_id"})
+}
+
+func respondThreadInvalidName(c *wkhttp.Context) {
+	respondThreadError(c, errcode.ErrThreadNameInvalid, i18n.Details{
+		"field":      "name",
+		"max_length": 100,
+	})
+}
+
+func respondThreadInvalidRequest(c *wkhttp.Context, field string) {
+	details := i18n.Details{}
+	if field != "" {
+		details["field"] = field
+	}
+	respondThreadError(c, errcode.ErrThreadRequestInvalid, details)
+}
+
+func respondThreadSourceMessageInvalid(c *wkhttp.Context, details i18n.Details) {
+	respondThreadError(c, errcode.ErrThreadSourceMessageInvalid, details)
+}
+
+func respondThreadServiceError(c *wkhttp.Context, err error) {
+	respondThreadError(c, classifyThreadError(err), nil)
+}
+
+func classifyThreadError(err error) codes.Code {
+	if err == nil {
+		return errcode.ErrThreadStoreFailed
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "not a group member"):
+		return errcode.ErrThreadNotGroupMember
+	case strings.Contains(msg, "no permission"):
+		return errcode.ErrThreadPermissionDenied
+	case strings.Contains(msg, "creator cannot leave"):
+		return errcode.ErrThreadCreatorCannotLeave
+	case strings.Contains(msg, "thread status changed concurrently"):
+		return errcode.ErrThreadStatusChanged
+	case strings.Contains(msg, "thread is not active"):
+		return errcode.ErrThreadNotActive
+	// Check "not found" before "deleted": the DB layer returns the ambiguous
+	// "thread not found or already deleted" when affected=0, which we map to
+	// 404 NotFound (the more accurate default for clients hitting unknown IDs).
+	// The explicit service-layer "thread has been deleted" still maps to 410.
+	case strings.Contains(msg, "thread not found"):
+		return errcode.ErrThreadNotFound
+	case strings.Contains(msg, "thread has been deleted"):
+		return errcode.ErrThreadDeleted
+	case strings.Contains(msg, "name is required"):
+		return errcode.ErrThreadNameInvalid
+	case strings.Contains(msg, "invalid mute"), strings.Contains(msg, "mute must"):
+		return errcode.ErrThreadSettingInvalid
+	default:
+		return errcode.ErrThreadStoreFailed
+	}
+}
+
 // Route 注册路由
 func (t *Thread) Route(r *wkhttp.WKHttp) {
 	threads := r.Group("/v1/groups/:group_no/threads", t.ctx.AuthMiddleware(r))
@@ -120,7 +191,7 @@ func (t *Thread) createThread(c *wkhttp.Context) {
 
 	// 验证 groupNo 格式
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 
@@ -131,22 +202,25 @@ func (t *Thread) createThread(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		t.Error("参数错误", zap.Error(err))
-		c.ResponseError(errors.New("invalid request: name is required"))
+		respondThreadInvalidName(c)
 		return
 	}
 
 	// 校验 source_message_payload
 	if len(req.SourceMessagePayload) > 0 {
 		if req.SourceMessageID == nil {
-			c.ResponseError(errors.New("source_message_payload requires source_message_id"))
+			respondThreadSourceMessageInvalid(c, i18n.Details{"field": "source_message_id"})
 			return
 		}
 		if len(req.SourceMessagePayload) > maxSourcePayloadBytes {
-			c.ResponseError(errors.New("source_message_payload too large"))
+			respondThreadSourceMessageInvalid(c, i18n.Details{
+				"field":    "source_message_payload",
+				"max_size": maxSourcePayloadBytes,
+			})
 			return
 		}
 		if !json.Valid(req.SourceMessagePayload) || string(req.SourceMessagePayload) == "null" {
-			c.ResponseError(errors.New("invalid source_message_payload"))
+			respondThreadSourceMessageInvalid(c, i18n.Details{"field": "source_message_payload"})
 			return
 		}
 	}
@@ -161,7 +235,7 @@ func (t *Thread) createThread(c *wkhttp.Context) {
 	})
 	if err != nil {
 		t.Error("创建子区失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("uid", loginUID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.Response(resp)
@@ -175,11 +249,11 @@ func (t *Thread) updateThread(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
@@ -188,14 +262,14 @@ func (t *Thread) updateThread(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		t.Error("参数错误", zap.Error(err))
-		c.ResponseError(errors.New("invalid request: name is required and must not exceed 100 characters"))
+		respondThreadInvalidName(c)
 		return
 	}
 
 	err := t.service.UpdateName(groupNo, shortID, loginUID, req.Name)
 	if err != nil {
 		t.Error("修改子区名称失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.ResponseOK()
@@ -209,18 +283,18 @@ func (t *Thread) updateSetting(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
 	var req map[string]interface{}
 	if err := c.BindJSON(&req); err != nil {
 		t.Error("参数错误", zap.Error(err))
-		c.ResponseError(errors.New("invalid request"))
+		respondThreadInvalidRequest(c, "body")
 		return
 	}
 	if len(req) == 0 {
@@ -230,7 +304,7 @@ func (t *Thread) updateSetting(c *wkhttp.Context) {
 
 	if err := t.service.UpdateSetting(groupNo, shortID, loginUID, req); err != nil {
 		t.Error("更新子区设置失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.ResponseOK()
@@ -244,7 +318,7 @@ func (t *Thread) listThreads(c *wkhttp.Context) {
 
 	// 验证 groupNo 格式
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 
@@ -252,11 +326,11 @@ func (t *Thread) listThreads(c *wkhttp.Context) {
 	isMember, err := t.groupService.ExistMember(groupNo, loginUID)
 	if err != nil {
 		t.Error("检查群成员失败", zap.Error(err))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	if !isMember {
-		c.ResponseError(errors.New("not a group member"))
+		respondThreadError(c, errcode.ErrThreadNotGroupMember, nil)
 		return
 	}
 
@@ -274,14 +348,14 @@ func (t *Thread) listThreads(c *wkhttp.Context) {
 	// all=活跃+已归档（不含 deleted）。前端"已归档"入口走 status=archived。
 	statuses, err := parseListThreadStatuses(c.Query("status"))
 	if err != nil {
-		c.ResponseError(err)
+		respondThreadError(c, errcode.ErrThreadStatusInvalid, i18n.Details{"field": "status"})
 		return
 	}
 
 	threads, total, err := t.service.GetThreads(groupNo, statuses, pageIndex, pageSize)
 	if err != nil {
 		t.Error("获取子区列表失败", zap.Error(err), zap.String("groupNo", groupNo))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	if !hasPageParam {
@@ -320,11 +394,11 @@ func (t *Thread) getThread(c *wkhttp.Context) {
 
 	// 验证参数格式
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
@@ -332,18 +406,18 @@ func (t *Thread) getThread(c *wkhttp.Context) {
 	isMember, err := t.groupService.ExistMember(groupNo, loginUID)
 	if err != nil {
 		t.Error("检查群成员失败", zap.Error(err))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	if !isMember {
-		c.ResponseError(errors.New("not a group member"))
+		respondThreadError(c, errcode.ErrThreadNotGroupMember, nil)
 		return
 	}
 
 	thread, err := t.service.GetThread(groupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("获取子区详情失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.Response(thread)
@@ -358,18 +432,18 @@ func (t *Thread) archiveThread(c *wkhttp.Context) {
 
 	// 验证参数格式
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
 	err := t.service.ArchiveThread(groupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("归档子区失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.ResponseOK()
@@ -384,18 +458,18 @@ func (t *Thread) unarchiveThread(c *wkhttp.Context) {
 
 	// 验证参数格式
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
 	err := t.service.UnarchiveThread(groupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("取消归档失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.ResponseOK()
@@ -410,11 +484,11 @@ func (t *Thread) listMembers(c *wkhttp.Context) {
 
 	// 验证参数格式
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
@@ -422,18 +496,18 @@ func (t *Thread) listMembers(c *wkhttp.Context) {
 	isMember, err := t.groupService.ExistMember(groupNo, loginUID)
 	if err != nil {
 		t.Error("检查群成员失败", zap.Error(err))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	if !isMember {
-		c.ResponseError(errors.New("not a group member"))
+		respondThreadError(c, errcode.ErrThreadNotGroupMember, nil)
 		return
 	}
 
 	members, err := t.service.GetMembers(groupNo, shortID)
 	if err != nil {
 		t.Error("获取成员列表失败", zap.Error(err), zap.String("groupNo", groupNo))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.Response(members)
@@ -448,18 +522,18 @@ func (t *Thread) joinThread(c *wkhttp.Context) {
 
 	// 验证参数格式
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
 	err := t.service.JoinThread(groupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("加入子区失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.ResponseOK()
@@ -474,18 +548,18 @@ func (t *Thread) leaveThread(c *wkhttp.Context) {
 
 	// 验证参数格式
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
 	err := t.service.LeaveThread(groupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("离开子区失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.ResponseOK()
@@ -500,18 +574,18 @@ func (t *Thread) deleteThread(c *wkhttp.Context) {
 
 	// 验证参数格式
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
 	err := t.service.DeleteThread(groupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("删除子区失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.ResponseOK()
@@ -534,11 +608,11 @@ func (t *Thread) threadMdGet(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
@@ -546,18 +620,18 @@ func (t *Thread) threadMdGet(c *wkhttp.Context) {
 	isMember, err := t.groupService.ExistMember(groupNo, loginUID)
 	if err != nil {
 		t.Error("check group member failed", zap.Error(err))
-		c.ResponseError(errors.New("check group member failed"))
+		respondThreadError(c, errcode.ErrThreadStoreFailed, nil)
 		return
 	}
 	if !isMember {
-		c.ResponseError(errors.New("no permission"))
+		respondThreadError(c, errcode.ErrThreadPermissionDenied, nil)
 		return
 	}
 
 	result, err := t.service.GetThreadMd(groupNo, shortID)
 	if err != nil {
 		t.Error("query thread GROUP.md failed", zap.Error(err))
-		c.ResponseError(errors.New("query thread GROUP.md failed"))
+		respondThreadServiceError(c, err)
 		return
 	}
 	if result == nil {
@@ -584,11 +658,11 @@ func (t *Thread) threadMdUpdate(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
@@ -596,19 +670,22 @@ func (t *Thread) threadMdUpdate(c *wkhttp.Context) {
 		Content string `json:"content"`
 	}
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("invalid request body"))
+		respondThreadInvalidRequest(c, "body")
 		return
 	}
 
 	// 校验空内容
 	if strings.TrimSpace(req.Content) == "" {
-		c.ResponseError(errors.New("content must not be empty"))
+		respondThreadError(c, errcode.ErrThreadGroupMDContentEmpty, i18n.Details{"field": "content"})
 		return
 	}
 
 	maxSize := group.GetGroupMdMaxSize()
 	if len(req.Content) > maxSize {
-		c.ResponseError(fmt.Errorf("GROUP.md content exceeds max size %d bytes", maxSize))
+		respondThreadError(c, errcode.ErrThreadGroupMDContentTooLarge, i18n.Details{
+			"field":    "content",
+			"max_size": maxSize,
+		})
 		return
 	}
 
@@ -616,11 +693,11 @@ func (t *Thread) threadMdUpdate(c *wkhttp.Context) {
 	existThread, err := t.service.ExistThread(groupNo, shortID)
 	if err != nil {
 		t.Error("check thread existence failed", zap.Error(err))
-		c.ResponseError(errors.New("check thread existence failed"))
+		respondThreadError(c, errcode.ErrThreadStoreFailed, nil)
 		return
 	}
 	if !existThread {
-		c.ResponseError(errors.New("thread not found"))
+		respondThreadError(c, errcode.ErrThreadNotFound, nil)
 		return
 	}
 
@@ -628,11 +705,11 @@ func (t *Thread) threadMdUpdate(c *wkhttp.Context) {
 	canEdit, err := t.service.CanEditThreadMd(groupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("check edit permission failed", zap.Error(err))
-		c.ResponseError(errors.New("check edit permission failed"))
+		respondThreadError(c, errcode.ErrThreadStoreFailed, nil)
 		return
 	}
 	if !canEdit {
-		c.ResponseError(errors.New("no permission to edit thread GROUP.md"))
+		respondThreadError(c, errcode.ErrThreadPermissionDenied, nil)
 		return
 	}
 
@@ -640,7 +717,7 @@ func (t *Thread) threadMdUpdate(c *wkhttp.Context) {
 	newVersion, err := t.service.UpdateThreadMd(groupNo, shortID, req.Content, loginUID)
 	if err != nil {
 		t.Error("update thread GROUP.md failed", zap.Error(err))
-		c.ResponseError(errors.New("update thread GROUP.md failed"))
+		respondThreadError(c, errcode.ErrThreadStoreFailed, nil)
 		return
 	}
 
@@ -666,11 +743,11 @@ func (t *Thread) threadMdDelete(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
 	if !IsValidGroupNo(groupNo) {
-		c.ResponseError(errors.New("invalid group_no format"))
+		respondThreadInvalidGroupNo(c)
 		return
 	}
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
@@ -678,11 +755,11 @@ func (t *Thread) threadMdDelete(c *wkhttp.Context) {
 	existThread, err := t.service.ExistThread(groupNo, shortID)
 	if err != nil {
 		t.Error("check thread existence failed", zap.Error(err))
-		c.ResponseError(errors.New("check thread existence failed"))
+		respondThreadError(c, errcode.ErrThreadStoreFailed, nil)
 		return
 	}
 	if !existThread {
-		c.ResponseError(errors.New("thread not found"))
+		respondThreadError(c, errcode.ErrThreadNotFound, nil)
 		return
 	}
 
@@ -690,11 +767,11 @@ func (t *Thread) threadMdDelete(c *wkhttp.Context) {
 	canEdit, err := t.service.CanEditThreadMd(groupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("check edit permission failed", zap.Error(err))
-		c.ResponseError(errors.New("check edit permission failed"))
+		respondThreadError(c, errcode.ErrThreadStoreFailed, nil)
 		return
 	}
 	if !canEdit {
-		c.ResponseError(errors.New("no permission to delete thread GROUP.md"))
+		respondThreadError(c, errcode.ErrThreadPermissionDenied, nil)
 		return
 	}
 
@@ -702,7 +779,7 @@ func (t *Thread) threadMdDelete(c *wkhttp.Context) {
 	newVersion, err := t.service.DeleteThreadMd(groupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("delete thread GROUP.md failed", zap.Error(err))
-		c.ResponseError(errors.New("delete thread GROUP.md failed"))
+		respondThreadError(c, errcode.ErrThreadStoreFailed, nil)
 		return
 	}
 
@@ -769,7 +846,7 @@ func (t *Thread) joinThreadSimple(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
@@ -777,18 +854,18 @@ func (t *Thread) joinThreadSimple(c *wkhttp.Context) {
 	thread, err := t.db.QueryByShortID(shortID)
 	if err != nil {
 		t.Error("查询子区失败", zap.Error(err))
-		c.ResponseError(errors.New("thread not found"))
+		respondThreadError(c, errcode.ErrThreadNotFound, nil)
 		return
 	}
 	if thread == nil {
-		c.ResponseError(errors.New("thread not found"))
+		respondThreadError(c, errcode.ErrThreadNotFound, nil)
 		return
 	}
 
 	err = t.service.JoinThread(thread.GroupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("加入子区失败", zap.Error(err), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.ResponseOK()
@@ -801,20 +878,20 @@ func (t *Thread) leaveThreadSimple(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
 	thread, err := t.db.QueryByShortID(shortID)
 	if err != nil || thread == nil {
-		c.ResponseError(errors.New("thread not found"))
+		respondThreadError(c, errcode.ErrThreadNotFound, nil)
 		return
 	}
 
 	err = t.service.LeaveThread(thread.GroupNo, shortID, loginUID)
 	if err != nil {
 		t.Error("离开子区失败", zap.Error(err), zap.String("shortID", shortID))
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.ResponseOK()
@@ -827,30 +904,30 @@ func (t *Thread) getThreadSimple(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
 	if !IsValidShortID(shortID) {
-		c.ResponseError(errors.New("invalid short_id format"))
+		respondThreadInvalidShortID(c)
 		return
 	}
 
 	thread, err := t.db.QueryByShortID(shortID)
 	if err != nil || thread == nil {
-		c.ResponseError(errors.New("thread not found"))
+		respondThreadError(c, errcode.ErrThreadNotFound, nil)
 		return
 	}
 
 	// 验证是父群成员
 	isMember, err := t.groupService.ExistMember(thread.GroupNo, loginUID)
 	if err != nil {
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	if !isMember {
-		c.ResponseError(errors.New("not a group member"))
+		respondThreadError(c, errcode.ErrThreadNotGroupMember, nil)
 		return
 	}
 
 	resp, err := t.service.GetThread(thread.GroupNo, shortID, loginUID)
 	if err != nil {
-		c.ResponseError(err)
+		respondThreadServiceError(c, err)
 		return
 	}
 	c.Response(resp)

@@ -40,6 +40,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/Mininglamp-OSS/octo-server/pkg/auth"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/gin-gonic/gin"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -319,21 +320,21 @@ func (u *User) quit(c *wkhttp.Context) {
 	err := u.ctx.QuitUserDevice(loginUID, int(config.Web)) // 退出web
 	if err != nil {
 		u.Error("退出web设备失败", zap.Error(err))
-		c.ResponseError(errors.New("退出web设备失败"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 
 	err = u.ctx.QuitUserDevice(loginUID, int(config.PC))
 	if err != nil {
 		u.Error("退出PC设备失败", zap.Error(err))
-		c.ResponseError(errors.New("退出PC设备失败"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 
 	err = u.ctx.GetRedisConn().Del(fmt.Sprintf("%s%s", u.userDeviceTokenPrefix, loginUID))
 	if err != nil {
 		u.Error("删除设备token失败！", zap.Error(err))
-		c.ResponseError(errors.New("删除设备token失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	c.ResponseOK()
@@ -344,13 +345,13 @@ func (u *User) clearRedDot(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	category := c.Param("category")
 	if category == "" {
-		c.ResponseError(errors.New("分类不能为空"))
+		respondUserRequestInvalid(c, "category")
 		return
 	}
 	userRedDot, err := u.db.queryUserRedDot(loginUID, category)
 	if err != nil {
 		u.Error("查询用户红点错误", zap.Error(err))
-		c.ResponseError(errors.New("查询用户红点错误"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userRedDot != nil {
@@ -358,7 +359,7 @@ func (u *User) clearRedDot(c *wkhttp.Context) {
 		err = u.db.updateUserRedDot(userRedDot)
 		if err != nil {
 			u.Error("修改用户红点错误", zap.Error(err))
-			c.ResponseError(errors.New("查询用户红点错误"))
+			respondUserError(c, errcode.ErrUserQueryFailed)
 			return
 		}
 	}
@@ -370,13 +371,13 @@ func (u *User) getRedDot(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	category := c.Param("category")
 	if category == "" {
-		c.ResponseError(errors.New("分类不能为空"))
+		respondUserRequestInvalid(c, "category")
 		return
 	}
 	userRedDot, err := u.db.queryUserRedDot(loginUID, UserRedDotCategoryFriendApply)
 	if err != nil {
 		u.Error("查询用户红点错误", zap.Error(err))
-		c.ResponseError(errors.New("查询用户红点错误"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	count := 0
@@ -589,14 +590,14 @@ func (u *User) uploadAvatar(c *wkhttp.Context) {
 		err := c.Request.ParseMultipartForm(1024 * 1024 * 20) // 20M
 		if err != nil {
 			u.Error("数据格式不正确！", zap.Error(err))
-			c.ResponseError(errors.New("数据格式不正确！"))
+			respondUserRequestInvalid(c, "")
 			return
 		}
 	}
 	file, _, err := c.Request.FormFile("file")
 	if err != nil {
 		u.Error("读取文件失败！", zap.Error(err))
-		c.ResponseError(errors.New("读取文件失败！"))
+		respondUserError(c, errcode.ErrUserFileOperationFailed)
 		return
 	}
 	avatarID := crc32.ChecksumIEEE([]byte(targetUID)) % uint32(u.ctx.GetConfig().Avatar.Partition)
@@ -607,7 +608,7 @@ func (u *User) uploadAvatar(c *wkhttp.Context) {
 	defer file.Close()
 	if err != nil {
 		u.Error("上传文件失败！", zap.Error(err))
-		c.ResponseError(errors.New("上传文件失败！"))
+		respondUserError(c, errcode.ErrUserFileOperationFailed)
 		return
 	}
 	friends, err := u.friendDB.QueryFriends(targetUID)
@@ -637,7 +638,7 @@ func (u *User) uploadAvatar(c *wkhttp.Context) {
 	err = u.db.UpdateUsersWithField("is_upload_avatar", "1", targetUID)
 	if err != nil {
 		u.Error("修改用户是否修改头像错误！", zap.Error(err))
-		c.ResponseError(errors.New("修改用户是否修改头像错误！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	c.ResponseOK()
@@ -653,13 +654,14 @@ func (u *User) userIM(c *wkhttp.Context) {
 	resp, err := network.Get(fmt.Sprintf("%s/route?uid=%s", u.ctx.GetConfig().WuKongIM.APIURL, uid), nil, headers)
 	if err != nil {
 		u.Error("调用IM服务失败！", zap.Error(err))
-		c.ResponseError(errors.New("调用IM服务失败！"))
+		respondUserError(c, errcode.ErrUserIMCallFailed)
 		return
 	}
 	var resultMap map[string]interface{}
 	err = util.ReadJsonByByte([]byte(resp.Body), &resultMap)
 	if err != nil {
-		c.ResponseError(err)
+		u.Error("解析 IM 响应失败", zap.Error(err))
+		respondUserServiceError(c)
 		return
 	}
 	c.JSON(resp.StatusCode, resultMap)
@@ -668,15 +670,16 @@ func (u *User) userIM(c *wkhttp.Context) {
 func (u *User) qrcodeMy(c *wkhttp.Context) {
 	userModel, err := u.db.QueryByUID(c.GetLoginUID())
 	if err != nil {
-		c.ResponseErrorf("查询当前用户信息失败！", err)
+		u.Error("查询当前用户信息失败！", zap.String("uid", c.GetLoginUID()), zap.Error(err))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userModel == nil {
-		c.ResponseError(errors.New("登录用户不存在！"))
+		respondUserError(c, errcode.ErrUserCurrentNotFound)
 		return
 	}
 	if userModel.QRVercode == "" {
-		c.ResponseError(errors.New("用户没有QRVercode，非法操作！"))
+		respondUserError(c, errcode.ErrUserQRVerCodeMissing)
 		return
 	}
 	path := strings.ReplaceAll(u.ctx.GetConfig().QRCodeInfoURL, ":code", fmt.Sprintf("vercode_%s", userModel.QRVercode))
@@ -705,17 +708,17 @@ func (u *User) qrcodeMy(c *wkhttp.Context) {
 func (u *User) currentUser(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	if loginUID == "" {
-		c.ResponseError(errors.New("未登录"))
+		respondUserNotLoggedIn(c)
 		return
 	}
 	userInfo, err := u.db.QueryByUID(loginUID)
 	if err != nil {
 		u.Error("查询当前用户信息失败", zap.Error(err), zap.String("uid", loginUID))
-		c.ResponseError(errors.New("查询当前用户信息失败"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userInfo == nil {
-		c.ResponseError(errors.New("当前用户不存在"))
+		respondUserError(c, errcode.ErrUserCurrentNotFound)
 		return
 	}
 	// token 回显请求头 token：/user/current 不换发 token,避免干扰现有会话;
@@ -753,20 +756,20 @@ const languageMaxLen = 64
 func (u *User) setLanguage(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	if loginUID == "" {
-		c.ResponseError(errors.New("未登录"))
+		respondUserNotLoggedIn(c)
 		return
 	}
 	var req setLanguageReq
 	if err := c.BindJSON(&req); err != nil {
 		u.Error("language 请求体格式错误", zap.Error(err), zap.String("uid", loginUID))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	// Length gate runs BEFORE any zap.String("language", req.Language) so an
 	// attacker can't amplify a multi-KB payload into the log pipeline.
 	if len(req.Language) > languageMaxLen {
 		u.Error("language 请求过长", zap.String("uid", loginUID), zap.Int("len", len(req.Language)))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if err := u.languageService.SetLanguage(c.Request.Context(), loginUID, req.Language); err != nil {
@@ -777,10 +780,10 @@ func (u *User) setLanguage(c *wkhttp.Context) {
 		u.Error("设置用户语言偏好失败",
 			zap.Error(err), zap.String("uid", loginUID), zap.String("language", req.Language))
 		if errors.Is(err, ErrUnsupportedLanguage) {
-			c.ResponseError(errors.New("不支持的语言"))
+			respondUserError(c, errcode.ErrUserLanguageUnsupported)
 			return
 		}
-		c.ResponseError(errors.New("设置语言偏好失败！"))
+		respondUserError(c, errcode.ErrUserLanguageSetFailed)
 		return
 	}
 	c.ResponseOK()
@@ -793,37 +796,37 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 	var reqMap map[string]interface{}
 	if err := c.BindJSON(&reqMap); err != nil {
 		u.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	// 查询用户信息
 	users, err := u.db.QueryByUID(loginUID)
 	if err != nil {
-		c.ResponseError(errors.New("查询用户信息出错！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if users == nil {
-		c.ResponseError(errors.New("用户信息不存在！"))
+		respondUserError(c, errcode.ErrUserNotFound)
 		return
 	}
 
 	for key, value := range reqMap {
 		//是否允许更新此field
 		if !allowUpdateUserField(key) {
-			c.ResponseError(errors.New("不允许更新【" + key + "】"))
+			respondUserUpdateNotAllowed(c, key)
 			return
 		}
 		if key == "short_no" {
 			if u.ctx.GetConfig().ShortNo.EditOff {
-				c.ResponseError(errors.New("不允许编辑！"))
+				respondUserUpdateNotAllowed(c, "")
 				return
 			}
 			if users.ShortStatus == 1 {
-				c.ResponseError(errors.New("用户短编号只能修改一次"))
+				respondUserError(c, errcode.ErrUserShortNoAlreadyChanged)
 				return
 			}
 			if len(fmt.Sprintf("%v", value)) < 6 || len(fmt.Sprintf("%v", value)) > 20 {
-				c.ResponseError(errors.New("短号须以字母开头，仅支持使用6～20个字母、数字、下划线、减号自由组合"))
+				respondUserError(c, errcode.ErrUserShortNoFormatInvalid)
 				return
 			}
 			isLetter := true
@@ -846,24 +849,24 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 				}
 			}
 			if !isLetter || !isIncludeNum {
-				c.ResponseError(errors.New("短号须以字母开头，仅支持使用6～20个字母、数字、下划线、减号自由组合"))
+				respondUserError(c, errcode.ErrUserShortNoFormatInvalid)
 				return
 			}
 			users, err = u.db.QueryUserWithOnlyShortNo(fmt.Sprintf("%v", value))
 			if err != nil {
 				u.Error("通过short_no查询用户失败！", zap.Error(err), zap.String("shortNo", key))
-				c.ResponseError(errors.New("通过short_no查询用户失败！"))
+				respondUserError(c, errcode.ErrUserQueryFailed)
 				return
 			}
 			if users != nil {
-				c.ResponseError(errors.New("已存在，请换一个！"))
+				respondUserError(c, errcode.ErrUserAlreadyExists)
 				return
 			}
 
 			tx, err := u.db.session.Begin()
 			if err != nil {
 				u.Error("创建事务失败！", zap.Error(err))
-				c.ResponseError(errors.New("创建事务失败！"))
+				respondUserError(c, errcode.ErrUserStoreFailed)
 				return
 			}
 			defer func() {
@@ -874,21 +877,21 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 			}()
 			err = u.db.UpdateUsersWithFieldTx(key, fmt.Sprintf("%v", value), loginUID, tx)
 			if err != nil {
-				c.ResponseError(errors.New("修改用户资料失败"))
+				respondUserError(c, errcode.ErrUserStoreFailed)
 				tx.Rollback()
 				return
 			}
 			err = u.db.UpdateUsersWithFieldTx("short_status", "1", loginUID, tx)
 			if err != nil {
 				u.Error("修改用户资料失败", zap.Error(err), zap.Any(key, value))
-				c.ResponseError(errors.New("修改用户资料失败"))
+				respondUserError(c, errcode.ErrUserStoreFailed)
 				tx.Rollback()
 				return
 			}
 			err = tx.Commit()
 			if err != nil {
 				u.Error("数据库事物提交失败", zap.Error(err))
-				c.ResponseError(errors.New("数据库事物提交失败"))
+				respondUserError(c, errcode.ErrUserStoreFailed)
 				tx.Rollback()
 				return
 			}
@@ -899,11 +902,12 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 		if key == "name" {
 			nameStr := fmt.Sprintf("%s", value)
 			if nameStr == "" {
-				c.ResponseError(errors.New("名字不能为空！"))
+				respondUserRequestInvalid(c, "name")
 				return
 			}
 			if err := ValidateName(nameStr); err != nil {
-				c.ResponseError(err)
+				u.Warn("用户名格式校验失败", zap.String("uid", loginUID), zap.Error(err))
+				respondUserRequestInvalid(c, "name")
 				return
 			}
 		}
@@ -911,7 +915,7 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 		err = u.db.UpdateUsersWithField(key, fmt.Sprintf("%v", value), loginUID)
 		if err != nil {
 			u.Error("修改用户资料失败", zap.Error(err))
-			c.ResponseError(errors.New("修改用户资料失败"))
+			respondUserError(c, errcode.ErrUserStoreFailed)
 			return
 		}
 		if key == "name" {
@@ -934,13 +938,13 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 			})
 			if encErr != nil {
 				u.Error("编码token缓存失败！", zap.Error(encErr))
-				c.ResponseError(errors.New("重新设置token缓存失败！"))
+				respondUserError(c, errcode.ErrUserStoreFailed)
 				return
 			}
 			err = u.ctx.Cache().Set(u.ctx.GetConfig().Cache.TokenCachePrefix+loginToken, payload)
 			if err != nil {
 				u.Error("重新设置token缓存失败！", zap.Error(err))
-				c.ResponseError(errors.New("重新设置token缓存失败！"))
+				respondUserError(c, errcode.ErrUserStoreFailed)
 				return
 			}
 		}
@@ -949,7 +953,7 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 	friends, err := u.friendDB.QueryFriends(loginUID)
 	if err != nil {
 		u.Error("查询用户好友错误", zap.Error(err))
-		c.ResponseError(errors.New("查询用户好友错误"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if len(friends) > 0 {
@@ -967,7 +971,7 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 		})
 		if err != nil {
 			u.Error("发送频道更改消息错误！", zap.Error(err))
-			c.ResponseError(errors.New("发送频道更改消息错误！"))
+			respondUserError(c, errcode.ErrUserIMCallFailed)
 			return
 		}
 	}
@@ -981,17 +985,17 @@ func (u *User) userUpdateSetting(c *wkhttp.Context) {
 	var reqMap map[string]interface{}
 	if err := c.BindJSON(&reqMap); err != nil {
 		u.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	// 查询用户信息
 	users, err := u.db.QueryByUID(loginUID)
 	if err != nil {
-		c.ResponseError(errors.New("查询用户信息出错！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if users == nil {
-		c.ResponseError(errors.New("用户信息不存在！"))
+		respondUserError(c, errcode.ErrUserNotFound)
 		return
 	}
 	for key, value := range reqMap {
@@ -1006,7 +1010,7 @@ func (u *User) userUpdateSetting(c *wkhttp.Context) {
 			key == "mute_of_app" {
 			if key == "device_lock" && fmt.Sprintf("%v", value) == "1" {
 				if users.Phone == "15900000002" || users.Phone == "15900000003" || users.Phone == "15900000004" || users.Phone == "15900000005" || users.Phone == "15900000006" {
-					c.ResponseError(errors.New("演示账号不支持开启设备锁"))
+					respondUserError(c, errcode.ErrUserDemoLockUnsupported)
 					return
 				}
 
@@ -1014,7 +1018,7 @@ func (u *User) userUpdateSetting(c *wkhttp.Context) {
 			err = u.db.UpdateUsersWithField(key, fmt.Sprintf("%v", value), loginUID)
 			if err != nil {
 				u.Error("修改用户资料失败", zap.Error(err))
-				c.ResponseError(errors.New("修改用户资料失败"))
+				respondUserError(c, errcode.ErrUserStoreFailed)
 				return
 			}
 		}
@@ -1037,11 +1041,11 @@ func (u *User) get(c *wkhttp.Context) {
 	userDetailResp, err := u.userService.GetUserDetail(uid, loginUID)
 	if err != nil {
 		u.Error("获取用户详情失败！", zap.Error(err))
-		c.ResponseError(errors.New("获取用户详情失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userDetailResp == nil {
-		c.ResponseError(errors.New("用户不存在！"))
+		respondUserError(c, errcode.ErrUserNotFound)
 		return
 	}
 	isShowShortNo := false
@@ -1156,11 +1160,11 @@ func (u *User) wxLogin(c *wkhttp.Context) {
 	}
 	var req wxLoginReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("请求数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if req.Code == "" {
-		c.ResponseError(errors.New("微信code不能为空"))
+		respondUserRequestInvalid(c, "code")
 		return
 	}
 	accessTokenResp, err := network.Get("https://api.weixin.qq.com/sns/oauth2/access_token", map[string]string{
@@ -1171,26 +1175,28 @@ func (u *User) wxLogin(c *wkhttp.Context) {
 	}, nil)
 	if err != nil {
 		u.Error("获取微信access_token错误", zap.Error(err))
-		c.ResponseError(errors.New("获取微信access_token错误"))
+		respondUserError(c, errcode.ErrUserWeChatExchangeFailed)
 		return
 	}
 	if accessTokenResp.StatusCode != http.StatusOK {
-		c.ResponseErrorf("请求验证微信access_token错误", fmt.Errorf("错误代码-> %d", accessTokenResp.StatusCode))
+		u.Error("请求验证微信access_token错误", zap.Int("status", accessTokenResp.StatusCode))
+		respondUserError(c, errcode.ErrUserWeChatExchangeFailed)
 		return
 	}
 	var bodyMap map[string]interface{}
 	if err = util.ReadJsonByByte([]byte(accessTokenResp.Body), &bodyMap); err != nil {
-		c.ResponseErrorf("解码微信access_token返回数据失败！", err)
+		u.Error("解码微信access_token返回数据失败！", zap.Error(err))
+		respondUserError(c, errcode.ErrUserDecodeFailed)
 		return
 	}
 	accessToken, ok := bodyMap["access_token"].(string)
 	if !ok {
-		c.ResponseError(errors.New("微信返回数据格式错误：缺少access_token"))
+		respondUserError(c, errcode.ErrUserWeChatResponseInvalid)
 		return
 	}
 	openid, ok := bodyMap["openid"].(string)
 	if !ok {
-		c.ResponseError(errors.New("微信返回数据格式错误：缺少openid"))
+		respondUserError(c, errcode.ErrUserWeChatResponseInvalid)
 		return
 	}
 	wxUserInfoResp, err := network.Get("https://api.weixin.qq.com/sns/userinfo", map[string]string{
@@ -1199,18 +1205,20 @@ func (u *User) wxLogin(c *wkhttp.Context) {
 	}, nil)
 	if err != nil {
 		u.Error("获取微信用户资料错误", zap.Error(err))
-		c.ResponseError(errors.New("获取微信用户资料错误"))
+		respondUserError(c, errcode.ErrUserWeChatProfileFailed)
 		return
 	}
 
 	if wxUserInfoResp.StatusCode != http.StatusOK {
-		c.ResponseErrorf("获取微信用户资料请求错误", fmt.Errorf("错误代码-> %d", wxUserInfoResp.StatusCode))
+		u.Error("获取微信用户资料请求错误", zap.Int("status", wxUserInfoResp.StatusCode))
+		respondUserError(c, errcode.ErrUserWeChatProfileFailed)
 		return
 	}
 
 	var wxUserInfoBodyMap map[string]interface{}
 	if err = util.ReadJsonByByte([]byte(wxUserInfoResp.Body), &wxUserInfoBodyMap); err != nil {
-		c.ResponseErrorf("解码微信用户信息返回数据失败！", err)
+		u.Error("解码微信用户信息返回数据失败！", zap.Error(err))
+		respondUserError(c, errcode.ErrUserDecodeFailed)
 		return
 	}
 
@@ -1233,12 +1241,12 @@ func (u *User) wxLogin(c *wkhttp.Context) {
 	userInfo, err := u.db.queryWithWXOpenIDAndWxUnionidCtx(loginSpanCtx, openid, unionid)
 	if err != nil {
 		u.Error("通过微信openid查询用户是否存在错误", zap.Error(err))
-		c.ResponseError(errors.New("通过微信openid查询用户是否存在错误"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userInfo != nil {
 		if userInfo.IsDestroy == IsDestroyDone {
-			c.ResponseError(errors.New("用户不存在"))
+			respondUserError(c, errcode.ErrUserNotFound)
 			return
 		}
 		u.execLoginAndRespose(userInfo, config.DeviceFlag(req.Flag), req.Device, loginSpanCtx, c)
@@ -1284,22 +1292,26 @@ func (u *User) wxLogin(c *wkhttp.Context) {
 // 登录
 func (u *User) login(c *wkhttp.Context) {
 	if common2.EnsureSystemSettings(u.ctx).LocalLoginOff() {
-		c.ResponseError(errors.New("本地登录已关闭"))
+		respondUserError(c, errcode.ErrUserLocalLoginDisabled)
 		return
 	}
 
 	var req loginReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("请求数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if err := req.Check(); err != nil {
-		c.ResponseError(err)
+		// loginReq.Check returns one of "用户名不能为空 / 密码不能为空"; both are
+		// pure client-side input gaps. Field detail is left blank because the
+		// helper string-matches the message rather than tagging the offending
+		// field — fix-up follows the broader sentinel extraction (TODOS L219).
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if err := u.loginGuard.Check(req.Username); err != nil {
 		u.Warn("登录被临时锁定", zap.String("username", req.Username), zap.Error(err))
-		c.ResponseError(err)
+		respondUserError(c, errcode.ErrUserLoginLocked)
 		return
 	}
 	loginSpan := u.ctx.Tracer().StartSpan(
@@ -1312,27 +1324,27 @@ func (u *User) login(c *wkhttp.Context) {
 
 	userInfo, err := u.db.QueryByUsernameCxt(loginSpanCtx, req.Username)
 	if err != nil {
-		u.Error("查询用户信息失败！", zap.String("username", req.Username))
-		c.ResponseError(err)
+		u.Error("查询用户信息失败！", zap.String("username", req.Username), zap.Error(err))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	// 已注销 / 被禁用账号统一拒绝；与 emailLogin / usernameLogin 行为对齐
 	if userInfo == nil || userInfo.IsDestroy == IsDestroyDone || userInfo.Status == 0 {
 		u.loginGuard.RecordFailureLogged(req.Username)
 		// 统一错误消息，避免攻击者通过响应差异枚举有效账号
-		c.ResponseError(errors.New("用户名或密码错误"))
+		respondUserError(c, errcode.ErrUserInvalidCredentials)
 		return
 	}
 	if userInfo.Password == "" {
 		// 同样走失败计数 + 通用错误消息，避免攻击者区分"账号不允许登录"与"密码错误"
 		u.loginGuard.RecordFailureLogged(req.Username)
-		c.ResponseError(errors.New("用户名或密码错误"))
+		respondUserError(c, errcode.ErrUserInvalidCredentials)
 		return
 	}
 	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 	if !matched {
 		u.loginGuard.RecordFailureLogged(req.Username)
-		c.ResponseError(errors.New("用户名或密码错误"))
+		respondUserError(c, errcode.ErrUserInvalidCredentials)
 		return
 	}
 	u.loginGuard.ResetLogged(req.Username)
@@ -1363,7 +1375,8 @@ func (u *User) execLoginAndRespose(userInfo *Model, flag config.DeviceFlag, devi
 			})
 			return
 		}
-		c.ResponseError(err)
+		u.Error("登录执行失败", zap.String("uid", userInfo.UID), zap.Error(err))
+		respondUserServiceError(c)
 		return
 	}
 
@@ -1552,16 +1565,20 @@ func (u *User) sentWelcomeMsg(publicIP, uid string) {
 func (u *User) register(c *wkhttp.Context) {
 	var req registerReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("请求数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if err := req.CheckRegister(); err != nil {
-		c.ResponseError(err)
+		// CheckRegister returns "用户名不能为空 / 区号不能为空 / 手机号不能为空 /
+		// 验证码不能为空 / 密码不能为空 / 密码长度必须大于6位 / 名字格式错误".
+		// All client-side input failures. Field-level detail left empty for
+		// the same reason as login.Check (TODOS L219 sentinel follow-up).
+		respondUserRequestInvalid(c, "")
 		return
 	}
 
 	if common2.EnsureSystemSettings(u.ctx).RegisterOff() {
-		c.ResponseError(errors.New("注册通道暂不开放，请长按标题使用官网上演示账号登录"))
+		respondUserError(c, errcode.ErrUserRegistrationClosed)
 		return
 	}
 	// 仅中国号码闸门必须在 register 这里再判一次：sendRegisterCode 处的
@@ -1571,13 +1588,13 @@ func (u *User) register(c *wkhttp.Context) {
 	// 闭合 time-of-check vs time-of-use 缺口。
 	if common2.EnsureSystemSettings(u.ctx).RegisterOnlyChina() &&
 		strings.TrimSpace(req.Zone) != "0086" {
-		c.ResponseError(errors.New("仅仅支持中国大陆手机号注册！"))
+		respondUserError(c, errcode.ErrUserPhoneRegionUnsupported)
 		return
 	}
 	appConfig, err := u.commonService.GetAppConfig()
 	if err != nil {
 		u.Error("查询应用设置错误", zap.Error(err))
-		c.ResponseError(err)
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	var registerInviteOn = 0
@@ -1587,7 +1604,7 @@ func (u *User) register(c *wkhttp.Context) {
 	var invite *model.Invite
 	if registerInviteOn == 1 {
 		if req.InviteCode == "" {
-			c.ResponseError(errors.New("邀请码不能为空"))
+			respondUserRequestInvalid(c, "invite_code")
 			return
 		}
 		var inviteCodeIsExist = false
@@ -1602,7 +1619,7 @@ func (u *User) register(c *wkhttp.Context) {
 			}
 		}
 		if !inviteCodeIsExist {
-			c.ResponseError(errors.New("邀请码不存在"))
+			respondUserError(c, errcode.ErrUserInviteCodeNotFound)
 			return
 		}
 	}
@@ -1617,25 +1634,26 @@ func (u *User) register(c *wkhttp.Context) {
 	//验证手机号是否注册
 	userInfo, err := u.db.QueryByUsernameCxt(registerSpanCtx, fmt.Sprintf("%s%s", req.Zone, req.Phone))
 	if err != nil {
-		u.Error("查询用户信息失败！", zap.String("username", req.Phone))
-		c.ResponseError(err)
+		u.Error("查询用户信息失败！", zap.String("username", req.Phone), zap.Error(err))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userInfo != nil {
-		c.ResponseError(errors.New("该用户已存在"))
+		respondUserError(c, errcode.ErrUserAlreadyExists)
 		return
 	}
 	//测试模式（仅非 release 生效）
 	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
 		if !commonapi.MatchTestCode(u.ctx.GetConfig(), req.Code) {
-			c.ResponseError(errors.New("验证码错误"))
+			respondUserError(c, errcode.ErrUserCodeInvalid)
 			return
 		}
 	} else {
 		//线上验证短信验证码
 		err = u.smsServie.Verify(registerSpanCtx, req.Zone, req.Phone, req.Code, commonapi.CodeTypeRegister)
 		if err != nil {
-			c.ResponseError(err)
+			u.Warn("注册短信校验失败", zap.String("phone", req.Phone), zap.Error(err))
+			respondUserError(c, errcode.ErrUserCodeInvalid)
 			return
 		}
 	}
@@ -1660,7 +1678,7 @@ func (u *User) search(c *wkhttp.Context) {
 	useModel, err := u.db.QueryByKeyword(keyword)
 	if err != nil {
 		u.Error("查询用户信息失败！", zap.Error(err), zap.String("keyword", keyword))
-		c.ResponseError(errors.New("查询用户信息失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if useModel == nil {
@@ -1674,7 +1692,7 @@ func (u *User) search(c *wkhttp.Context) {
 		isMember, err := spacepkg.CheckMembership(u.ctx.DB(), spaceID, useModel.UID)
 		if err != nil {
 			u.Error("校验 Space 成员错误", zap.Error(err))
-			c.ResponseError(errors.New("校验成员关系错误"))
+			respondUserError(c, errcode.ErrUserQueryFailed)
 			return
 		}
 		if !isMember {
@@ -1691,7 +1709,7 @@ func (u *User) search(c *wkhttp.Context) {
 			shared, err := spacepkg.HaveCommonSpace(u.ctx.DB(), loginUID, useModel.UID)
 			if err != nil {
 				u.Error("校验共同 Space 错误", zap.Error(err))
-				c.ResponseError(errors.New("校验共同 Space 错误"))
+				respondUserError(c, errcode.ErrUserQueryFailed)
 				return
 			}
 			if !shared {
@@ -1739,25 +1757,25 @@ func (u *User) registerUserDeviceToken(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		u.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if strings.TrimSpace(req.DeviceToken) == "" {
-		c.ResponseError(errors.New("设备token不能为空！"))
+		respondUserRequestInvalid(c, "device_token")
 		return
 	}
 	if strings.TrimSpace(req.DeviceType) == "" {
-		c.ResponseError(errors.New("设备类型不能为空！"))
+		respondUserRequestInvalid(c, "device_type")
 		return
 	}
 	if strings.TrimSpace(req.BundleID) == "" {
-		c.ResponseError(errors.New("bundleID不能为空！"))
+		respondUserRequestInvalid(c, "bundle_id")
 		return
 	}
 	err := u.ctx.GetRedisConn().Hmset(fmt.Sprintf("%s%s", u.userDeviceTokenPrefix, loginUID), "device_type", req.DeviceType, "device_token", req.DeviceToken, "bundle_id", req.BundleID)
 	if err != nil {
 		u.Error("存储用户设备token失败！", zap.Error(err))
-		c.ResponseError(errors.New("存储用户设备token失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	c.ResponseOK()
@@ -1771,13 +1789,13 @@ func (u *User) registerUserDeviceBadge(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		u.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	err := u.setUserBadge(loginUID, int64(req.Badge))
 	if err != nil {
 		u.Error("存储用户红点失败！", zap.Error(err))
-		c.ResponseError(errors.New("存储用户红点失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	c.ResponseOK()
@@ -1798,7 +1816,7 @@ func (u *User) unregisterUserDeviceToken(c *wkhttp.Context) {
 	err := u.ctx.GetRedisConn().Del(fmt.Sprintf("%s%s", u.userDeviceTokenPrefix, loginUID))
 	if err != nil {
 		u.Error("删除设备token失败！", zap.Error(err))
-		c.ResponseError(errors.New("删除设备token失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	c.ResponseOK()
@@ -1817,7 +1835,7 @@ func (u *User) getLoginUUID(c *wkhttp.Context) {
 	})), time.Minute*1)
 	if err != nil {
 		u.Error("设置登录uuid失败！", zap.Error(err))
-		c.ResponseError(errors.New("设置登录uuid失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	// 缓存设备信息
@@ -1829,7 +1847,7 @@ func (u *User) getLoginUUID(c *wkhttp.Context) {
 		}), time.Minute*2)
 		if err != nil {
 			u.Error("设置登录设备信息失败！", zap.Error(err))
-			c.ResponseError(errors.New("设置登录设备信息失败！"))
+			respondUserError(c, errcode.ErrUserStoreFailed)
 			return
 		}
 	}
@@ -1845,7 +1863,7 @@ func (u *User) getloginStatus(c *wkhttp.Context) {
 	qrcodeInfo, err := u.ctx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.QRCodeCachePrefix, uuid))
 	if err != nil {
 		u.Error("获取uuid绑定的二维码信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("获取uuid绑定的二维码信息失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if qrcodeInfo == "" {
@@ -1858,7 +1876,7 @@ func (u *User) getloginStatus(c *wkhttp.Context) {
 	err = util.ReadJsonByByte([]byte(qrcodeInfo), &qrcodeModel)
 	if err != nil {
 		u.Error("解码二维码信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("解码二维码信息失败！"))
+		respondUserError(c, errcode.ErrUserDecodeFailed)
 		return
 	}
 	if qrcodeModel == nil {
@@ -1898,39 +1916,39 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 	authInfo, err := u.ctx.GetRedisConn().GetString(authCodeKey)
 	if err != nil {
 		u.Error("获取授权信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("获取授权信息失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if authInfo == "" {
-		c.ResponseError(errors.New("授权码失效或不存在！"))
+		respondUserError(c, errcode.ErrUserAuthCodeNotFound)
 		return
 	}
 	var authInfoMap map[string]interface{}
 	err = util.ReadJsonByByte([]byte(authInfo), &authInfoMap)
 	if err != nil {
 		u.Error("解码授权信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("解码授权信息失败！"))
+		respondUserError(c, errcode.ErrUserDecodeFailed)
 		return
 	}
 	authType, ok := authInfoMap["type"].(string)
 	if !ok {
-		c.ResponseError(errors.New("授权信息格式错误：缺少type"))
+		respondUserAuthInfoInvalid(c, "type")
 		return
 	}
 	if authType != string(common.AuthCodeTypeScanLogin) {
-		c.ResponseError(errors.New("授权码不是登录授权码！"))
+		respondUserError(c, errcode.ErrUserAuthCodeWrongType)
 		return
 	}
 	scaner, ok := authInfoMap["scaner"].(string)
 	if !ok {
-		c.ResponseError(errors.New("授权信息格式错误：缺少scaner"))
+		respondUserAuthInfoInvalid(c, "scaner")
 		return
 	}
 	// 获取老的token
 	token, err := u.ctx.Cache().Get(fmt.Sprintf("%s%d%s", u.ctx.GetConfig().Cache.UIDTokenCachePrefix, flag, scaner))
 	if err != nil {
 		u.Error("获取旧token错误", zap.Error(err))
-		c.ResponseError(errors.New("获取旧token错误"))
+		respondUserError(c, errcode.ErrUserIMCallFailed)
 		return
 	}
 	if strings.TrimSpace(token) == "" {
@@ -1940,12 +1958,12 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 	userModel, err := u.db.QueryByUID(scaner)
 	if err != nil {
 		u.Error("查询用户信息失败", zap.String("uid", scaner), zap.Error(err))
-		c.ResponseError(errors.New("查询用户信息失败"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	// 已注销账号拒绝授权登录；冷静期账号允许（与其他登录路径一致）
 	if userModel == nil || userModel.IsDestroy == IsDestroyDone {
-		c.ResponseError(errors.New("用户不存在"))
+		respondUserError(c, errcode.ErrUserNotFound)
 		return
 	}
 	// 获取缓存设备
@@ -1954,7 +1972,7 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 		deviceCache, err := u.ctx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.DeviceCacheUUIDPrefix, uuid))
 		if err != nil {
 			u.Error("获取登录设备信息失败！", zap.Error(err))
-			c.ResponseError(errors.New("获取登录设备信息失败！"))
+			respondUserError(c, errcode.ErrUserQueryFailed)
 			return
 		}
 		if deviceCache != "" {
@@ -1962,7 +1980,7 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 			err = util.ReadJsonByByte([]byte(deviceCache), &deviceInfoMap)
 			if err != nil {
 				u.Error("解码设备信息失败！", zap.Error(err))
-				c.ResponseError(errors.New("解码设备信息失败！"))
+				respondUserError(c, errcode.ErrUserDecodeFailed)
 				return
 			}
 			deviceId, _ := deviceInfoMap["device_id"].(string)
@@ -1985,7 +2003,7 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 				})
 				if err != nil {
 					u.Error("更新用户登录设备失败", zap.Error(err))
-					c.ResponseError(errors.New("更新用户登录设备失败"))
+					respondUserError(c, errcode.ErrUserStoreFailed)
 					return
 				}
 			}
@@ -1999,11 +2017,11 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 	})
 	if err != nil {
 		u.Error("更新IM的token失败！", zap.Error(err))
-		c.ResponseError(errors.New("更新IM的token失败！"))
+		respondUserError(c, errcode.ErrUserIMCallFailed)
 		return
 	}
 	if imResp.Status == config.UpdateTokenStatusBan {
-		c.ResponseError(errors.New("此账号已经被封禁！"))
+		respondUserError(c, errcode.ErrUserAccountBanned)
 		return
 	}
 
@@ -2020,20 +2038,20 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 	err = u.ctx.Cache().SetAndExpire(u.ctx.GetConfig().Cache.TokenCachePrefix+token, tokenPayload, u.ctx.GetConfig().Cache.TokenExpire)
 	if err != nil {
 		u.Error("设置token缓存失败！", zap.Error(err))
-		c.ResponseError(errors.New("设置token缓存失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	err = u.ctx.GetRedisConn().Del(authCodeKey)
 	if err != nil {
 		u.Error("删除授权码失败！", zap.Error(err))
-		c.ResponseError(errors.New("删除授权码失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 
 	err = u.ctx.Cache().SetAndExpire(fmt.Sprintf("%s%d%s", u.ctx.GetConfig().Cache.UIDTokenCachePrefix, flag, userModel.UID), token, u.ctx.GetConfig().Cache.TokenExpire)
 	if err != nil {
 		u.Error("设置uidtoken缓存失败！", zap.Error(err))
-		c.ResponseError(errors.New("设置uidtoken缓存失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 
@@ -2093,42 +2111,42 @@ func (u *User) grantLogin(c *wkhttp.Context) {
 	loginUID := c.MustGet("uid").(string)
 	encrypt := c.Query("encrypt") // signal相关密钥
 	if authCode == "" {
-		c.ResponseError(errors.New("授权码不能为空！"))
+		respondUserRequestInvalid(c, "auth_code")
 		return
 	}
 	authInfo, err := u.ctx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode))
 	if err != nil {
 		u.Error("获取授权信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("获取授权信息失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if authInfo == "" {
-		c.ResponseError(errors.New("授权码失效或不存在！"))
+		respondUserError(c, errcode.ErrUserAuthCodeNotFound)
 		return
 	}
 	var authInfoMap map[string]interface{}
 	err = util.ReadJsonByByte([]byte(authInfo), &authInfoMap)
 	if err != nil {
 		u.Error("解码授权信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("解码授权信息失败！"))
+		respondUserError(c, errcode.ErrUserDecodeFailed)
 		return
 	}
 	authType, ok := authInfoMap["type"].(string)
 	if !ok {
-		c.ResponseError(errors.New("授权信息格式错误：缺少type"))
+		respondUserAuthInfoInvalid(c, "type")
 		return
 	}
 	if authType != string(common.AuthCodeTypeScanLogin) {
-		c.ResponseError(errors.New("授权码不是登录授权码！"))
+		respondUserError(c, errcode.ErrUserAuthCodeWrongType)
 		return
 	}
 	scaner, ok := authInfoMap["scaner"].(string)
 	if !ok {
-		c.ResponseError(errors.New("授权信息格式错误：缺少scaner"))
+		respondUserAuthInfoInvalid(c, "scaner")
 		return
 	}
 	if scaner != loginUID {
-		c.ResponseError(errors.New("扫描者与授权者不是同一个用户！"))
+		respondUserError(c, errcode.ErrUserAuthScannerMismatch)
 		return
 	}
 	uuid, _ := authInfoMap["uuid"].(string)
@@ -2142,7 +2160,7 @@ func (u *User) grantLogin(c *wkhttp.Context) {
 	err = u.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.QRCodeCachePrefix, uuid), util.ToJson(qrcodeInfo), time.Minute*5)
 	if err != nil {
 		u.Error("更新二维码信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("更新二维码信息失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	SendQRCodeInfo(uuid, qrcodeInfo)
@@ -2154,13 +2172,13 @@ func (u *User) addBlacklist(c *wkhttp.Context) {
 	loginUID := c.MustGet("uid").(string)
 	uid := c.Param("uid")
 	if strings.TrimSpace(uid) == "" {
-		c.ResponseError(errors.New("添加黑名单的用户ID不能空！"))
+		respondUserRequestInvalid(c, "uid")
 		return
 	}
 	model, err := u.settingDB.QueryUserSettingModel(uid, loginUID)
 	if err != nil {
 		u.Error("查询用户设置失败", zap.Error(err))
-		c.ResponseError(errors.New("查询用户设置失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	//如果没有设置记录先添加一条记录
@@ -2172,7 +2190,7 @@ func (u *User) addBlacklist(c *wkhttp.Context) {
 		err = u.settingDB.InsertUserSettingModel(userSettingModel)
 		if err != nil {
 			u.Error("添加用户设置失败", zap.Error(err))
-			c.ResponseError(errors.New("添加用户设置失败！"))
+			respondUserError(c, errcode.ErrUserStoreFailed)
 			return
 		}
 	}
@@ -2180,18 +2198,20 @@ func (u *User) addBlacklist(c *wkhttp.Context) {
 	//添加黑名单
 	version, err := u.ctx.GenSeq(common.UserSettingSeqKey)
 	if err != nil {
-		c.ResponseError(err)
+		u.Error("生成用户设置版本号失败", zap.String("uid", loginUID), zap.Error(err))
+		respondUserServiceError(c)
 		return
 	}
 	friendVersion, err := u.ctx.GenSeq(common.FriendSeqKey)
 	if err != nil {
-		c.ResponseError(err)
+		u.Error("生成好友版本号失败", zap.String("uid", loginUID), zap.Error(err))
+		respondUserServiceError(c)
 		return
 	}
 	tx, err := u.ctx.DB().Begin()
 	if err != nil {
 		u.Error("开启事务失败！", zap.Error(err))
-		c.ResponseError(errors.New("开启事务失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	defer func() {
@@ -2204,20 +2224,20 @@ func (u *User) addBlacklist(c *wkhttp.Context) {
 	if err != nil {
 		tx.Rollback()
 		u.Error("添加黑名单失败！", zap.Error(err))
-		c.ResponseError(errors.New("添加黑名单失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	err = u.friendDB.updateVersionTx(friendVersion, loginUID, uid, tx)
 	if err != nil {
 		tx.Rollback()
 		u.Error("更新好友的版本号失败！", zap.Error(err))
-		c.ResponseError(errors.New("更新好友的版本号失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	if err := tx.Commit(); err != nil {
 		tx.Rollback()
 		u.Error("提交数据库失败！", zap.Error(err))
-		c.ResponseError(errors.New("提交数据库失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 
@@ -2265,25 +2285,27 @@ func (u *User) removeBlacklist(c *wkhttp.Context) {
 	loginUID := c.MustGet("uid").(string)
 	uid := c.Param("uid")
 	if strings.TrimSpace(uid) == "" {
-		c.ResponseError(errors.New("移除黑名单的用户ID不能空！"))
+		respondUserRequestInvalid(c, "uid")
 		return
 	}
 
 	version, err := u.ctx.GenSeq(common.UserSettingSeqKey)
 	if err != nil {
-		c.ResponseError(err)
+		u.Error("生成用户设置版本号失败", zap.String("uid", loginUID), zap.Error(err))
+		respondUserServiceError(c)
 		return
 	}
 	friendVersion, err := u.ctx.GenSeq(common.FriendSeqKey)
 	if err != nil {
-		c.ResponseError(err)
+		u.Error("生成好友版本号失败", zap.String("uid", loginUID), zap.Error(err))
+		respondUserServiceError(c)
 		return
 	}
 
 	tx, err := u.ctx.DB().Begin()
 	if err != nil {
 		u.Error("开启事务失败！", zap.Error(err))
-		c.ResponseError(errors.New("开启事务失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	defer func() {
@@ -2296,20 +2318,20 @@ func (u *User) removeBlacklist(c *wkhttp.Context) {
 	if err != nil {
 		tx.Rollback()
 		u.Error("移除黑名单失败！", zap.Error(err))
-		c.ResponseError(errors.New("移除黑名单失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	err = u.friendDB.updateVersionTx(friendVersion, loginUID, uid, tx)
 	if err != nil {
 		tx.Rollback()
 		u.Error("更新好友的版本号失败！", zap.Error(err))
-		c.ResponseError(errors.New("更新好友的版本号失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	if err := tx.Commit(); err != nil {
 		tx.Rollback()
 		u.Error("提交数据库失败！", zap.Error(err))
-		c.ResponseError(errors.New("提交数据库失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 
@@ -2358,7 +2380,7 @@ func (u *User) blacklists(c *wkhttp.Context) {
 	list, err := u.db.Blacklists(loginUID)
 	if err != nil {
 		u.Error("查询黑名单列表失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询黑名单列表失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	blacklists := []*blacklistResp{}
@@ -2375,25 +2397,25 @@ func (u *User) blacklists(c *wkhttp.Context) {
 // sendRegisterCode 发送注册短信
 func (u *User) sendRegisterCode(c *wkhttp.Context) {
 	if common2.EnsureSystemSettings(u.ctx).RegisterOff() {
-		c.ResponseError(errors.New("注册通道暂不开放，请长按标题使用官网上演示账号登录"))
+		respondUserError(c, errcode.ErrUserRegistrationClosed)
 		return
 	}
 	var req codeReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("请求数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if strings.TrimSpace(req.Zone) == "" {
-		c.ResponseError(errors.New("区号不能为空！"))
+		respondUserRequestInvalid(c, "zone")
 		return
 	}
 	if strings.TrimSpace(req.Phone) == "" {
-		c.ResponseError(errors.New("手机号不能为空！"))
+		respondUserRequestInvalid(c, "phone")
 		return
 	}
 	if common2.EnsureSystemSettings(u.ctx).RegisterOnlyChina() {
 		if strings.TrimSpace(req.Zone) != "0086" {
-			c.ResponseError(errors.New("仅仅支持中国大陆手机号注册！"))
+			respondUserError(c, errcode.ErrUserPhoneRegionUnsupported)
 			return
 		}
 	}
@@ -2408,7 +2430,7 @@ func (u *User) sendRegisterCode(c *wkhttp.Context) {
 	model, err := u.db.QueryByPhone(req.Zone, req.Phone)
 	if err != nil {
 		u.Error("查询用户信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询用户信息失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if model != nil {
@@ -2420,7 +2442,7 @@ func (u *User) sendRegisterCode(c *wkhttp.Context) {
 	err = u.smsServie.SendVerifyCode(spanCtx, req.Zone, req.Phone, commonapi.CodeTypeRegister)
 	if err != nil {
 		u.Error("发送短信验证码失败", zap.Error(err))
-		c.ResponseError(errors.New("发送短信验证码失败！"))
+		respondUserError(c, errcode.ErrUserSMSSendFailed)
 		return
 	}
 	c.Response(map[string]interface{}{
@@ -2432,40 +2454,40 @@ func (u *User) sendRegisterCode(c *wkhttp.Context) {
 func (u *User) setChatPwd(c *wkhttp.Context) {
 	var req chatPwdReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("请求数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if strings.TrimSpace(req.ChatPwd) == "" {
-		c.ResponseError(errors.New("聊天密码不能为空"))
+		respondUserRequestInvalid(c, "chat_pwd")
 		return
 	}
 	if strings.TrimSpace(req.LoginPwd) == "" {
-		c.ResponseError(errors.New("登录密码不能为空！"))
+		respondUserRequestInvalid(c, "login_pwd")
 		return
 	}
 	loginUID := c.MustGet("uid").(string)
 	user, err := u.db.QueryByUID(loginUID)
 	if err != nil {
 		u.Error("查询用户信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询用户信息失败"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	pwdMatched, _ := CheckPassword(req.LoginPwd, user.Password)
 	if !pwdMatched {
-		c.ResponseError(errors.New("登录密码错误"))
+		respondUserError(c, errcode.ErrUserInvalidCredentials)
 		return
 	}
 	//修改用户聊天密码
 	hashedChatPwd, err := HashPassword(req.ChatPwd)
 	if err != nil {
 		u.Error("哈希聊天密码失败！", zap.Error(err))
-		c.ResponseError(errors.New("修改聊天密码失败"))
+		respondUserError(c, errcode.ErrUserChatPwdUpdateFailed)
 		return
 	}
 	err = u.db.UpdateUsersWithField("chat_pwd", hashedChatPwd, loginUID)
 	if err != nil {
 		u.Error("查询用户信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("修改聊天密码失败"))
+		respondUserError(c, errcode.ErrUserChatPwdUpdateFailed)
 		return
 	}
 	c.ResponseOK()
@@ -2477,22 +2499,22 @@ func (u *User) lockScreenAfterMinuteSet(c *wkhttp.Context) {
 		LockAfterMinute int `json:"lock_after_minute"` // 在几分钟后锁屏
 	}
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("请求数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if req.LockAfterMinute < 0 {
-		c.ResponseError(errors.New("锁屏时间不能小于0"))
+		respondUserLockMinuteOutOfRange(c)
 		return
 	}
 	if req.LockAfterMinute > 60 {
-		c.ResponseError(errors.New("锁屏时间不能大于60分钟"))
+		respondUserLockMinuteOutOfRange(c)
 		return
 	}
 	loginUID := c.GetLoginUID()
 	err := u.db.UpdateUsersWithField("lock_after_minute", strconv.FormatInt(int64(req.LockAfterMinute), 10), loginUID)
 	if err != nil {
 		u.Error("修改用户锁屏密码错误", zap.Error(err))
-		c.ResponseError(errors.New("修改用户锁屏密码错误"))
+		respondUserError(c, errcode.ErrUserLockScreenPwdUpdateFailed)
 		return
 	}
 	c.ResponseOK()
@@ -2504,11 +2526,11 @@ func (u *User) setLockScreenPwd(c *wkhttp.Context) {
 		LockScreenPwd string `json:"lock_screen_pwd"`
 	}
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("请求数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if strings.TrimSpace(req.LockScreenPwd) == "" {
-		c.ResponseError(errors.New("锁屏密码不能为空"))
+		respondUserRequestInvalid(c, "lock_screen_pwd")
 		return
 	}
 
@@ -2516,13 +2538,13 @@ func (u *User) setLockScreenPwd(c *wkhttp.Context) {
 	hashedLockPwd, err := HashPassword(req.LockScreenPwd)
 	if err != nil {
 		u.Error("哈希锁屏密码失败！", zap.Error(err))
-		c.ResponseError(errors.New("修改锁屏密码失败"))
+		respondUserError(c, errcode.ErrUserLockScreenPwdUpdateFailed)
 		return
 	}
 	err = u.db.UpdateUsersWithField("lock_screen_pwd", hashedLockPwd, loginUID)
 	if err != nil {
 		u.Error("修改用户锁屏密码错误", zap.Error(err))
-		c.ResponseError(errors.New("修改用户锁屏密码错误"))
+		respondUserError(c, errcode.ErrUserLockScreenPwdUpdateFailed)
 		return
 	}
 	c.ResponseOK()
@@ -2534,7 +2556,7 @@ func (u *User) closeLockScreenPwd(c *wkhttp.Context) {
 	err := u.db.UpdateUsersWithField("lock_screen_pwd", "", loginUID)
 	if err != nil {
 		u.Error("修改用户锁屏密码错误", zap.Error(err))
-		c.ResponseError(errors.New("修改用户锁屏密码错误"))
+		respondUserError(c, errcode.ErrUserLockScreenPwdUpdateFailed)
 		return
 	}
 	c.ResponseOK()
@@ -2546,7 +2568,7 @@ func (u *User) sendLoginCheckPhoneCode(c *wkhttp.Context) {
 	// 否则攻击者跳过 /v1/user/login 直接走二阶段仍能拿到 token,
 	// 同时还把短信通道当作免费枚举/滥发入口。
 	if common2.EnsureSystemSettings(u.ctx).LocalLoginOff() {
-		c.ResponseError(errors.New("本地登录已关闭"))
+		respondUserError(c, errcode.ErrUserLocalLoginDisabled)
 		return
 	}
 	var req struct {
@@ -2554,11 +2576,11 @@ func (u *User) sendLoginCheckPhoneCode(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		u.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if req.UID == "" {
-		c.ResponseError(errors.New("uid不能为空！"))
+		respondUserRequestInvalid(c, "uid")
 		return
 	}
 
@@ -2571,13 +2593,15 @@ func (u *User) sendLoginCheckPhoneCode(c *wkhttp.Context) {
 
 	userinfo, err := u.db.QueryByUID(req.UID)
 	if err != nil {
+		// User-lookup failure here is a DB query error, NOT a chat-password
+		// update failure (mirror this code with loginCheckPhone below).
 		u.Error("查询用户信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("修改聊天密码失败"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userinfo == nil {
 		u.Error("该用户不存在", zap.Error(err))
-		c.ResponseError(errors.New("该用户不存在"))
+		respondUserError(c, errcode.ErrUserNotFound)
 		return
 	}
 	//发送短信
@@ -2589,7 +2613,7 @@ func (u *User) sendLoginCheckPhoneCode(c *wkhttp.Context) {
 	if err != nil {
 		u.Error("发送短信失败", zap.Error(err))
 		ext.LogError(span, err)
-		c.ResponseError(errors.New("发送短信失败"))
+		respondUserError(c, errcode.ErrUserSMSSendFailed)
 		return
 	}
 	c.ResponseOK()
@@ -2598,7 +2622,7 @@ func (u *User) sendLoginCheckPhoneCode(c *wkhttp.Context) {
 // loginCheckPhone 登录验证设备短信
 func (u *User) loginCheckPhone(c *wkhttp.Context) {
 	if common2.EnsureSystemSettings(u.ctx).LocalLoginOff() {
-		c.ResponseError(errors.New("本地登录已关闭"))
+		respondUserError(c, errcode.ErrUserLocalLoginDisabled)
 		return
 	}
 	var req struct {
@@ -2607,15 +2631,15 @@ func (u *User) loginCheckPhone(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		u.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if req.UID == "" {
-		c.ResponseError(errors.New("uid不能为空！"))
+		respondUserRequestInvalid(c, "uid")
 		return
 	}
 	if req.Code == "" {
-		c.ResponseError(errors.New("验证码不能为空！"))
+		respondUserRequestInvalid(c, "code")
 		return
 	}
 	span := u.ctx.Tracer().StartSpan(
@@ -2627,42 +2651,43 @@ func (u *User) loginCheckPhone(c *wkhttp.Context) {
 
 	userInfo, err := u.db.QueryByUID(req.UID)
 	if err != nil {
+		// User-lookup failure is a DB query error; mirror sendLoginCheckPhoneCode.
 		u.Error("查询用户信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("修改聊天密码失败"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userInfo == nil {
 		u.Error("该用户不存在", zap.Error(err))
-		c.ResponseError(errors.New("该用户不存在"))
+		respondUserError(c, errcode.ErrUserNotFound)
 		return
 	}
 	// 已注销账号拒绝设备验证登录；冷静期账号允许
 	if userInfo.IsDestroy == IsDestroyDone {
-		c.ResponseError(errors.New("该用户不存在"))
+		respondUserError(c, errcode.ErrUserNotFound)
 		return
 	}
 	err = u.smsServie.Verify(spanCtx, userInfo.Zone, userInfo.Phone, req.Code, commonapi.CodeTypeCheckMobile)
 	if err != nil {
 		u.Error("验证短信失败", zap.Error(err))
-		c.ResponseError(err)
+		respondUserError(c, errcode.ErrUserCodeInvalid)
 		return
 	}
 
 	loginDeviceJsonStr, err := u.ctx.GetRedisConn().GetString(fmt.Sprintf("%s%s", u.ctx.GetConfig().Cache.LoginDeviceCachePrefix, req.UID))
 	if err != nil {
 		u.Error("获取登录设备缓存失败！", zap.Error(err))
-		c.ResponseError(errors.New("获取登录设备缓存失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if loginDeviceJsonStr == "" {
-		c.ResponseError(errors.New("登录设备已过期，请重新登录"))
+		respondUserError(c, errcode.ErrUserLoginDeviceExpired)
 		return
 	}
 	var loginDeivce *deviceReq
 	err = util.ReadJsonByByte([]byte(loginDeviceJsonStr), &loginDeivce)
 	if err != nil {
 		u.Error("解码登录设备信息失败！", zap.Error(err), zap.String("uid", req.UID))
-		c.ResponseError(errors.New("解码登录设备信息失败！"))
+		respondUserError(c, errcode.ErrUserDecodeFailed)
 		return
 	}
 	err = u.deviceDB.insertOrUpdateDeviceCtx(spanCtx, &deviceModel{
@@ -2674,7 +2699,7 @@ func (u *User) loginCheckPhone(c *wkhttp.Context) {
 	})
 	if err != nil {
 		u.Error("添加或更新登录设备信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("添加或更新登录设备信息失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	token := util.GenerUUID()
@@ -2686,13 +2711,13 @@ func (u *User) loginCheckPhone(c *wkhttp.Context) {
 	})
 	if err != nil {
 		u.Error("编码token缓存失败！", zap.Error(err))
-		c.ResponseError(errors.New("设置token缓存失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	err = u.ctx.Cache().SetAndExpire(u.ctx.GetConfig().Cache.TokenCachePrefix+token, tokenPayload, u.ctx.GetConfig().Cache.TokenExpire)
 	if err != nil {
 		u.Error("设置token缓存失败！", zap.Error(err))
-		c.ResponseError(errors.New("设置token缓存失败！"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	// err = u.ctx.UpdateIMToken(userInfo.UID, token, config.DeviceFlag(0), config.DeviceLevelMaster)
@@ -2704,11 +2729,11 @@ func (u *User) loginCheckPhone(c *wkhttp.Context) {
 	})
 	if err != nil {
 		u.Error("更新IM的token失败！", zap.Error(err))
-		c.ResponseError(errors.New("更新IM的token失败！"))
+		respondUserError(c, errcode.ErrUserIMCallFailed)
 		return
 	}
 	if imResp.Status == config.UpdateTokenStatusBan {
-		c.ResponseError(errors.New("此账号已经被封禁！"))
+		respondUserError(c, errcode.ErrUserAccountBanned)
 		return
 	}
 	resp := newLoginUserDetailResp(userInfo, token, u.ctx)
@@ -2721,7 +2746,7 @@ func (u *User) customerservices(c *wkhttp.Context) {
 	list, err := u.db.QueryByCategory(CategoryCustomerService)
 	if err != nil {
 		u.Error("查询客服列表失败", zap.Error(err))
-		c.ResponseError(errors.New("查询客服列表失败"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	results := []*customerservicesResp{}
@@ -2742,24 +2767,25 @@ func (u *User) sendDestroyCode(c *wkhttp.Context) {
 	userInfo, err := u.db.QueryByUID(loginUID)
 	if err != nil {
 		u.Error("查询登录用户信息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询登录用户信息错误"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userInfo == nil {
-		c.ResponseError(errors.New("登录用户不存在"))
+		respondUserError(c, errcode.ErrUserCurrentNotFound)
 		return
 	}
 	switch userInfo.IsDestroy {
 	case IsDestroyApplying:
-		c.ResponseError(errors.New("账号已在注销冷静期中，请使用新版客户端撤销或查询状态"))
+		respondUserError(c, errcode.ErrUserAccountDestroying)
 		return
 	case IsDestroyDone:
-		c.ResponseError(errors.New("账号已注销"))
+		respondUserError(c, errcode.ErrUserAccountDestroyed)
 		return
 	}
 	err = u.smsServie.SendVerifyCode(c.Context, userInfo.Zone, userInfo.Phone, commonapi.CodeTypeDestroyAccount)
 	if err != nil {
-		c.ResponseError(err)
+		u.Error("注销验证码短信发送失败", zap.String("uid", loginUID), zap.Error(err))
+		respondUserError(c, errcode.ErrUserSMSSendFailed)
 		return
 	}
 	c.ResponseOK()
@@ -2770,31 +2796,31 @@ func (u *User) destroyAccount(c *wkhttp.Context) {
 	code := c.Param("code")
 	loginUID := c.GetLoginUID()
 	if code == "" {
-		c.ResponseError(errors.New("验证码不能为空"))
+		respondUserRequestInvalid(c, "code")
 		return
 	}
 	userInfo, err := u.db.QueryByUID(loginUID)
 	if err != nil {
 		u.Error("查询登录用户信息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询登录用户信息错误"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userInfo == nil {
-		c.ResponseError(errors.New("登录用户不存在"))
+		respondUserError(c, errcode.ErrUserCurrentNotFound)
 		return
 	}
 	switch userInfo.IsDestroy {
 	case IsDestroyApplying:
-		c.ResponseError(errors.New("账号已在注销冷静期中，请使用新版客户端撤销或查询状态"))
+		respondUserError(c, errcode.ErrUserAccountDestroying)
 		return
 	case IsDestroyDone:
-		c.ResponseError(errors.New("账号已注销"))
+		respondUserError(c, errcode.ErrUserAccountDestroyed)
 		return
 	}
 	//测试模式（仅非 release 生效）
 	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
 		if !commonapi.MatchTestCode(u.ctx.GetConfig(), code) {
-			c.ResponseError(errors.New("验证码错误"))
+			respondUserError(c, errcode.ErrUserCodeInvalid)
 			return
 		}
 	} else {
@@ -2802,7 +2828,8 @@ func (u *User) destroyAccount(c *wkhttp.Context) {
 		// 校验验证码
 		err = u.smsServie.Verify(c.Context, userInfo.Zone, userInfo.Phone, code, commonapi.CodeTypeDestroyAccount)
 		if err != nil {
-			c.ResponseError(err)
+			u.Warn("注销验证码校验失败", zap.String("uid", loginUID), zap.Error(err))
+			respondUserError(c, errcode.ErrUserCodeInvalid)
 			return
 		}
 	}
@@ -2815,13 +2842,13 @@ func (u *User) destroyAccount(c *wkhttp.Context) {
 	err = u.db.destroyAccount(loginUID, username, phone)
 	if err != nil {
 		u.Error("注销账号错误", zap.Error(err))
-		c.ResponseError(errors.New("注销账号错误"))
+		respondUserError(c, errcode.ErrUserDestroyFailed)
 		return
 	}
 	err = u.ctx.QuitUserDevice(c.GetLoginUID(), -1) // 退出全部登陆设备
 	if err != nil {
 		u.Error("退出登陆设备失败", zap.Error(err))
-		c.ResponseError(errors.New("退出登陆设备失败"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 
@@ -3039,46 +3066,47 @@ func (u *User) addSystemFriend(uid string) error {
 func (u *User) pwdforget(c *wkhttp.Context) {
 	var req resetPwdReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("请求数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if strings.TrimSpace(req.Zone) == "" {
-		c.ResponseError(errors.New("区号不能为空！"))
+		respondUserRequestInvalid(c, "zone")
 		return
 	}
 	if strings.TrimSpace(req.Phone) == "" {
-		c.ResponseError(errors.New("手机号不能为空！"))
+		respondUserRequestInvalid(c, "phone")
 		return
 	}
 	if strings.TrimSpace(req.Code) == "" {
-		c.ResponseError(errors.New("验证码不能为空！"))
+		respondUserRequestInvalid(c, "code")
 		return
 	}
 	if strings.TrimSpace(req.Pwd) == "" {
-		c.ResponseError(errors.New("密码不能为空！"))
+		respondUserRequestInvalid(c, "password")
 		return
 	}
 	userInfo, err := u.db.QueryByPhone(req.Zone, req.Phone)
 	if err != nil {
 		u.Error("查询用户信息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询用户信息错误"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if userInfo == nil {
-		c.ResponseError(errors.New("该账号不存在"))
+		respondUserError(c, errcode.ErrUserNotFound)
 		return
 	}
 	//测试模式（仅非 release 生效）
 	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
 		if !commonapi.MatchTestCode(u.ctx.GetConfig(), req.Code) {
-			c.ResponseError(errors.New("验证码错误"))
+			respondUserError(c, errcode.ErrUserCodeInvalid)
 			return
 		}
 	} else {
 		//线上验证短信验证码
 		err = u.smsServie.Verify(context.Background(), req.Zone, req.Phone, req.Code, commonapi.CodeTypeForgetLoginPWD)
 		if err != nil {
-			c.ResponseError(err)
+			u.Warn("忘记密码验证码校验失败", zap.String("phone", req.Phone), zap.Error(err))
+			respondUserError(c, errcode.ErrUserCodeInvalid)
 			return
 		}
 	}
@@ -3086,13 +3114,13 @@ func (u *User) pwdforget(c *wkhttp.Context) {
 	hashedPassword, hashErr := HashPassword(req.Pwd)
 	if hashErr != nil {
 		u.Error("密码哈希失败", zap.Error(hashErr))
-		c.ResponseError(errors.New("密码处理失败"))
+		respondUserError(c, errcode.ErrUserPasswordProcessFailed)
 		return
 	}
 	err = u.db.UpdateUsersWithField("password", hashedPassword, userInfo.UID)
 	if err != nil {
 		u.Error("修改登录密码错误", zap.Error(err))
-		c.ResponseError(errors.New("修改登录密码错误"))
+		respondUserError(c, errcode.ErrUserLoginPwdUpdateFailed)
 		return
 	}
 	c.ResponseOK()
@@ -3102,15 +3130,15 @@ func (u *User) pwdforget(c *wkhttp.Context) {
 func (u *User) getForgetPwdSMS(c *wkhttp.Context) {
 	var req codeReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("请求数据格式有误！"))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if strings.TrimSpace(req.Zone) == "" {
-		c.ResponseError(errors.New("区号不能为空！"))
+		respondUserRequestInvalid(c, "zone")
 		return
 	}
 	if strings.TrimSpace(req.Phone) == "" {
-		c.ResponseError(errors.New("手机号不能为空！"))
+		respondUserRequestInvalid(c, "phone")
 		return
 	}
 
@@ -3124,17 +3152,17 @@ func (u *User) getForgetPwdSMS(c *wkhttp.Context) {
 	model, err := u.db.QueryByPhone(req.Zone, req.Phone)
 	if err != nil {
 		u.Error("查询用户信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询用户信息失败！"))
+		respondUserError(c, errcode.ErrUserQueryFailed)
 		return
 	}
 	if model == nil {
-		c.ResponseError(errors.New("该手机号未注册"))
+		respondUserError(c, errcode.ErrUserNotFound)
 		return
 	}
 	err = u.smsServie.SendVerifyCode(spanCtx, req.Zone, req.Phone, commonapi.CodeTypeForgetLoginPWD)
 	if err != nil {
 		u.Error("发送短信验证码失败", zap.Error(err))
-		c.ResponseError(errors.New("发送短信验证码失败！"))
+		respondUserError(c, errcode.ErrUserSMSSendFailed)
 		return
 	}
 	c.ResponseOK()
@@ -3155,7 +3183,7 @@ func (u *User) createUser(registerSpanCtx context.Context, createUser *createUse
 	tx, err := u.db.session.Begin()
 	if err != nil {
 		u.Error("创建数据库事物失败", zap.Error(err))
-		c.ResponseError(errors.New("创建数据库事物失败"))
+		respondUserError(c, errcode.ErrUserStoreFailed)
 		return
 	}
 	defer func() {
@@ -3170,14 +3198,14 @@ func (u *User) createUser(registerSpanCtx context.Context, createUser *createUse
 		if err != nil {
 			tx.Rollback()
 			u.Error("数据库事物提交失败", zap.Error(err))
-			c.ResponseError(errors.New("数据库事物提交失败"))
+			respondUserError(c, errcode.ErrUserStoreFailed)
 			return nil
 		}
 		return nil
 	})
 	if err != nil {
 		tx.Rollback()
-		c.ResponseError(errors.New("注册失败！"))
+		respondUserError(c, errcode.ErrUserRegisterFailed)
 		return
 	}
 	c.Response(resp)
@@ -3187,7 +3215,7 @@ func (u *User) createUserTx(registerSpanCtx context.Context, createUser *createU
 	publicIP := util.GetClientPublicIP(c.Request)
 	resp, err := u.createUserWithRespAndTx(registerSpanCtx, createUser, publicIP, invite, tx, commitCallback)
 	if err != nil {
-		c.ResponseError(errors.New("注册失败！"))
+		respondUserError(c, errcode.ErrUserRegisterFailed)
 		return
 	}
 	c.Response(resp)
@@ -3728,11 +3756,12 @@ type authVerifyTokenResp struct {
 func (u *User) authVerifyToken(c *wkhttp.Context) {
 	var req authVerifyTokenReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseErrorf("invalid request: %v", err)
+		u.Warn("authVerifyToken 请求体格式错误", zap.Error(err))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if req.Token == "" {
-		c.ResponseError(errors.New("token is required"))
+		respondUserTokenRequired(c, "token")
 		return
 	}
 
@@ -3792,11 +3821,12 @@ type authVerifyBotResp struct {
 func (u *User) authVerifyBot(c *wkhttp.Context) {
 	var req authVerifyBotReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseErrorf("invalid request: %v", err)
+		u.Warn("authVerifyBot 请求体格式错误", zap.Error(err))
+		respondUserRequestInvalid(c, "")
 		return
 	}
 	if req.BotToken == "" {
-		c.ResponseError(errors.New("bot_token is required"))
+		respondUserTokenRequired(c, "bot_token")
 		return
 	}
 

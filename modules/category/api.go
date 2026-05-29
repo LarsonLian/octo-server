@@ -9,6 +9,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	convext "github.com/Mininglamp-OSS/octo-server/modules/conversation_ext"
+	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/gocraft/dbr/v2"
@@ -513,18 +514,29 @@ func (c *Category) moveGroupToCategory(ctx *wkhttp.Context) {
 		return
 	}
 
-	// 校验群成员身份
-	var memberCount int
-	_, err := c.db.session.Select("count(*)").From("group_member").
+	// 校验群成员身份，并取出 is_external / source_space_id 用于计算用户视角空间。
+	// Issue #191：外部群（群归属 Space 与用户所在 Space 不同）场景下，用户是该群的
+	// 外部成员（is_external=1, source_space_id=用户当前 Space），关注/归类是个人维度
+	// 操作，应以用户来源 Space 而非群归属 Space 作为空间维度。
+	var member struct {
+		IsExternal    int    `db:"is_external"`
+		SourceSpaceID string `db:"source_space_id"`
+	}
+	// IFNULL + Limit(1) 都是防御性写法：source_space_id 列是 NOT NULL DEFAULT ''
+	// （见 group/sql/20260424000001_group_legacy01.sql），(group_no, uid) 也有唯一约束、
+	// LoadOne 至多命中一行——这里并非暗示该列可空或可能多行，仅作 belt-and-suspenders。
+	err := c.db.session.Select("is_external", "IFNULL(source_space_id,'') AS source_space_id").
+		From("group_member").
 		Where("group_no=? and uid=? and is_deleted=0", groupNo, loginUID).
-		Load(&memberCount)
+		Limit(1).
+		LoadOne(&member)
 	if err != nil {
+		if errors.Is(err, dbr.ErrNotFound) {
+			ctx.ResponseError(errors.New("你不是该群成员"))
+			return
+		}
 		c.Error("查询群成员失败", zap.Error(err))
 		ctx.ResponseError(errors.New("查询群成员失败"))
-		return
-	}
-	if memberCount == 0 {
-		ctx.ResponseError(errors.New("你不是该群成员"))
 		return
 	}
 
@@ -541,6 +553,36 @@ func (c *Category) moveGroupToCategory(ctx *wkhttp.Context) {
 	if groupSpaceID == "" {
 		ctx.ResponseError(errors.New("该群组不属于任何空间"))
 		return
+	}
+
+	// 用户视角的有效空间：外部成员以来源 Space 为准，内部成员等同于群归属 Space。
+	// 后续的同空间校验、follow_version bump、auto_follow_threads 同步都以此为空间维度，
+	// 保证外部群被归类后能正确出现在用户当前 Space 的关注 tab（侧边栏按当前 Space 查询）。
+	//
+	// 外部成员但 source_space_id 为空是合法历史状态（如未绑定 Space 的用户/bot，
+	// 见 modules/group/service.go 注释）。必须与 sidebar / space_filter 的解析口径
+	// 一致回退到用户默认 Space（最早加入的 Space）：space_filter.decideConvKeepInSpace
+	// 对外部群的 `eff == "" → defaultSpaceID`、api_sidebar.sidebarMySourceSpaceID
+	// 同口径。否则这些 legacy 行仍无法归类，且 follow_version / auto_follow_threads
+	// 会写到群归属 Space，与侧边栏读取的默认 Space 不一致——正是 #191 想消灭的漂移。
+	//
+	// 注意 corner case：source_space_id 为空且用户连默认 Space 都没有（无任何
+	// space_member 行，如未绑定 Space 的 bot）时，下面保留 effectiveSpaceID =
+	// groupSpaceID（旧行为），而非像 sidebarMySourceSpaceID 那样解析为 ""。这不是
+	// 严格对齐——但 "" 不会匹配任何分类 Space、等于无法归类，保留旧行为是更宽松且
+	// 不引入回归的选择。读到此处不要误以为这里与 sidebar 解析逐字一致。
+	effectiveSpaceID := groupSpaceID
+	if member.IsExternal == 1 {
+		if member.SourceSpaceID != "" {
+			effectiveSpaceID = member.SourceSpaceID
+		} else if defaultSpaceID, derr := spacemod.GetUserDefaultSpaceIDE(c.ctx, loginUID); derr != nil {
+			// fail-closed：DB 查询失败时不要静默落到群 Space（会复现 #191），直接报错。
+			c.Error("查询用户默认空间失败", zap.Error(derr))
+			ctx.ResponseError(errors.New("查询用户默认空间失败"))
+			return
+		} else if defaultSpaceID != "" {
+			effectiveSpaceID = defaultSpaceID
+		}
 	}
 
 	var categoryIDPtr *string
@@ -605,7 +647,7 @@ func (c *Category) moveGroupToCategory(ctx *wkhttp.Context) {
 			ctx.ResponseError(errors.New("无权限使用此分类"))
 			return
 		}
-		if groupSpaceID != locked.SpaceID {
+		if effectiveSpaceID != locked.SpaceID {
 			ctx.ResponseError(errors.New("群组和分类不在同一空间"))
 			return
 		}
@@ -644,7 +686,7 @@ func (c *Category) moveGroupToCategory(ctx *wkhttp.Context) {
 	// /v1/follow/sort holding the version FOR UPDATE while waiting on ext
 	// would AB-BA-deadlock against a move-out holding ext while waiting on
 	// version (issue #151 review #4 by an9xyz).
-	if _, err := convext.BumpFollowVersionTx(tx, loginUID, groupSpaceID); err != nil {
+	if _, err := convext.BumpFollowVersionTx(tx, loginUID, effectiveSpaceID); err != nil {
 		c.Error("更新 follow_version 失败", zap.Error(err))
 		ctx.ResponseError(errors.New("更新群设置失败"))
 		return
@@ -668,13 +710,13 @@ func (c *Category) moveGroupToCategory(ctx *wkhttp.Context) {
 	//     For first-time categorize (no ext row) the call is a no-op —
 	//     sidebar materialization later creates the row with =1.
 	if categoryIDPtr == nil {
-		if err := convext.ClearAutoFollowThreadsTx(tx, loginUID, groupSpaceID, []string{groupNo}); err != nil {
+		if err := convext.ClearAutoFollowThreadsTx(tx, loginUID, effectiveSpaceID, []string{groupNo}); err != nil {
 			c.Error("清理 auto_follow_threads 失败", zap.Error(err))
 			ctx.ResponseError(errors.New("更新群设置失败"))
 			return
 		}
 	} else {
-		if err := convext.RestoreAutoFollowThreadsTx(tx, loginUID, groupSpaceID, []string{groupNo}); err != nil {
+		if err := convext.RestoreAutoFollowThreadsTx(tx, loginUID, effectiveSpaceID, []string{groupNo}); err != nil {
 			c.Error("恢复 auto_follow_threads 失败", zap.Error(err))
 			ctx.ResponseError(errors.New("更新群设置失败"))
 			return

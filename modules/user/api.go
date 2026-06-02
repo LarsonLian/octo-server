@@ -70,17 +70,17 @@ var qrcodeChanLock sync.RWMutex
 
 // User 用户相关API
 type User struct {
-	db            *DB
-	friendDB      *friendDB
-	deviceDB      *deviceDB
-	smsServie     commonapi.ISMSService
-	fileService   file.IService
-	settingDB     *SettingDB
-	onlineDB      *onlineDB
-	userService   IService
-	onlineService *OnlineService
-	giteeDB       *giteeDB
-	githubDB      *githubDB
+	db             *DB
+	friendDB       *friendDB
+	deviceDB       *deviceDB
+	smsServie      commonapi.ISMSService
+	fileService    file.IService
+	settingDB      *SettingDB
+	onlineDB       *onlineDB
+	userService    IService
+	onlineService  *OnlineService
+	giteeDB        *giteeDB
+	githubDB       *githubDB
 	pinnedDB       *PinnedDB
 	pinned         *Pinned
 	spaceSettingDB *SpaceSettingDB
@@ -105,6 +105,22 @@ type User struct {
 	loginGuard               *LoginGuard
 	verificationDB           *verificationDB
 	languageService          *LanguageService
+	existingTokenSetter      existingTokenSetter
+}
+
+type existingTokenSetter interface {
+	SetIfExists(key string, value string, expire time.Duration) (bool, error)
+}
+
+type redisExistingTokenSetter struct {
+	client *rd.Client
+}
+
+func (s redisExistingTokenSetter) SetIfExists(key string, value string, expire time.Duration) (bool, error) {
+	if s.client == nil {
+		return false, nil
+	}
+	return s.client.SetXX(key, value, expire).Result()
 }
 
 // New New
@@ -139,6 +155,11 @@ func New(ctx *config.Context) *User {
 		pinnedDB:                 NewPinnedDB(ctx),
 		spaceSettingDB:           NewSpaceSettingDB(ctx.DB()),
 		verificationDB:           newVerificationDB(ctx),
+		existingTokenSetter: redisExistingTokenSetter{
+			client: rd.NewClient(octoredis.MustBuildOptions(ctx.GetConfig(), func(o *rd.Options) {
+				o.PoolSize = 10
+			})),
+		},
 	}
 	// LanguageService 与 main.go 注入到 CacheTokenParser 的实例独立构造，但共享
 	// 底层 *DB session / Redis 连接，因此读写同一份 user.language 列与
@@ -1476,6 +1497,7 @@ func (u *User) execLogin(userInfo *Model, flag config.DeviceFlag, device *device
 		tokenSpan.Finish()
 		return nil, errors.New("获取旧token错误")
 	}
+	reuseExistingToken := false
 	if flag == config.APP {
 		if oldToken != "" {
 			err = u.ctx.Cache().Delete(u.ctx.GetConfig().Cache.TokenCachePrefix + oldToken)
@@ -1488,6 +1510,7 @@ func (u *User) execLogin(userInfo *Model, flag config.DeviceFlag, device *device
 	} else { // PC暂时不执行删除操作，因为PC可以同时登陆
 		if strings.TrimSpace(oldToken) != "" { // 如果是web或pc类设备 因为支持多登所以这里依然使用老token
 			token = oldToken
+			reuseExistingToken = true
 		}
 	}
 
@@ -1502,11 +1525,30 @@ func (u *User) execLogin(userInfo *Model, flag config.DeviceFlag, device *device
 		tokenSpan.Finish()
 		return nil, errors.New("设置token缓存失败！")
 	}
-	err = u.ctx.Cache().SetAndExpire(u.ctx.GetConfig().Cache.TokenCachePrefix+token, tokenPayload, u.ctx.GetConfig().Cache.TokenExpire)
-	if err != nil {
-		u.Error("设置token缓存失败！", zap.Error(err))
-		tokenSpan.Finish()
-		return nil, errors.New("设置token缓存失败！")
+	if reuseExistingToken {
+		var refreshed bool
+		refreshed, err = u.refreshExistingLoginToken(
+			u.ctx.GetConfig().Cache.TokenCachePrefix+token,
+			tokenPayload,
+			u.ctx.GetConfig().Cache.TokenExpire,
+		)
+		if err != nil {
+			u.Error("刷新旧token缓存失败！", zap.Error(err))
+			tokenSpan.Finish()
+			return nil, errors.New("设置token缓存失败！")
+		}
+		if !refreshed {
+			token = util.GenerUUID()
+			reuseExistingToken = false
+		}
+	}
+	if !reuseExistingToken {
+		err = u.ctx.Cache().SetAndExpire(u.ctx.GetConfig().Cache.TokenCachePrefix+token, tokenPayload, u.ctx.GetConfig().Cache.TokenExpire)
+		if err != nil {
+			u.Error("设置token缓存失败！", zap.Error(err))
+			tokenSpan.Finish()
+			return nil, errors.New("设置token缓存失败！")
+		}
 	}
 	err = u.ctx.Cache().SetAndExpire(fmt.Sprintf("%s%d%s", u.ctx.GetConfig().Cache.UIDTokenCachePrefix, flag, userInfo.UID), token, u.ctx.GetConfig().Cache.TokenExpire)
 	if err != nil {
@@ -1540,6 +1582,13 @@ func (u *User) execLogin(userInfo *Model, flag config.DeviceFlag, device *device
 	resp := newLoginUserDetailResp(userInfo, token, u.ctx)
 	u.applyRealnameToLoginResp(resp, userInfo.UID)
 	return resp, nil
+}
+
+func (u *User) refreshExistingLoginToken(key string, payload string, expire time.Duration) (bool, error) {
+	if u.existingTokenSetter == nil {
+		return false, nil
+	}
+	return u.existingTokenSetter.SetIfExists(key, payload, expire)
 }
 
 // sendWelcomeMsg 发送欢迎语
@@ -1978,7 +2027,11 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 		respondUserError(c, errcode.ErrUserIMCallFailed)
 		return
 	}
-	if strings.TrimSpace(token) == "" {
+	// 复用 uidtoken 反查到的旧 token 前,必须确认 token:<oldToken> 仍存在,
+	// 否则与并发 logout 删除 token 形成 TOCTOU 竞态,会复活已登出的会话。
+	// 这里只标记是否复用,真正写缓存时用 SET XX 校验(见下方 UpdateIMToken 之前)。
+	reuseExistingToken := strings.TrimSpace(token) != ""
+	if !reuseExistingToken {
 		token = util.GenerUUID()
 	}
 
@@ -2036,6 +2089,44 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 			}
 		}
 	}
+	// 在调用 IM 之前确定最终 token 并写入缓存。
+	// 复用旧 token 时用 SET XX(SetIfExists):仅当 token:<oldToken> 仍存在才刷新;
+	// 若已被并发 logout 删除,则回退到新 UUID,避免复活已登出的 token。
+	tokenPayload, err := auth.Encode(auth.TokenInfo{
+		UID:      userModel.UID,
+		Name:     userModel.Name,
+		Language: userModel.Language,
+	})
+	if err != nil {
+		u.Error("编码token缓存失败！", zap.Error(err))
+		respondUserError(c, errcode.ErrUserStoreFailed)
+		return
+	}
+	if reuseExistingToken {
+		refreshed, err := u.refreshExistingLoginToken(
+			u.ctx.GetConfig().Cache.TokenCachePrefix+token,
+			tokenPayload,
+			u.ctx.GetConfig().Cache.TokenExpire,
+		)
+		if err != nil {
+			u.Error("刷新旧token缓存失败！", zap.Error(err))
+			respondUserError(c, errcode.ErrUserStoreFailed)
+			return
+		}
+		if !refreshed {
+			token = util.GenerUUID()
+			reuseExistingToken = false
+		}
+	}
+	if !reuseExistingToken {
+		err = u.ctx.Cache().SetAndExpire(u.ctx.GetConfig().Cache.TokenCachePrefix+token, tokenPayload, u.ctx.GetConfig().Cache.TokenExpire)
+		if err != nil {
+			u.Error("设置token缓存失败！", zap.Error(err))
+			respondUserError(c, errcode.ErrUserStoreFailed)
+			return
+		}
+	}
+
 	imResp, err := u.ctx.UpdateIMToken(config.UpdateIMTokenReq{
 		UID:         scaner,
 		Token:       token,
@@ -2052,22 +2143,6 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 		return
 	}
 
-	// 将token设置到缓存
-	tokenPayload, err := auth.Encode(auth.TokenInfo{
-		UID:      userModel.UID,
-		Name:     userModel.Name,
-		Language: userModel.Language,
-	})
-	if err != nil {
-		u.Error("编码token缓存失败！", zap.Error(err))
-		return
-	}
-	err = u.ctx.Cache().SetAndExpire(u.ctx.GetConfig().Cache.TokenCachePrefix+token, tokenPayload, u.ctx.GetConfig().Cache.TokenExpire)
-	if err != nil {
-		u.Error("设置token缓存失败！", zap.Error(err))
-		respondUserError(c, errcode.ErrUserStoreFailed)
-		return
-	}
 	err = u.ctx.GetRedisConn().Del(authCodeKey)
 	if err != nil {
 		u.Error("删除授权码失败！", zap.Error(err))

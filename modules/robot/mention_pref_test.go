@@ -3,6 +3,7 @@ package robot
 import (
 	"testing"
 
+	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -68,4 +69,31 @@ func TestGroupsCursorRoundTrip(t *testing.T) {
 	assert.Equal(t, int64(0), decodeGroupsCursor("!!!not-base64!!!"))
 	// Valid base64 of a non-numeric string also falls back to 0.
 	assert.Equal(t, int64(0), decodeGroupsCursor("YWJj")) // base64("abc")
+}
+
+// TestBuildMentionPrefPayload verifies the mention_pref_updated event payload
+// the owner write/delete endpoints push to the adapter (octo-server#242). The
+// adapter keys cache invalidation off event.type + event.group_no + the
+// message channel, and the bot only receives it via mention.uids — so those
+// fields are the contract under test.
+func TestBuildMentionPrefPayload(t *testing.T) {
+	for _, noMention := range []int{0, 1} {
+		p := buildMentionPrefPayload("bot_42", "g_100", noMention)
+
+		// Top-level type is Text so it rides the same group-message path as
+		// GROUP.md events.
+		assert.Equal(t, common.Text, p["type"])
+
+		event, ok := p["event"].(map[string]interface{})
+		assert.True(t, ok, "event must be a map")
+		assert.Equal(t, "mention_pref_updated", event["type"])
+		assert.Equal(t, "g_100", event["group_no"])
+		assert.Equal(t, noMention, event["no_mention"])
+
+		// Targeted (non-broadcast): only the affected bot is mentioned, so the
+		// robot dispatcher routes the event to that bot's queue alone.
+		mention, ok := p["mention"].(map[string]interface{})
+		assert.True(t, ok, "mention must be a map")
+		assert.Equal(t, []string{"bot_42"}, mention["uids"])
+	}
 }

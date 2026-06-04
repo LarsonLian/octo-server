@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Mininglamp-OSS/octo-lib/common"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
@@ -149,6 +152,16 @@ func (rb *Robot) setMentionPref(c *wkhttp.Context) {
 		c.ResponseError(errors.New("更新失败"))
 		return
 	}
+	// 写库成功后即时通知对应 bot 失效缓存（best-effort，异步不阻塞主流程；
+	// adapter 仍有 TTL 兜底）。octo-server#242 / YUJ-2884。
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				rb.Error("sendMentionPrefNotification panic", zap.Any("recover", r))
+			}
+		}()
+		rb.sendMentionPrefNotification(robotID, groupNo, req.NoMention)
+	}()
 	c.ResponseOK()
 }
 
@@ -171,7 +184,70 @@ func (rb *Robot) deleteMentionPref(c *wkhttp.Context) {
 		c.ResponseError(errors.New("删除失败"))
 		return
 	}
+	// 删除回退账号级默认即 no_mention=0；同样推事件让 adapter 即时失效缓存
+	// （best-effort，异步不阻塞）。octo-server#242 / YUJ-2884。
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				rb.Error("sendMentionPrefNotification panic", zap.Any("recover", r))
+			}
+		}()
+		rb.sendMentionPrefNotification(robotID, groupNo, 0)
+	}()
 	c.ResponseOK()
+}
+
+// sendMentionPrefNotification 在 owner 改群级免@偏好后，给对应 bot 推一条
+// mention_pref_updated 事件，让 adapter 即时失效 (bot, group) 缓存，消除偏好
+// 改动到生效之间的 TTL 延迟（octo-server#242 / YUJ-2884）。
+//
+// 结构对齐 group 模块 sendGroupMdNotification（owner 网页 → group 频道）：
+//   - 走 group 频道，channel_id=groupNo —— adapter 用 extractParentGroupNo
+//     (channel_id) 解析群号，与 GROUP.md 事件同一接收路径；
+//   - mention.uids 只放当前 robotID（不广播），群里的其它 bot 不会被惊动，
+//     而 robot 模块的事件分发按 mention.uids 把消息精确投递到该 bot 的事件队列；
+//   - event 载荷带 group_no + no_mention，adapter 据此精准失效缓存。
+//
+// best-effort：投递失败仅记日志，不影响写接口返回 200（adapter 有 TTL 兜底）。
+//
+// FromUID 用 robotID 而非 owner —— bot 必是群成员，WuKongIM 不会因发送方非
+// 群成员而拒发；owner 可能已退群，用 owner 会让事件静默失败退化成 TTL
+// （对齐 bot_api/botfather 样板）。
+func (rb *Robot) sendMentionPrefNotification(robotID, groupNo string, noMention int) {
+	payload := buildMentionPrefPayload(robotID, groupNo, noMention)
+
+	err := rb.ctx.SendMessage(&config.MsgSendReq{
+		Header: config.MsgHeader{
+			RedDot: 0,
+		},
+		ChannelID:   groupNo,
+		ChannelType: common.ChannelTypeGroup.Uint8(),
+		FromUID:     robotID,
+		Payload:     []byte(util.ToJson(payload)),
+	})
+	if err != nil {
+		rb.Error("send mention_pref notification failed", zap.Error(err),
+			zap.String("robot_id", robotID), zap.String("group_no", groupNo))
+	}
+}
+
+// buildMentionPrefPayload 构造 mention_pref_updated 事件的消息载荷。提取为纯函数
+// 便于单测断言事件结构（type / group_no / no_mention / mention.uids）。
+func buildMentionPrefPayload(robotID, groupNo string, noMention int) map[string]interface{} {
+	return map[string]interface{}{
+		"type":    common.Text,
+		"content": "mention_pref updated",
+		"event": map[string]interface{}{
+			"type":       "mention_pref_updated",
+			"group_no":   groupNo,
+			"no_mention": noMention,
+		},
+		// 只 @ 目标 bot —— 不广播给群里其它 bot。robot 事件分发按 mention.uids
+		// 精确投递到该 bot 的事件队列。
+		"mention": map[string]interface{}{
+			"uids": []string{robotID},
+		},
+	}
 }
 
 // getMentionPref 处理 GET /v1/robot/:robot_id/groups/:group_no/mention_pref。

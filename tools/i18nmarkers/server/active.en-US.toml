@@ -318,6 +318,45 @@ other = "The binding session has expired or is invalid. Please start over."
 ["err.server.oidc.bind_verify_required"]
 other = "Please complete verification before confirming."
 
+["err.server.qrcode.group_not_found"]
+other = "Group not found."
+
+["err.server.qrcode.group_space_forbidden"]
+other = "Only members of this space can join the group."
+
+["err.server.qrcode.not_found"]
+other = "The QR code is invalid or has expired."
+
+["err.server.qrcode.query_failed"]
+other = "Failed to query QR code data."
+
+["err.server.qrcode.request_invalid"]
+other = "Invalid QR code request."
+
+["err.server.qrcode.store_failed"]
+other = "Failed to update QR code data."
+
+["err.server.qrcode.token_invalid"]
+other = "Token information is invalid."
+
+["err.server.qrcode.token_required"]
+other = "Token is required."
+
+["err.server.qrcode.user_not_found"]
+other = "User not found."
+
+["err.server.report.query_failed"]
+other = "Failed to query report data."
+
+["err.server.report.request_invalid"]
+other = "Invalid report request."
+
+["err.server.report.session_invalid"]
+other = "The report session is invalid or has expired."
+
+["err.server.report.store_failed"]
+other = "Failed to update report data."
+
 ["err.server.robot.auth_check_failed"]
 other = "Robot authentication check failed."
 
@@ -374,6 +413,18 @@ other = "Failed to generate the robot token."
 
 ["err.server.robot.upload_failed"]
 other = "Failed to process the file."
+
+["err.server.search.group_query_failed"]
+other = "Failed to query group search data."
+
+["err.server.search.message_query_failed"]
+other = "Failed to query message search data."
+
+["err.server.search.request_invalid"]
+other = "Invalid search request."
+
+["err.server.search.user_query_failed"]
+other = "Failed to query user search data."
 
 ["err.server.space.already_member"]
 other = "You are already a member of this space."
@@ -443,6 +494,12 @@ other = "Invalid request."
 
 ["err.server.space.store_failed"]
 other = "Failed to update space data."
+
+["err.server.statistics.query_failed"]
+other = "Failed to query statistics data."
+
+["err.server.statistics.request_invalid"]
+other = "Invalid statistics request."
 
 ["err.server.thread.creator_cannot_leave"]
 other = "Thread creator cannot leave the thread."

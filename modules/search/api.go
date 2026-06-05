@@ -1,7 +1,6 @@
 package search
 
 import (
-	"errors"
 	"fmt"
 	"html"
 	"strings"
@@ -13,6 +12,8 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/message"
 	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	"github.com/Mininglamp-OSS/octo-server/pkg/log"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-server/pkg/util"
@@ -77,7 +78,7 @@ func (s *Search) global(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		s.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondSearchRequestInvalid(c, "")
 		return
 	}
 	if req.Limit > 100 {
@@ -116,21 +117,21 @@ func (s *Search) global(c *wkhttp.Context) {
 	revokedMsgExtras, err := s.messageService.GetRevokedMessages(messageIds)
 	if err != nil {
 		s.Error("查询消息撤回消息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询消息撤回消息错误"))
+		httperr.ResponseErrorL(c, errcode.ErrSearchMessageQueryFailed, nil, nil)
 		return
 	}
 	// 查询后台管理删除标记
 	deletedMsgExtras, err := s.messageService.GetDeletedMessages(messageIds)
 	if err != nil {
 		s.Error("查询消息删除消息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询消息删除消息错误"))
+		httperr.ResponseErrorL(c, errcode.ErrSearchMessageQueryFailed, nil, nil)
 		return
 	}
 	// 查询登录用户的删除标记
 	deletedMsgUserExtras, err := s.messageService.GetDeletedMessagesWithUID(loginUID, messageIds)
 	if err != nil {
 		s.Error("查询消息删除消息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询消息删除消息错误"))
+		httperr.ResponseErrorL(c, errcode.ErrSearchMessageQueryFailed, nil, nil)
 		return
 	}
 
@@ -138,7 +139,7 @@ func (s *Search) global(c *wkhttp.Context) {
 	channelOffsetResps, err := s.messageService.GetChannelOffsetWithUID(loginUID, channelIds)
 	if err != nil {
 		s.Error("查询用户清空channel消息标记错误", zap.Error(err))
-		c.ResponseError(errors.New("查询用户清空channel消息标记错误"))
+		httperr.ResponseErrorL(c, errcode.ErrSearchMessageQueryFailed, nil, nil)
 		return
 	}
 
@@ -201,7 +202,7 @@ func (s *Search) global(c *wkhttp.Context) {
 		joinedGroups, err = s.groupService.GetGroupsWithMemberUID(loginUID)
 		if err != nil {
 			s.Error("查询加入的群列表错误", zap.Error(err))
-			c.ResponseError(errors.New("查询加入的群列表错误"))
+			httperr.ResponseErrorL(c, errcode.ErrSearchGroupQueryFailed, nil, nil)
 			return
 		}
 		if len(joinedGroups) > 0 {
@@ -218,7 +219,7 @@ func (s *Search) global(c *wkhttp.Context) {
 		groups, err = s.groupService.GetGroupDetails(groupIds, loginUID)
 		if err != nil {
 			s.Error("查询群列表错误", zap.Error(err))
-			c.ResponseError(errors.New("查询群列表错误"))
+			httperr.ResponseErrorL(c, errcode.ErrSearchGroupQueryFailed, nil, nil)
 			return
 		}
 	}
@@ -230,7 +231,7 @@ func (s *Search) global(c *wkhttp.Context) {
 		users, err = s.userService.GetUserDetails(realUids, loginUID)
 		if err != nil {
 			s.Error("查询用户列表错误", zap.Error(err))
-			c.ResponseError(errors.New("查询用户列表错误"))
+			httperr.ResponseErrorL(c, errcode.ErrSearchUserQueryFailed, nil, nil)
 			return
 		}
 	}
@@ -317,7 +318,7 @@ func (s *Search) global(c *wkhttp.Context) {
 			friends, err := s.userService.SearchFriendsWithKeyword(loginUID, req.Keyword)
 			if err != nil {
 				s.Error("查询好友错误", zap.Error(err))
-				c.ResponseError(err)
+				httperr.ResponseErrorL(c, errcode.ErrSearchUserQueryFailed, nil, nil)
 				return
 			}
 			if len(friends) > 0 {

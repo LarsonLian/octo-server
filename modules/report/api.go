@@ -10,14 +10,19 @@ import (
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	"github.com/Mininglamp-OSS/octo-server/pkg/util"
+	"go.uber.org/zap"
 )
 
 // Report 举报
 type Report struct {
 	ctx *config.Context
 	db  *db
+	log.Log
 }
 
 // New 创建一个举报对象
@@ -25,6 +30,7 @@ func New(ctx *config.Context) *Report {
 	return &Report{
 		ctx: ctx,
 		db:  newDB(ctx),
+		Log: log.NewTLog("report"),
 	}
 }
 
@@ -85,18 +91,24 @@ func (r *Report) resolveSession(c *wkhttp.Context) {
 		SessionID string `json:"session_id"`
 	}
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseErrorf("请求数据格式有误！", err)
+		r.Error("请求数据格式有误", zap.Error(err))
+		respondReportRequestInvalid(c, "")
 		return
 	}
 	if req.SessionID == "" {
-		c.ResponseError(errors.New("session_id不能为空"))
+		respondReportRequestInvalid(c, "session_id")
 		return
 	}
 
 	key := fmt.Sprintf("%s%s", reportSessionPrefix, req.SessionID)
 	data, err := r.ctx.GetRedisConn().GetString(key)
-	if err != nil || data == "" {
-		c.ResponseError(errors.New("会话已过期或无效"))
+	if err != nil {
+		r.Error("查询举报会话失败", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrReportQueryFailed, nil, nil)
+		return
+	}
+	if data == "" {
+		httperr.ResponseErrorL(c, errcode.ErrReportSessionInvalid, nil, nil)
 		return
 	}
 
@@ -108,7 +120,8 @@ func (r *Report) resolveSession(c *wkhttp.Context) {
 		Token string `json:"token"`
 	}
 	if err := json.Unmarshal([]byte(data), &session); err != nil || session.UID == "" || session.Token == "" {
-		c.ResponseError(errors.New("会话数据无效"))
+		r.Warn("举报会话数据无效", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrReportSessionInvalid, nil, nil)
 		return
 	}
 
@@ -122,11 +135,12 @@ func (r *Report) resolveSession(c *wkhttp.Context) {
 func (r *Report) report(c *wkhttp.Context) {
 	var req reportReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseErrorf("请求数据格式有误！", err)
+		r.Error("请求数据格式有误", zap.Error(err))
+		respondReportRequestInvalid(c, "")
 		return
 	}
-	if err := req.check(); err != nil {
-		c.ResponseError(err)
+	if field := req.invalidField(); field != "" {
+		respondReportRequestInvalid(c, field)
 		return
 	}
 
@@ -144,7 +158,8 @@ func (r *Report) report(c *wkhttp.Context) {
 		ChannelType: req.ChannelType,
 	})
 	if err != nil {
-		c.ResponseErrorf("添加举报数据失败！", err)
+		r.Error("添加举报数据失败", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrReportStoreFailed, nil, nil)
 		return
 	}
 
@@ -166,7 +181,8 @@ func (r *Report) categoies(c *wkhttp.Context) {
 
 	categoryModels, err := r.db.queryCategoryAll()
 	if err != nil {
-		c.ResponseErrorf("查询类别失败！", err)
+		r.Error("查询举报类别失败", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrReportQueryFailed, nil, nil)
 		return
 	}
 
@@ -241,15 +257,28 @@ type reportReq struct {
 	Remark      string   `json:"remark"`       // 举报备注
 }
 
-func (r reportReq) check() error {
+func (r reportReq) invalidField() string {
 	if r.ChannelID == "" {
-		return errors.New("频道ID不能为空！")
+		return "channel_id"
 	}
 	if r.ChannelType <= 0 {
-		return errors.New("频道类型不能为空！")
+		return "channel_type"
 	}
 	if r.CategoryNo == "" {
-		return errors.New("举报类别不能为空！")
+		return "category_no"
 	}
-	return nil
+	return ""
+}
+
+func (r reportReq) check() error {
+	switch r.invalidField() {
+	case "channel_id":
+		return errors.New("频道ID不能为空！")
+	case "channel_type":
+		return errors.New("频道类型不能为空！")
+	case "category_no":
+		return errors.New("举报类别不能为空！")
+	default:
+		return nil
+	}
 }

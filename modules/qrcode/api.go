@@ -1,22 +1,23 @@
 package qrcode
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/group"
-	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
-	"github.com/Mininglamp-OSS/octo-server/pkg/auth"
-	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/auth"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"go.uber.org/zap"
 )
 
@@ -64,13 +65,13 @@ func (q *QRCode) Route(r *wkhttp.WKHttp) {
 func (q *QRCode) handleQRCodeInfo(c *wkhttp.Context) {
 	token := c.GetHeader("token")
 	if token == "" {
-		c.ResponseError(errors.New("token不能为空！"))
+		respondQRCodeTokenRequired(c)
 		return
 	}
 	raw, err := q.ctx.Cache().Get(q.ctx.GetConfig().Cache.TokenCachePrefix + token)
 	if err != nil {
 		q.Error("获取登录信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("获取登录信息失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrQRCodeQueryFailed, nil, nil)
 		return
 	}
 	if strings.TrimSpace(raw) == "" {
@@ -79,7 +80,7 @@ func (q *QRCode) handleQRCodeInfo(c *wkhttp.Context) {
 	}
 	info, decodeErr := auth.Decode(raw)
 	if decodeErr != nil {
-		c.ResponseError(errors.New("登录信息格式错误！"))
+		httperr.ResponseErrorL(c, errcode.ErrQRCodeTokenInvalid, nil, nil)
 		return
 	}
 	loginUID := info.UID
@@ -88,18 +89,18 @@ func (q *QRCode) handleQRCodeInfo(c *wkhttp.Context) {
 	if strings.HasPrefix(code, "user_") { // 用户资料二维码 格式： user_xxxx
 		targetUID := code[len("user_"):]
 		if targetUID == "" {
-			c.ResponseError(errors.New("用户UID不能为空"))
+			respondQRCodeRequestInvalid(c, "uid")
 			return
 		}
 		// Validate target user exists
 		targetUser, err := q.userService.GetUser(targetUID)
 		if err != nil {
 			q.Error("查询目标用户失败", zap.String("targetUID", targetUID), zap.Error(err))
-			c.ResponseError(errors.New("查询用户信息失败"))
+			httperr.ResponseErrorL(c, errcode.ErrQRCodeQueryFailed, nil, nil)
 			return
 		}
 		if targetUser == nil {
-			c.ResponseError(errors.New("用户不存在"))
+			httperr.ResponseErrorL(c, errcode.ErrQRCodeUserNotFound, nil, nil)
 			return
 		}
 		c.Response(NewHandleResult(ForwardNative, HandlerTypeUserInfo, map[string]interface{}{
@@ -111,11 +112,12 @@ func (q *QRCode) handleQRCodeInfo(c *wkhttp.Context) {
 		qrvercode := code[len("vercode_"):]
 		userResp, err := q.userService.GetUserWithQRVercode(qrvercode)
 		if err != nil {
-			c.ResponseErrorf("通过qrvercode获取用户信息失败！", err)
+			q.Error("通过qrvercode获取用户信息失败", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrQRCodeQueryFailed, nil, nil)
 			return
 		}
 		if userResp == nil {
-			c.ResponseError(errors.New("用户不存在！"))
+			httperr.ResponseErrorL(c, errcode.ErrQRCodeUserNotFound, nil, nil)
 			return
 		}
 		c.Response(NewHandleResult(ForwardNative, HandlerTypeUserInfo, map[string]interface{}{
@@ -128,19 +130,19 @@ func (q *QRCode) handleQRCodeInfo(c *wkhttp.Context) {
 	qrcodeContent, err := q.ctx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.QRCodeCachePrefix, code))
 	if err != nil {
 		q.Error("获取二维码信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("获取二维码信息失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrQRCodeQueryFailed, nil, nil)
 		return
 	}
 	if qrcodeContent == "" {
 		q.Error("二维码或已过期！", zap.String("code", code))
-		c.ResponseError(errors.New("二维码或已过期！"))
+		httperr.ResponseErrorL(c, errcode.ErrQRCodeNotFound, nil, nil)
 		return
 	}
 	var qrCodeModel common.QRCodeModel
 	err = util.ReadJsonByByte([]byte(qrcodeContent), &qrCodeModel)
 	if err != nil {
 		q.Error("解码二维码信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("解码二维码信息失败！"))
+		respondQRCodeRequestInvalid(c, "code")
 		return
 	}
 	var result interface{}
@@ -150,11 +152,11 @@ func (q *QRCode) handleQRCodeInfo(c *wkhttp.Context) {
 	case common.QRCodeTypeScanLogin: // 扫描登录
 		result, err = q.handleScanLogin(loginUID, code, qrCodeModel)
 	default:
-		err = errors.New("不支持的扫码类型！")
+		err = errQRCodeUnsupportedType
 	}
 	if err != nil {
 		q.Error("处理请求失败！", zap.Error(err))
-		c.ResponseError(err)
+		respondQRCodeHandleError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, result)
@@ -171,7 +173,7 @@ func (q *QRCode) handleScanLogin(loginUID string, uuid string, qrCodeModel commo
 	}), time.Minute*10)
 	if err != nil {
 		q.Error("生成扫码登录授权码失败", zap.Error(err))
-		return nil, errors.New("生成登录授权码失败，请稍后重试")
+		return nil, fmt.Errorf("%w: scan login auth code", errQRCodeInternalStoreFailed)
 	}
 	var pubkey string
 	if qrCodeModel.Data != nil && qrCodeModel.Data["pub_key"] != nil {
@@ -185,7 +187,7 @@ func (q *QRCode) handleScanLogin(loginUID string, uuid string, qrCodeModel commo
 	err = q.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.QRCodeCachePrefix, uuid), util.ToJson(qrcodeInfo), time.Minute*5)
 	if err != nil {
 		q.Error("设置扫描登录二维码信息失败", zap.Error(err))
-		return nil, errors.New("扫码登录失败，请稍后重试")
+		return nil, fmt.Errorf("%w: scan login state", errQRCodeInternalStoreFailed)
 	}
 	user.SendQRCodeInfo(uuid, qrcodeInfo)
 	return NewHandleResult(ForwardNative, HandlerTypeLoginConfirm, map[string]interface{}{
@@ -212,21 +214,21 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 
 	groupNo, ok := qrCodeModel.Data["group_no"].(string)
 	if !ok {
-		return nil, errors.New("invalid QR code data: missing or invalid group_no")
+		return nil, fmt.Errorf("%w: group_no", errQRCodeGroupDataInvalid)
 	}
 	generator, ok := qrCodeModel.Data["generator"].(string)
 	if !ok {
-		return nil, errors.New("invalid QR code data: missing or invalid generator")
+		return nil, fmt.Errorf("%w: generator", errQRCodeGroupDataInvalid)
 	}
 
 	// 查询群信息用于预览
 	groupModel, err := q.groupDB.QueryWithGroupNo(groupNo)
 	if err != nil {
 		q.Error("查询群信息失败", zap.Error(err))
-		return nil, errors.New("获取群信息失败，请稍后重试")
+		return nil, fmt.Errorf("%w: group", errQRCodeInternalQueryFailed)
 	}
 	if groupModel == nil {
-		return nil, errors.New("群不存在")
+		return nil, errQRCodeGroupNotFound
 	}
 
 	// 扫码预检仅拦截「群禁止外部成员且扫码者非 Space 成员」的场景。
@@ -238,23 +240,23 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 		isMember, err := spacepkg.CheckMembership(q.ctx.DB(), groupModel.SpaceID, loginUID)
 		if err != nil {
 			q.Error("查询空间成员失败", zap.Error(err))
-			return nil, errors.New("校验空间成员失败，请稍后重试")
+			return nil, fmt.Errorf("%w: space membership", errQRCodeInternalQueryFailed)
 		}
 		if !isMember {
-			return nil, errors.New("该群仅允许本空间成员加入")
+			return nil, errQRCodeGroupSpaceForbidden
 		}
 	}
 
 	memberCount, err := q.groupDB.QueryMemberCount(groupNo)
 	if err != nil {
 		q.Error("查询群成员数失败", zap.Error(err))
-		return nil, errors.New("获取群信息失败，请稍后重试")
+		return nil, fmt.Errorf("%w: member count", errQRCodeInternalQueryFailed)
 	}
 
 	exist, err := q.groupDB.ExistMember(loginUID, groupNo)
 	if err != nil {
 		q.Error("查询群成员失败", zap.Error(err))
-		return nil, errors.New("获取群信息失败，请稍后重试")
+		return nil, fmt.Errorf("%w: membership", errQRCodeInternalQueryFailed)
 	}
 	if exist {
 		return NewHandleResult(ForwardNative, HandlerTypeGroup, map[string]interface{}{
@@ -275,7 +277,7 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 	}), time.Minute*30)
 	if err != nil {
 		q.Error("生成入群授权码失败", zap.Error(err))
-		return nil, errors.New("生成入群授权码失败，请稍后重试")
+		return nil, fmt.Errorf("%w: join group auth code", errQRCodeInternalStoreFailed)
 	}
 	return NewHandleResult(ForwardNative, HandlerTypeGroup, map[string]interface{}{
 		"group_no":     groupNo,

@@ -1,16 +1,17 @@
 package report
 
 import (
-	"errors"
 	"strings"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/group"
-	wkutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
+	wkutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -49,26 +50,26 @@ func (m *Manager) Route(l *wkhttp.WKHttp) {
 func (m *Manager) reportList(c *wkhttp.Context) {
 	err := c.CheckLoginRole()
 	if err != nil {
-		c.ResponseError(err)
+		httperr.ResponseErrorL(c, errcode.ErrSharedForbidden, nil, nil)
 		return
 	}
 	pageIndex, pageSize := c.GetPage()
 	channelType := c.Query("channel_type")
 	if channelType == "" {
-		c.ResponseError(errors.New("查询频道类型不能为空"))
+		respondReportRequestInvalid(c, "channel_type")
 		return
 	}
 	queryChannelType := wkutil.AtoiOrDefault(channelType, 0)
 	list, err := m.managerDB.list(uint64(pageSize), uint64(pageIndex), queryChannelType)
 	if err != nil {
 		m.Error("查询举报列表错误", zap.Error(err))
-		c.ResponseError(errors.New("查询举报列表错误"))
+		httperr.ResponseErrorL(c, errcode.ErrReportQueryFailed, nil, nil)
 		return
 	}
 	count, err := m.managerDB.queryReportCount(queryChannelType)
 	if err != nil {
 		m.Error("查询举报总数量错误", zap.Error(err))
-		c.ResponseError(errors.New("查询举报总数量错误"))
+		httperr.ResponseErrorL(c, errcode.ErrReportQueryFailed, nil, nil)
 		return
 	}
 	result := make([]*managerReportResp, 0)
@@ -87,19 +88,19 @@ func (m *Manager) reportList(c *wkhttp.Context) {
 		users, err := m.userDB.QueryByUIDs(uids)
 		if err != nil {
 			m.Error("查询用户信息错误", zap.Error(err))
-			c.ResponseError(errors.New("查询用户信息错误"))
+			httperr.ResponseErrorL(c, errcode.ErrReportQueryFailed, nil, nil)
 			return
 		}
 		reprotUsers, err := m.userDB.QueryByUIDs(reportUserUIDs)
 		if err != nil {
 			m.Error("查询举报用户集合错误", zap.Error(err))
-			c.ResponseError(errors.New("查询举报用户集合错误"))
+			httperr.ResponseErrorL(c, errcode.ErrReportQueryFailed, nil, nil)
 			return
 		}
 		reprotGroups, err := m.groupDB.QueryGroupsWithGroupNos(reportGroupIDs)
 		if err != nil {
 			m.Error("查询举报群集合错误", zap.Error(err))
-			c.ResponseError(errors.New("查询举报群集合错误"))
+			httperr.ResponseErrorL(c, errcode.ErrReportQueryFailed, nil, nil)
 			return
 		}
 		for _, report := range list {

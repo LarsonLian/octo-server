@@ -689,6 +689,49 @@ other = "查询 webhook 信息失败。"
 ["err.server.incomingwebhook.mgmt_operation_failed"]
 other = "操作失败，请稍后再试。"
 
+# ---- err.server.qrcode.* (modules/qrcode: api.go) ----
+
+["err.server.qrcode.request_invalid"]
+other = "二维码请求无效。"
+
+["err.server.qrcode.token_required"]
+other = "token 不能为空。"
+
+["err.server.qrcode.token_invalid"]
+other = "登录信息格式错误。"
+
+["err.server.qrcode.not_found"]
+other = "二维码无效或已过期。"
+
+["err.server.qrcode.user_not_found"]
+other = "用户不存在。"
+
+["err.server.qrcode.group_not_found"]
+other = "群不存在。"
+
+["err.server.qrcode.group_space_forbidden"]
+other = "该群仅允许本空间成员加入。"
+
+["err.server.qrcode.query_failed"]
+other = "查询二维码数据失败。"
+
+["err.server.qrcode.store_failed"]
+other = "更新二维码数据失败。"
+
+# ---- err.server.report.* (modules/report: api.go / api_manager.go) ----
+
+["err.server.report.request_invalid"]
+other = "举报请求无效。"
+
+["err.server.report.session_invalid"]
+other = "举报会话已过期或无效。"
+
+["err.server.report.query_failed"]
+other = "查询举报数据失败。"
+
+["err.server.report.store_failed"]
+other = "保存举报数据失败。"
+
 # ---- err.server.robot.* (modules/robot: api.go / api_manager.go / mention_pref.go) ----
 
 ["err.server.robot.request_invalid"]
@@ -818,3 +861,25 @@ other = "查询空间数据失败。"
 
 ["err.server.space.store_failed"]
 other = "更新空间数据失败。"
+
+# ---- err.server.search.* (modules/search: api.go) ----
+
+["err.server.search.request_invalid"]
+other = "搜索请求无效。"
+
+["err.server.search.message_query_failed"]
+other = "查询消息搜索数据失败。"
+
+["err.server.search.group_query_failed"]
+other = "查询群搜索数据失败。"
+
+["err.server.search.user_query_failed"]
+other = "查询用户搜索数据失败。"
+
+# ---- err.server.statistics.* (modules/statistics: api.go) ----
+
+["err.server.statistics.request_invalid"]
+other = "统计请求无效。"
+
+["err.server.statistics.query_failed"]
+other = "查询统计数据失败。"

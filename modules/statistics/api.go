@@ -1,13 +1,13 @@
 package statistics
 
 import (
-	"errors"
-
-	"github.com/Mininglamp-OSS/octo-server/modules/group"
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	"go.uber.org/zap"
 )
 
@@ -43,7 +43,7 @@ func (s *Statistics) Route(r *wkhttp.WKHttp) {
 func (s *Statistics) countNum(c *wkhttp.Context) {
 	err := c.CheckLoginRole()
 	if err != nil {
-		c.ResponseError(err)
+		httperr.ResponseErrorL(c, errcode.ErrSharedForbidden, nil, nil)
 		return
 	}
 	date := c.Query("date")
@@ -51,35 +51,35 @@ func (s *Statistics) countNum(c *wkhttp.Context) {
 	totalUserCount, err := s.userService.GetAllUserCount()
 	if err != nil {
 		s.Error("查询用户数量错误", zap.Error(err))
-		c.ResponseError(errors.New("查询用户数量错误"))
+		httperr.ResponseErrorL(c, errcode.ErrStatisticsQueryFailed, nil, nil)
 		return
 	}
 	// 查询某天注册量
 	registerCount, err := s.userService.GetRegisterWithDate(date)
 	if err != nil {
 		s.Error("查询某天用户注册量错误", zap.Error(err))
-		c.ResponseError(errors.New("查询某天用户注册量错误"))
+		httperr.ResponseErrorL(c, errcode.ErrStatisticsQueryFailed, nil, nil)
 		return
 	}
 	// 查询总群数
 	totalGroupCount, err := s.groupService.GetAllGroupCount()
 	if err != nil {
 		s.Error("查询总群数量错误", zap.Error(err))
-		c.ResponseError(errors.New("查询总群数量错误"))
+		httperr.ResponseErrorL(c, errcode.ErrStatisticsQueryFailed, nil, nil)
 		return
 	}
 	// 查询某天的新建群数量
 	groupCreatedCount, err := s.groupService.GetCreatedCountWithDate(date)
 	if err != nil {
 		s.Error("查询某天群新建数量错误", zap.Error(err))
-		c.ResponseError(errors.New("查询某天群新建数量错误"))
+		httperr.ResponseErrorL(c, errcode.ErrStatisticsQueryFailed, nil, nil)
 		return
 	}
 	// 查询总在线数量
 	onlineCount, err := s.userService.GetOnlineCount()
 	if err != nil {
 		s.Error("查询总在线用户数量错误", zap.Error(err))
-		c.ResponseError(errors.New("查询总在线用户数量错误"))
+		httperr.ResponseErrorL(c, errcode.ErrStatisticsQueryFailed, nil, nil)
 		return
 	}
 	// 查询机器人总数
@@ -103,18 +103,19 @@ func (s *Statistics) countNum(c *wkhttp.Context) {
 func (s *Statistics) registerUserListWithDateSpace(c *wkhttp.Context) {
 	err := c.CheckLoginRole()
 	if err != nil {
-		c.ResponseError(err)
+		httperr.ResponseErrorL(c, errcode.ErrSharedForbidden, nil, nil)
 		return
 	}
 	startDate := c.Param("start_date")
 	endDate := c.Param("end_date")
 	if startDate == "" || endDate == "" {
-		c.ResponseError(errors.New("查询日期不能为空"))
+		respondStatisticsRequestInvalid(c, "date")
 		return
 	}
 	list, err := s.userService.GetRegisterCountWithDateSpace(startDate, endDate)
 	if err != nil {
-		c.ResponseError(errors.New("查询注册用户数量错误"))
+		s.Error("查询注册用户数量错误", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrStatisticsQueryFailed, nil, nil)
 		return
 	}
 	c.Response(list)
@@ -124,18 +125,19 @@ func (s *Statistics) registerUserListWithDateSpace(c *wkhttp.Context) {
 func (s *Statistics) createGroupWithDateSpace(c *wkhttp.Context) {
 	err := c.CheckLoginRole()
 	if err != nil {
-		c.ResponseError(err)
+		httperr.ResponseErrorL(c, errcode.ErrSharedForbidden, nil, nil)
 		return
 	}
 	startDate := c.Param("start_date")
 	endDate := c.Param("end_date")
 	if startDate == "" || endDate == "" {
-		c.ResponseError(errors.New("查询日期不能为空"))
+		respondStatisticsRequestInvalid(c, "date")
 		return
 	}
 	list, err := s.groupService.GetGroupWithDateSpace(startDate, endDate)
 	if err != nil {
-		c.ResponseError(errors.New("查询注册用户数量错误"))
+		s.Error("查询建群数量错误", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrStatisticsQueryFailed, nil, nil)
 		return
 	}
 	c.Response(list)

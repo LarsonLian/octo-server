@@ -155,8 +155,8 @@ func (s *Service) threadVersionGen() func() (int64, error) {
 
 // CreateThread 创建子区
 func (s *Service) CreateThread(req *CreateThreadReq) (*ThreadResp, error) {
-	// 验证是群成员
-	isMember, err := s.groupService.ExistMember(req.GroupNo, req.CreatorUID)
+	// 验证是活跃群成员（排除黑名单，被拉黑用户不应能创建子区）
+	isMember, err := s.groupService.ExistMemberActive(req.GroupNo, req.CreatorUID)
 	if err != nil {
 		return nil, fmt.Errorf("check group membership: %w", err)
 	}
@@ -380,8 +380,18 @@ func (s *Service) UpdateName(groupNo, shortID, operatorUID, name string) error {
 		return errors.New("thread has been deleted")
 	}
 
+	// 子区操作权来自「父群活跃成员」身份：被拉黑/移出父群的用户即使是子区创建者也
+	// 无权改名。必须在授予 creator/admin 特权之前先校验。fail-closed。
+	isActive, err := s.groupService.ExistMemberActive(thread.GroupNo, operatorUID)
+	if err != nil {
+		return fmt.Errorf("check active membership: %w", err)
+	}
+	if !isActive {
+		return errors.New("no permission to update")
+	}
+
 	if thread.CreatorUID != operatorUID {
-		isManager, err := s.groupService.IsCreatorOrManager(groupNo, operatorUID)
+		isManager, err := s.groupService.IsCreatorOrManager(thread.GroupNo, operatorUID)
 		if err != nil {
 			return fmt.Errorf("check permission: %w", err)
 		}
@@ -678,13 +688,25 @@ func (s *Service) canOperate(groupNo, shortID, uid string) (bool, error) {
 		return false, nil
 	}
 
+	// 子区操作权来自「父群活跃成员」身份：被拉黑/移出父群的用户即使是子区创建者或
+	// 群管理员也无权操作。必须在授予 creator/admin 特权之前先校验，否则被拉黑的
+	// 创建者仍能 rename/archive/delete 自己建的子区 + edit/delete 它的 GROUP.md。
+	// fail-closed：parentGroupNo 取自 thread 记录，查询出错或非活跃成员一律拒。
+	isActive, err := s.groupService.ExistMemberActive(thread.GroupNo, uid)
+	if err != nil {
+		return false, fmt.Errorf("check active membership: %w", err)
+	}
+	if !isActive {
+		return false, nil
+	}
+
 	// 创建者可以操作
 	if thread.CreatorUID == uid {
 		return true, nil
 	}
 
 	// 群管理员可以操作
-	isManager, err := s.groupService.IsCreatorOrManager(groupNo, uid)
+	isManager, err := s.groupService.IsCreatorOrManager(thread.GroupNo, uid)
 	if err != nil {
 		return false, fmt.Errorf("check manager permission: %w", err)
 	}
@@ -841,8 +863,8 @@ func IsValidGroupNo(groupNo string) bool {
 
 // JoinThread 加入子区
 func (s *Service) JoinThread(groupNo, shortID, uid string) error {
-	// 验证是父群成员
-	isMember, err := s.groupService.ExistMember(groupNo, uid)
+	// 验证是活跃父群成员（排除黑名单，被拉黑用户不应能加入子区）
+	isMember, err := s.groupService.ExistMemberActive(groupNo, uid)
 	if err != nil {
 		return fmt.Errorf("check group membership: %w", err)
 	}
@@ -981,9 +1003,9 @@ func (s *Service) IsMember(groupNo, shortID, uid string) (bool, error) {
 }
 
 // UpdateSetting 更新用户对某子区的个人设置(目前支持 mute)
-// 权限: 必须是父群成员; 无需是子区成员(与群聊 setting 行为保持一致)
+// 权限: 必须是活跃父群成员(排除黑名单); 无需是子区成员(与群聊 setting 行为保持一致)
 func (s *Service) UpdateSetting(groupNo, shortID, uid string, settings map[string]interface{}) error {
-	isGroupMember, err := s.groupService.ExistMember(groupNo, uid)
+	isGroupMember, err := s.groupService.ExistMemberActive(groupNo, uid)
 	if err != nil {
 		return fmt.Errorf("check group membership: %w", err)
 	}

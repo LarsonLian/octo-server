@@ -390,7 +390,7 @@ func TestManager_AddMembers(t *testing.T) {
 	assert.Equal(t, 3, count) // owner + 2 new
 
 	t.Run("reactivate removed member", func(t *testing.T) {
-		err := testSpaceDB.removeMember("mgr-addmem", "new-u-1")
+		err := testSpaceDB.removeMemberLocked("mgr-addmem", "new-u-1", 2)
 		assert.NoError(t, err)
 
 		body2 := util.ToJson(map[string]interface{}{"uids": []string{"new-u-1"}})
@@ -492,8 +492,7 @@ func TestManager_UpdateMemberRole(t *testing.T) {
 	t.Run("reject demoting owner directly", func(t *testing.T) {
 		// 此前已通过子测试 "promote to admin" 把 m-target 提到 admin
 		// 先把 m-target 提成 owner 来构造"降级 owner"场景
-		err := testSpaceDB.updateMemberRole("mgr-role", "m-target", 2)
-		assert.NoError(t, err)
+		setMemberRoleRaw(t, "mgr-role", "m-target", 2)
 
 		body := util.ToJson(map[string]interface{}{"role": 0})
 		w := httptest.NewRecorder()
@@ -508,10 +507,8 @@ func TestManager_UpdateMemberRole(t *testing.T) {
 		assert.Equal(t, 2, mem.Role, "owner role must not be dropped")
 
 		// 恢复：把 owner 转回 u-owner 以免影响后续子测试
-		err = testSpaceDB.updateMemberRole("mgr-role", "m-target", 1)
-		assert.NoError(t, err)
-		err = testSpaceDB.updateMemberRole("mgr-role", "u-owner", 2)
-		assert.NoError(t, err)
+		setMemberRoleRaw(t, "mgr-role", "m-target", 1)
+		setMemberRoleRaw(t, "mgr-role", "u-owner", 2)
 	})
 
 	t.Run("transfer ownership demotes previous owner", func(t *testing.T) {
@@ -1704,4 +1701,40 @@ func TestManager_UpdateSpaceProfile_Validation(t *testing.T) {
 		s.GetRoute().ServeHTTP(w, req)
 		assert.NotEqual(t, http.StatusOK, w.Code)
 	})
+}
+
+// TestManager_UpdateMemberRoleIdempotent 目标已是该角色时幂等成功（PR #339 P2：
+// 与用户侧守卫对称），不触发空转的转让事务。
+func TestManager_UpdateMemberRoleIdempotent(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+	token := adminToken(t)
+
+	seedSpace(t, "mgr-role-idem", "role idem", "u-owner", SpaceStatusNormal)
+	err = testSpaceDB.insertMemberNoTx(&MemberModel{
+		SpaceId: "mgr-role-idem", UID: "m-target", Role: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	// 同角色更新：幂等 OK
+	body := util.ToJson(map[string]interface{}{"role": 1})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/manager/spaces/mgr-role-idem/members/m-target/role", bytes.NewReader([]byte(body)))
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	mem, err := testSpaceDB.queryMember("mgr-role-idem", "m-target")
+	assert.NoError(t, err)
+	assert.Equal(t, 1, mem.Role)
+
+	// 「转让给现任 owner」：幂等 OK，owner 角色不变
+	body = util.ToJson(map[string]interface{}{"role": 2})
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("PUT", "/v1/manager/spaces/mgr-role-idem/members/u-owner/role", bytes.NewReader([]byte(body)))
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	owner, err := testSpaceDB.queryMember("mgr-role-idem", "u-owner")
+	assert.NoError(t, err)
+	assert.Equal(t, 2, owner.Role)
 }

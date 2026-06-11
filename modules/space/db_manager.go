@@ -413,13 +413,20 @@ func (d *managerDB) removeMembersForce(spaceId string, uids []string) error {
 // ErrTransferTargetMissing 目标成员不存在或已被移除，不能成为新 owner
 var ErrTransferTargetMissing = errors.New("transfer target not found or already removed")
 
-// transferOwnerAdmin 将 newOwner 置为 owner(2)，将当前所有 owner 降为 admin(1)。
+// transferOwnerAdmin 管理端转让所有权，见 transferOwnerAdminLocked。
+func (d *managerDB) transferOwnerAdmin(spaceId, newOwnerUID string) error {
+	return transferOwnerAdminLocked(d.session, spaceId, newOwnerUID)
+}
+
+// transferOwnerAdminLocked 将 newOwner 置为 owner(2)，将当前所有 owner 降为 admin(1)。
+// 管理端与用户侧转让共用此原语（PR #339 review：用户侧内联事务缺行锁，
+// 目标被并发移除后 UPDATE 影响 0 行仍降级 owner，产生无主空间）。
 //
 // 事务开始时先用 SELECT ... FOR UPDATE 锁定目标行并确认其 status=1，
 // 避免「先降老 owner → 目标被并发 remove → 后续 UPDATE 影响 0 行」导致空间无主。
 // 若目标不存在 / 已被移除，整个事务回滚并返回 ErrTransferTargetMissing。
-func (d *managerDB) transferOwnerAdmin(spaceId, newOwnerUID string) error {
-	tx, err := d.session.Begin()
+func transferOwnerAdminLocked(sess *dbr.Session, spaceId, newOwnerUID string) error {
+	tx, err := sess.Begin()
 	if err != nil {
 		return err
 	}
@@ -447,6 +454,49 @@ func (d *managerDB) transferOwnerAdmin(spaceId, newOwnerUID string) error {
 	if _, err = tx.Update("space_member").
 		Set("role", 2).Set("updated_at", now).
 		Where("space_id=? AND uid=? AND status=1", spaceId, newOwnerUID).Exec(); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ErrRemoveHierarchy 操作者未严格高于目标角色，不能移除目标成员
+var ErrRemoveHierarchy = errors.New("operator does not outrank removal target")
+
+// removeMemberLocked 在单事务内锁定目标行并重读角色后移除成员。
+//
+// 目标 role 必须在锁内重读：pre-check 读到非 owner 后，目标可能被并发转让
+// 升为 owner，裸 UPDATE 仍会把它移除，产生无主空间——与 transferOwnerAdminLocked
+// 防御的是同源的对称竞态（PR #339 review）。
+//   - 目标行不存在 / 已移除 → 幂等返回 nil（pre-check 与事务之间被并发移除）；
+//   - 目标 role == 2 → ErrCannotRemoveOwner；
+//   - 目标 role >= rejectRoleAtOrAbove → ErrRemoveHierarchy
+//     （removeMembers 传操作者角色，实现「仅可移除更低角色」；自助退出传 2，仅拦 owner）。
+func removeMemberLocked(sess *dbr.Session, spaceId, uid string, rejectRoleAtOrAbove int) error {
+	tx, err := sess.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	var roles []int
+	if _, err = tx.SelectBySql(
+		"SELECT role FROM space_member WHERE space_id=? AND uid=? AND status=1 FOR UPDATE",
+		spaceId, uid,
+	).Load(&roles); err != nil {
+		return err
+	}
+	if len(roles) == 0 {
+		return nil
+	}
+	if roles[0] == 2 {
+		return ErrCannotRemoveOwner
+	}
+	if roles[0] >= rejectRoleAtOrAbove {
+		return ErrRemoveHierarchy
+	}
+	if _, err = tx.Update("space_member").
+		Set("status", 0).Set("updated_at", time.Now()).
+		Where("space_id=? AND uid=?", spaceId, uid).Exec(); err != nil {
 		return err
 	}
 	return tx.Commit()

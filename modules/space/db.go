@@ -161,11 +161,10 @@ func (d *DB) queryMembers(spaceId string, loginUID string, page uint64, limit ui
 	return models, err
 }
 
-func (d *DB) removeMember(spaceId string, uid string) error {
-	_, err := d.session.Update("space_member").Set("status", 0).
-		Set("updated_at", time.Now()).
-		Where("space_id=? and uid=?", spaceId, uid).Exec()
-	return err
+// removeMemberLocked 锁内重读角色后移除成员，防并发转让产生无主空间，
+// 见 db_manager.go removeMemberLocked。
+func (d *DB) removeMemberLocked(spaceId, uid string, rejectRoleAtOrAbove int) error {
+	return removeMemberLocked(d.session, spaceId, uid, rejectRoleAtOrAbove)
 }
 
 func (d *DB) reactivateMember(spaceId string, uid string, role int) error {
@@ -176,18 +175,24 @@ func (d *DB) reactivateMember(spaceId string, uid string, role int) error {
 	return err
 }
 
+// updateMemberRole 更新成员角色，仅用于非 owner 角色（0/1）的变更。
+//
+// WHERE 带 role <> 2 守卫（PR #339 review F1）：调用方的 pre-check 都在事务外，
+// 目标可能在 check 后被并发转让升为 owner，裸 UPDATE 会把新 owner 降级产生
+// 无主空间。命中守卫时影响 0 行、静默幂等——显式的 owner 降级已被各调用方
+// pre-check 拒绝，竞态命中时保持 owner 角色就是正确结果。
+// 设 role=2 必须走 transferOwnerAdminLocked，禁止经本函数产生第二个 owner。
 func (d *DB) updateMemberRole(spaceId string, uid string, role int) error {
 	_, err := d.session.Update("space_member").Set("role", role).
 		Set("updated_at", time.Now()).
-		Where("space_id=? and uid=? and status=1", spaceId, uid).Exec()
+		Where("space_id=? and uid=? and status=1 and role <> 2", spaceId, uid).Exec()
 	return err
 }
 
-func (d *DB) updateMemberRoleTx(tx *dbr.Tx, spaceId string, uid string, role int) error {
-	_, err := tx.Update("space_member").Set("role", role).
-		Set("updated_at", time.Now()).
-		Where("space_id=? and uid=? and status=1", spaceId, uid).Exec()
-	return err
+// transferOwnerAdmin 用户侧转让所有权，复用管理端的行锁原语，
+// 防止目标被并发移除后仍把当前 owner 降级产生无主空间。
+func (d *DB) transferOwnerAdmin(spaceId, newOwnerUID string) error {
+	return transferOwnerAdminLocked(d.session, spaceId, newOwnerUID)
 }
 
 // queryCoMemberUIDs 查询与指定用户同在至少一个空间的所有用户UID

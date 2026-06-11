@@ -753,21 +753,14 @@ func (s *Space) removeMembers(c *wkhttp.Context) {
 	}
 
 	for _, uid := range req.UIDs {
-		target, err := s.db.queryMember(spaceId, uid)
-		if err != nil {
-			httperr.ResponseErrorL(c, errcode.ErrSpaceQueryFailed, nil, nil)
-			return
-		}
-		if target == nil {
-			continue
-		}
-		if target.Role == 2 {
-			continue // 不能移除owner
-		}
-		if member.Role <= target.Role {
-			continue // 不能移除同级或更高角色
-		}
-		if err = s.db.removeMember(spaceId, uid); err != nil {
+		// 角色校验在锁内完成（removeMemberLocked 事务内重读 role）：
+		// owner 与同级及更高角色静默跳过，与既有语义一致；锁内重读
+		// 防止 pre-check 后目标被并发转让升为 owner 仍被移除（PR #339 review）。
+		if err = s.db.removeMemberLocked(spaceId, uid, member.Role); err != nil {
+			if errors.Is(err, ErrCannotRemoveOwner) || errors.Is(err, ErrRemoveHierarchy) {
+				continue
+			}
+			s.Error("移除空间成员失败", zap.Error(err), zap.String("spaceId", spaceId), zap.String("uid", uid))
 			httperr.ResponseErrorL(c, errcode.ErrSpaceStoreFailed, nil, nil)
 			return
 		}
@@ -802,8 +795,14 @@ func (s *Space) leaveSpace(c *wkhttp.Context) {
 		return
 	}
 
-	err = s.db.removeMember(spaceId, loginUID)
+	// 锁内重读角色：pre-check 与移除之间可能被并发转让升为 owner（PR #339 review）
+	err = s.db.removeMemberLocked(spaceId, loginUID, 2)
 	if err != nil {
+		if errors.Is(err, ErrCannotRemoveOwner) {
+			httperr.ResponseErrorL(c, errcode.ErrSpaceOwnerConstraint, nil, nil)
+			return
+		}
+		s.Error("退出空间失败", zap.Error(err), zap.String("spaceId", spaceId), zap.String("uid", loginUID))
 		httperr.ResponseErrorL(c, errcode.ErrSpaceStoreFailed, nil, nil)
 		return
 	}
@@ -855,32 +854,39 @@ func (s *Space) updateMemberRole(c *wkhttp.Context) {
 		return
 	}
 
-	// 如果要转让owner，使用事务保证原子性
-	if req.Role == 2 {
-		tx, txErr := s.ctx.DB().Begin()
-		if txErr != nil {
-			httperr.ResponseErrorL(c, errcode.ErrSpaceStoreFailed, nil, nil)
-			return
-		}
-		defer tx.RollbackUnlessCommitted()
+	// 防无主空间：owner 不能被直接降级（本接口仅 owner 可调，即禁止自降级）。
+	// 转让所有权必须通过把其他成员设为 role=2 触发下方的原子对调，
+	// 与管理端 updateMemberRole 的约束一致（见 api_manager.go）。
+	if target.Role == 2 && req.Role != 2 {
+		httperr.ResponseErrorL(c, errcode.ErrSpaceOwnerConstraint, nil, nil)
+		return
+	}
+	// 幂等：目标已是该角色时直接成功。该分支同时挡住「转让给自己」——
+	// 否则下方事务会把唯一 owner 先升后降（同一行），产生无主空间。
+	if target.Role == req.Role {
+		c.ResponseOK()
+		return
+	}
 
-		// 先提升目标为owner
-		if err = s.db.updateMemberRoleTx(tx, spaceId, targetUID, 2); err != nil {
-			httperr.ResponseErrorL(c, errcode.ErrSpaceStoreFailed, nil, nil)
-			return
-		}
-		// 再把当前owner降为admin
-		if err = s.db.updateMemberRoleTx(tx, spaceId, loginUID, 1); err != nil {
-			httperr.ResponseErrorL(c, errcode.ErrSpaceStoreFailed, nil, nil)
-			return
-		}
-		if err = tx.Commit(); err != nil {
+	// 转让 owner：复用带 SELECT ... FOR UPDATE 行锁的原语（与管理端一致）。
+	// 不在 handler 层内联事务——目标行不加锁的话，pre-check 通过后目标被并发
+	// 移除，提升 UPDATE 影响 0 行而降级仍执行，会产生无主空间（PR #339 review）。
+	if req.Role == 2 {
+		if err = s.db.transferOwnerAdmin(spaceId, targetUID); err != nil {
+			if errors.Is(err, ErrTransferTargetMissing) {
+				httperr.ResponseErrorL(c, errcode.ErrSpaceMemberNotFound, nil, nil)
+				return
+			}
+			s.Error("转让空间所有权失败", zap.Error(err), zap.String("spaceId", spaceId), zap.String("targetUID", targetUID))
 			httperr.ResponseErrorL(c, errcode.ErrSpaceStoreFailed, nil, nil)
 			return
 		}
 	} else {
+		// 残余竞态（pre-check 后目标被并发转让升为 owner）由 updateMemberRole
+		// 的 role<>2 SQL 守卫兜底（PR #339 review F1）
 		err = s.db.updateMemberRole(spaceId, targetUID, req.Role)
 		if err != nil {
+			s.Error("修改成员角色失败", zap.Error(err), zap.String("spaceId", spaceId), zap.String("targetUID", targetUID), zap.Int("role", req.Role))
 			httperr.ResponseErrorL(c, errcode.ErrSpaceStoreFailed, nil, nil)
 			return
 		}

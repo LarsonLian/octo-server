@@ -442,6 +442,29 @@ func (m *Message) sendMsg(c *wkhttp.Context) {
 			return
 		}
 	}
+	if req.ReceiveChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+		// YUJ-4185 P1-3：代发到子区(CommunityTopic)必须校验 sender 仍是父群成员
+		// （fail-closed）。子区无独立成员表，权威成员身份在父群，参考 authorizeMutualDelete
+		// 的子区分支。原本缺这条分支 → 被移除者仍可经 /v1/message/send 往子区代发消息。
+		// CR 整改：用 ExistMemberActive（status=Normal 白名单）而非 ExistMember，
+		// 否则被拉黑（status=Blacklist、is_deleted=0）用户仍能过门往子区代发。
+		parentGroupNo, _, perr := thread.ParseChannelID(req.ReceiveChannelID)
+		if perr != nil || parentGroupNo == "" {
+			m.Error("解析子区频道ID失败", zap.Error(perr), zap.String("channelID", req.ReceiveChannelID))
+			httperr.ResponseErrorL(c, errcode.ErrMessageNotGroupMember, nil, nil)
+			return
+		}
+		isExist, err := m.groupService.ExistMemberActive(parentGroupNo, uid)
+		if err != nil {
+			m.Error("查询发送者是否在父群内错误", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+			return
+		}
+		if !isExist {
+			httperr.ResponseErrorL(c, errcode.ErrMessageNotGroupMember, nil, nil)
+			return
+		}
+	}
 	// YUJ-644 / Mininglamp-OSS#33: 把 SpaceMiddleware 已校验的发送方 SpaceID 透传给
 	// sendMessage，作为 PERSONAL DM 的权威 space_id 注入源（不信客户端 body）。
 	senderSpaceID := spacepkg.GetSpaceID(c)
@@ -1159,6 +1182,39 @@ func (m *Message) syncChannelMessage(c *wkhttp.Context) {
 		exist, err := m.groupService.ExistMember(req.ChannelID, c.GetLoginUID())
 		if err != nil {
 			m.Error("查询是否在群内存在失败！", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+			return
+		}
+		if !exist {
+			c.JSON(http.StatusOK, &syncChannelMessageResp{
+				StartMessageSeq: req.EndMessageSeq,
+				EndMessageSeq:   req.EndMessageSeq,
+				PullMode:        req.PullMode,
+				Messages:        make([]*MsgSyncResp, 0),
+			})
+			return
+		}
+	}
+	// YUJ-4185 P1-4：子区(CommunityTopic)历史读取必须校验调用者仍是父群成员
+	// （fail-closed）。原本只有 GROUP 分支做 ExistMember，子区无校验 →
+	// 被移除者仍可经 /v1/message/channel/sync 拉子区历史（越权读）。
+	// CR 整改：用 ExistMemberActive（status=Normal 白名单）而非 ExistMember，
+	// 否则被拉黑（status=Blacklist、is_deleted=0）用户仍能过门拉子区历史正文。
+	if req.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+		parentGroupNo, _, perr := thread.ParseChannelID(req.ChannelID)
+		if perr != nil || parentGroupNo == "" {
+			m.Error("解析子区频道ID失败", zap.Error(perr), zap.String("channelID", req.ChannelID))
+			c.JSON(http.StatusOK, &syncChannelMessageResp{
+				StartMessageSeq: req.EndMessageSeq,
+				EndMessageSeq:   req.EndMessageSeq,
+				PullMode:        req.PullMode,
+				Messages:        make([]*MsgSyncResp, 0),
+			})
+			return
+		}
+		exist, err := m.groupService.ExistMemberActive(parentGroupNo, c.GetLoginUID())
+		if err != nil {
+			m.Error("查询是否在父群内存在失败！", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}

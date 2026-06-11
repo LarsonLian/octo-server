@@ -131,15 +131,14 @@ func init() {
 						return nil, err
 					}
 
-					// 返回父群成员（允许所有父群成员查看和发送消息）
-					members, err := groupService.GetMembers(groupNo)
+					// 返回父群可订阅成员（允许查看和发送消息）。必须排除被拉黑
+					// （status=blacklist）成员：WuKongIM 缓存这份列表做 WS push，
+					// 若包含黑名单用户，重载订阅时会把他加回，导致拉黑不自愈
+					// （YUJ-4185 P0-2 根因）。Blacklist 回调仍单独继承父群黑名单
+					// 做纵深防御（挡发送），两者互补。
+					uids, err := groupService.GetSubscribableMemberUIDs(groupNo)
 					if err != nil {
 						return nil, err
-					}
-
-					uids := make([]string, 0, len(members))
-					for _, m := range members {
-						uids = append(uids, m.UID)
 					}
 					return uids, nil
 				},

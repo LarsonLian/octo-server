@@ -65,15 +65,14 @@ func init() {
 				},
 				Subscribers: func(channelID string, channelType uint8) ([]string, error) {
 
-					mebmers, err := api.groupService.GetMembers(channelID)
+					// 父群权威订阅源排除被拉黑成员（status=blacklist）：WuKongIM 缓存
+					// 这份列表做 WS push，若含黑名单用户，重载订阅会把他加回 → 拉黑后
+					// 仍能收父群实时消息（YUJ-4185 P0-2 根因收口，使 blacklist handler 的
+					// 父群 IMRemoveSubscriber 持久生效）。Blacklist 回调仍单独返回黑名单
+					// 挡发送，两者互补。
+					subscribers, err := api.groupService.GetSubscribableMemberUIDs(channelID)
 					if err != nil {
 						return nil, err
-					}
-					subscribers := make([]string, 0)
-					if len(mebmers) > 0 {
-						for _, member := range mebmers {
-							subscribers = append(subscribers, member.UID)
-						}
 					}
 					return subscribers, nil
 				},

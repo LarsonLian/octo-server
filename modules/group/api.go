@@ -3154,6 +3154,20 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 			return
 		}
+		// YUJ-4185 P0-1：拉黑 add 分支必须主动摘除每个被拉黑 uid 的子区 + 父群 IM 订阅。
+		// 仅靠 setGroupBlacklist(IMBlacklistAdd) 只挡“发送”，不断“接收”——被拉黑者仍
+		// 通过 WuKongIM WS 收子区/父群实时消息（越权读 P0）。子区订阅复用 #27/#332 统一
+		// helper；父群订阅显式 IMRemoveSubscriber。best-effort：失败只记日志、不回滚拉黑。
+		for _, uid := range req.Uids {
+			g.removeUserFromGroupThreads(groupNo, uid, group.SpaceID)
+		}
+		if rmErr := g.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
+			ChannelID:   groupNo,
+			ChannelType: common.ChannelTypeGroup.Uint8(),
+			Subscribers: req.Uids,
+		}); rmErr != nil {
+			g.Error("拉黑摘除父群IM订阅失败", zap.Error(rmErr), zap.String("groupNo", groupNo))
+		}
 	} else {
 		members, err := g.db.QueryMembersWithUids(req.Uids, groupNo)
 		if err != nil {
@@ -3178,6 +3192,18 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 				httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 				return
 			}
+			// YUJ-4185 P0-1：解除拉黑必须对称恢复订阅（add 分支摘掉了父群+子区订阅）。
+			// updateMembersStatus 已把 status 改回 Normal，此处把这些成员重新挂回父群和
+			// 群内所有非删除子区的 IM 订阅，参考入群 addUsersToGroupThreads。
+			// best-effort：失败只记日志，不回滚解除黑名单。
+			if addErr := g.ctx.IMAddSubscriber(&config.SubscriberAddReq{
+				ChannelID:   groupNo,
+				ChannelType: common.ChannelTypeGroup.Uint8(),
+				Subscribers: removeUIDs,
+			}); addErr != nil {
+				g.Error("解除拉黑恢复父群IM订阅失败", zap.Error(addErr), zap.String("groupNo", groupNo))
+			}
+			g.addUsersToGroupThreads(groupNo, removeUIDs)
 		}
 	}
 	if group.GroupType == int(GroupTypeCommon) {

@@ -193,6 +193,20 @@ func (d *DB) existMembers(groupNos []string, uid string) ([]string, error) {
 	return results, err
 }
 
+// existMembersActive 是 existMembers 的白名单（fail closed）批量变体：在 is_deleted=0
+// 之外额外要求 status=GroupMemberStatusNormal，即把被拉黑（status=Blacklist）以及未来
+// 可能新增的非正常状态成员从结果里排除。
+// 与单群的 ExistMemberActive 语义一致，专供「子区(CommunityTopic)读/发门禁」这类绕过
+// IM datasource、直查本地分表的批量校验使用，避免被拉黑用户仍出现在“仍是成员”的集合里
+// 进而越权读子区历史/会话（YUJ-4185 CR 整改）。
+func (d *DB) existMembersActive(groupNos []string, uid string) ([]string, error) {
+	var results []string
+	_, err := d.session.Select("group_no").From("group_member").
+		Where("group_no in ? and uid=? and is_deleted=0 and status=?",
+			groupNos, uid, common.GroupMemberStatusNormal).Load(&results)
+	return results, err
+}
+
 // ExistMemberDelete 存在已删除的群成员数据
 func (d *DB) ExistMemberDelete(uid string, groupNo string) (bool, error) {
 	var count int64
@@ -419,6 +433,24 @@ func (d *DB) queryMemberWithGroupNoAndUID(groupNo, uid string) (*MemberDetailMod
 func (d *DB) queryBlacklistMemberUIDsWithGroupNo(groupNo string) ([]string, error) {
 	var uids []string
 	_, err := d.session.Select("group_member.uid").From("group_member").Where("group_member.group_no=? and group_member.is_deleted=0 and status=?", groupNo, common.GroupMemberStatusBlacklist).Load(&uids)
+	return uids, err
+}
+
+// querySubscribableMemberUIDsWithGroupNo 返回某群「可订阅」成员 uid 集合：
+// is_deleted=0 AND status=GroupMemberStatusNormal，即排除被拉黑（status=blacklist）的成员。
+// 子区(channel_type=CommunityTopic) 实时下发的权威订阅源就读这份列表（thread/1module.go
+// Subscribers 回调），WuKongIM 缓存它做 WebSocket push。被拉黑成员若仍出现在这里，即使
+// 上层主动 IMRemoveSubscriber，下一次 WuKongIM 重载 Subscribers 仍会把他加回去 → 拉黑
+// 不自愈（YUJ-4185 P0-2 根因）。
+//
+// 与 queryMembersWithGroupNo（GetMembers，多处复用、语义是“所有非删除成员”）分开，
+// 不改动既有调用方语义；只有需要“能收实时推送的成员”的订阅数据源走这里。
+func (d *DB) querySubscribableMemberUIDsWithGroupNo(groupNo string) ([]string, error) {
+	var uids []string
+	_, err := d.session.Select("group_member.uid").
+		From("group_member").
+		Where("group_member.group_no=? and group_member.is_deleted=0 and status=?", groupNo, common.GroupMemberStatusNormal).
+		Load(&uids)
 	return uids, err
 }
 

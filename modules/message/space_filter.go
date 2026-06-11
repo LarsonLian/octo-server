@@ -90,7 +90,88 @@ func FilterConversationsBySpace(
 	// Bot DM 过滤
 	botSet, botInSpace, skipBotFilter := resolveBotFilter(ctx, filterSpaceID, bareDMUIDs)
 
+	// YUJ-4185 P0-3：子区过滤纳入父群成员校验。space_filter 之前只按父群 space_id
+	// 决定子区可见性，不校验调用者仍是父群成员 → 被移除者会话列表仍见子区并拉历史
+	// （越权读 P0）。在 Space 过滤前先剔除“父群已非成员”的子区会话（fail-closed）。
+	conversations = filterThreadConvsByParentMembership(
+		conversations,
+		func(c *SyncUserConversationResp) string { return c.ChannelID },
+		func(c *SyncUserConversationResp) uint8 { return c.ChannelType },
+		loginUID, groupService,
+	)
+
 	return filterConversationsCore(conversations, filterSpaceID, defaultSpaceID, groupSpaceMap, externalGroupMap, botSet, botInSpace, skipGroupFilter, skipBotFilter)
+}
+
+// filterThreadConvsByParentMembership 剔除“调用者已不是父群成员”的子区(CommunityTopic)
+// 会话，非子区会话原样保留。YUJ-4185 P0-3：子区无独立成员表，权威成员身份在父群；
+// 被踢/退群/拉黑后子区会话仍可能残留在 IM 返回里，必须按父群成员校验。
+//
+// fail-closed：父群成员查询失败时 drop 全部子区会话（宁可让用户多刷一次，也不放行
+// 可能越权的子区）。channelID 解析失败的子区同样 drop。泛型适配 v1
+// (*message.SyncUserConversationResp) 与 v2 (*config.SyncUserConversationResp) 两种载荷。
+func filterThreadConvsByParentMembership[T any](
+	conversations []T,
+	channelID func(T) string,
+	channelType func(T) uint8,
+	loginUID string,
+	groupService group.IService,
+) []T {
+	if len(conversations) == 0 {
+		return conversations
+	}
+	// 收集所有子区会话的父群 groupNo（去重）。
+	parentSeen := make(map[string]struct{})
+	parentNos := make([]string, 0)
+	hasThread := false
+	for _, conv := range conversations {
+		if channelType(conv) != common.ChannelTypeCommunityTopic.Uint8() {
+			continue
+		}
+		hasThread = true
+		parentNo, _, err := thread.ParseChannelID(channelID(conv))
+		if err != nil || parentNo == "" {
+			continue
+		}
+		if _, ok := parentSeen[parentNo]; ok {
+			continue
+		}
+		parentSeen[parentNo] = struct{}{}
+		parentNos = append(parentNos, parentNo)
+	}
+	if !hasThread {
+		return conversations
+	}
+	memberParents := make(map[string]struct{})
+	if len(parentNos) > 0 {
+		// CR 整改：用 ExistMembersActive（排除黑名单）而非 ExistMembers，否则被拉黑
+		// (status=Blacklist、is_deleted=0) 用户的子区会话仍会透出。
+		memberNos, err := groupService.ExistMembersActive(parentNos, loginUID)
+		if err != nil {
+			// fail-closed：无法确认成员身份时丢弃全部子区会话。
+			log.Warn("子区父群成员校验失败，按 fail-closed 丢弃子区会话", zap.Error(err))
+		} else {
+			for _, no := range memberNos {
+				memberParents[no] = struct{}{}
+			}
+		}
+	}
+	filtered := make([]T, 0, len(conversations))
+	for _, conv := range conversations {
+		if channelType(conv) != common.ChannelTypeCommunityTopic.Uint8() {
+			filtered = append(filtered, conv)
+			continue
+		}
+		parentNo, _, err := thread.ParseChannelID(channelID(conv))
+		if err != nil || parentNo == "" {
+			continue
+		}
+		if _, member := memberParents[parentNo]; !member {
+			continue
+		}
+		filtered = append(filtered, conv)
+	}
+	return filtered
 }
 
 // filterConversationsCore 是纯过滤逻辑，不依赖 DB/ctx，便于单元测试。
@@ -529,6 +610,18 @@ func FilterRawConversationsBySpace(
 	ctx *config.Context,
 	groupService group.IService,
 ) []*config.SyncUserConversationResp {
+	if len(conversations) == 0 {
+		return conversations
+	}
+
+	// YUJ-4185 P0-3：先按父群成员身份剔除越权子区会话（fail-closed），再做 Space 过滤。
+	// 与 v1 FilterConversationsBySpace 同口径，保证 sidebar 不暴露被移除者的子区。
+	conversations = filterThreadConvsByParentMembership(
+		conversations,
+		func(c *config.SyncUserConversationResp) string { return c.ChannelID },
+		func(c *config.SyncUserConversationResp) uint8 { return c.ChannelType },
+		loginUID, groupService,
+	)
 	if len(conversations) == 0 {
 		return conversations
 	}

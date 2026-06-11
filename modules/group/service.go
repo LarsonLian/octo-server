@@ -66,6 +66,10 @@ type IService interface {
 	GetMember(groupNo, uid string) (*MemberResp, error)
 	// 获取黑名单成员uid集合
 	GetBlacklistMemberUIDs(groupNo string) ([]string, error)
+	// GetSubscribableMemberUIDs 返回可订阅成员 uid 集合（status=normal AND is_deleted=0，
+	// 即排除被拉黑成员），供子区/父群的 IM Subscribers 数据源使用。与 GetMembers
+	// （“所有非删除成员”）语义不同，不可互换。
+	GetSubscribableMemberUIDs(groupNo string) ([]string, error)
 	// 查询管理员成员uid列表（包括创建者）
 	GetMemberUIDsOfManager(groupNo string) ([]string, error)
 	// 是否是创建者或管理者
@@ -76,8 +80,14 @@ type IService interface {
 	GetMemberTotalAndOnlineCount(groupNo string) (int, int, error)
 	// 是否存在群成员
 	ExistMember(groupNo string, uid string) (bool, error)
+	// ExistMemberActive 是否存在「活跃」群成员（is_deleted=0 AND status=Normal），
+	// 排除被拉黑成员，供绕过 IM 直查本地分表的读/发门禁使用
+	ExistMemberActive(groupNo string, uid string) (bool, error)
 	// 成员是否在某群里存在 返回对应在群里的群编号
 	ExistMembers(groupNos []string, uid string) ([]string, error)
+	// ExistMembersActive 批量版 ExistMemberActive：返回 uid 处于「活跃」状态
+	// （is_deleted=0 AND status=Normal）的群编号集合，排除被拉黑成员
+	ExistMembersActive(groupNos []string, uid string) ([]string, error)
 	// GetGroupsWithMemberUID 获取某个用户的所有群
 	GetGroupsWithMemberUID(uid string) ([]*InfoResp, error)
 	// 获取指定群的群成员的最大数据版本
@@ -518,6 +528,17 @@ func (s *Service) GetBlacklistMemberUIDs(groupNo string) ([]string, error) {
 	return uids, nil
 }
 
+// GetSubscribableMemberUIDs 返回可订阅成员 uid（status=normal AND is_deleted=0）。
+// 子区/父群 IM Subscribers 数据源专用：排除被拉黑成员，避免 WuKongIM 重载订阅时
+// 把黑名单用户加回订阅列表（YUJ-4185 P0-2）。
+func (s *Service) GetSubscribableMemberUIDs(groupNo string) ([]string, error) {
+	uids, err := s.db.querySubscribableMemberUIDsWithGroupNo(groupNo)
+	if err != nil {
+		return nil, err
+	}
+	return uids, nil
+}
+
 func (s *Service) GetMemberUIDsOfManager(groupNo string) ([]string, error) {
 	return s.db.QueryGroupManagerOrCreatorUIDS(groupNo)
 }
@@ -544,8 +565,22 @@ func (s *Service) ExistMember(groupNo string, uid string) (bool, error) {
 	return s.db.ExistMember(uid, groupNo)
 }
 
+// ExistMemberActive 是 ExistMember 的白名单（fail closed）变体：除 is_deleted=0 外还
+// 要求 status=GroupMemberStatusNormal，明确排除被拉黑及未来新增的非正常状态成员。
+// 子区(CommunityTopic)读/发门禁用它替代 ExistMember，避免被拉黑用户越权读/发（YUJ-4185 CR 整改）。
+func (s *Service) ExistMemberActive(groupNo string, uid string) (bool, error) {
+	return s.db.ExistMemberActive(uid, groupNo)
+}
+
 func (s *Service) ExistMembers(groupNos []string, uid string) ([]string, error) {
 	return s.db.existMembers(groupNos, uid)
+}
+
+// ExistMembersActive 是 ExistMembers 的白名单（fail closed）批量变体：在 is_deleted=0
+// 之外额外要求 status=GroupMemberStatusNormal，把被拉黑成员从“仍是成员”的集合里排除。
+// 子区(CommunityTopic)批量读门禁用它替代 ExistMembers（YUJ-4185 CR 整改）。
+func (s *Service) ExistMembersActive(groupNos []string, uid string) ([]string, error) {
+	return s.db.existMembersActive(groupNos, uid)
 }
 
 func (s *Service) GetSettings(groupNos []string, uid string) ([]*SettingResp, error) {

@@ -1,7 +1,47 @@
 # Incoming Webhook 推送契约
 
-外部服务通过带 token 的 URL 向指定群推送消息。管理端点（创建/列出/更新/删除/重置）
-由群主或管理员调用，详见 `api.go`。本文聚焦**推送端点**的请求契约。
+外部服务通过带 token 的 URL 向指定群推送消息。本文先给出**管理端点的权限模型**
+（#member-perms），随后聚焦**推送端点**的请求契约；管理端点实现详见 `api.go`。
+
+## 管理端点权限模型
+
+管理端点有两个挂载面，处理器与权限矩阵完全一致（一套 Service、两个门）：
+
+```
+/v1/groups/:group_no/incoming-webhooks[...]       # 用户登录态（AuthMiddleware）
+/v1/bot/groups/:group_no/incoming-webhooks[...]   # bot token（authBot，robot_id 即操作者）
+```
+
+| 操作 | 群主/管理员（含管理员 bot） | 普通成员 / 成员 bot（内部、正常状态） |
+|------|------|------|
+| create | ✅（可自定义名称+头像） | ✅ 名称可自定义但强制带 `Webhook-` 前缀（缺省自动命名 `Webhook-xxxxxx`）；头像不可设置（400） |
+| update | ✅ 任意 webhook | ✅ 仅自己创建的；可改名称（强制 `Webhook-` 前缀）/状态，头像不可改（400） |
+| delete / regenerate / test | ✅ 任意 webhook | ✅ 仅自己创建的（其余 403） |
+| list | ✅ | ✅ 只读全量可见（不回显 token/推送 URL） |
+| deliveries | ✅ 任意 webhook | ✅ 仅自己创建的（其余 403） |
+
+- 管理员判定走 `group_member.role`（`QueryIsGroupManagerOrCreator`），对人和 bot
+  一视同仁——**bot 被设为群管理员即与人类管理员同权**。外部成员（is_external=1）
+  与非正常状态成员一律 403。能力来自 `group_member` 行，不来自 token 类型或
+  scope——App Bot（`app_` token）能过 authBot 鉴权，但当前无法入群（不在
+  space_member，space 群加成员校验会拒绝），因此本管理面实际仅 **User Bot**
+  （`bf_`）可用，App Bot 恒 403；若未来放开 App Bot 入群，权限矩阵自动成立。
+- 隐私提示：list 响应包含每个 webhook 的 `creator_uid`（供客户端判断"是否我创建的"
+  并展示归属），即任意群成员可见全群 webhook 的创建者身份——群成员名册本就互相可见，
+  属有意设计；token / 推送 URL 绝不出现在 list 中。对隐私敏感的部署请知悉此暴露面。
+- 配额双层：群级 `max_per_group`（默认 10）对所有人生效；普通成员/bot 另受
+  per-creator 配额（system_setting `incomingwebhook.max_per_creator`，默认 5，env
+  `DM_INCOMINGWEBHOOK_MAX_PER_CREATOR`）约束，管理员豁免。超限 409。
+- **创建者退群即失效**：push 路径校验创建者仍是群内（内部、正常）成员，不满足则
+  统一 401 并把该 webhook 懒级联禁用（status→0）；启用/regenerate/测试推送对
+  创建者已退群的 webhook 返回 409（`mgmt_creator_left`），只能删除重建。创建者
+  重新入群后可由创建者/管理员重新启用。
+- 撤回不对称（已知契约）：webhook 消息的 FromUID 是 `iwh_*`，仅群主/管理员可撤回
+  （见 api.go 顶部注释）；普通成员创建者撤不了自己 webhook 发出的消息，止血手段是
+  立即禁用该 webhook。
+- 头像：成员/bot 创建的 webhook 无自定义头像，头像端点（`/v1/users/iwh_*/avatar`）
+  按 `crc32(webhook_id)` 确定性回退到 bot 默认头像 13 色 palette（与 bot 视觉口径
+  一致）；管理员可为任意 webhook 设置自定义头像 URL（302 重定向）。
 
 ```
 POST /v1/incoming-webhooks/:webhook_id/:token            # native（本文主体）
@@ -39,7 +79,11 @@ Content-Type: application/json
 - `content`：必填，非空；语义长度上限 4000 rune（`DM_INCOMINGWEBHOOK_MAX_CONTENT_RUNES`）。
 - `text`：`content` 的别名（Slack 等平台习惯用 `text`）。`content` 为空时回退到 `text`，
   降低从既有集成迁移的改造成本；两者都填以 `content` 为准。
-- `username` / `avatar_url`：可选，覆盖该条消息的展示发送者名/头像（不改 webhook 本身配置）。
+- `username` / `avatar_url`：可选，覆盖该条消息的展示发送者名/头像（不改 webhook 本身
+  配置）。**仅当 webhook 创建者当前是群主/管理员时生效**；成员/bot 创建的 webhook 这
+  两个字段被静默忽略（推送仍成功），展示固定为存量名称（必带 `Webhook-` 前缀）+ 默认
+  头像——否则管理面的防冒充限制会被 push 路径整体绕过。判权结果随创建者现任角色，
+  变更生效延迟 ≤ 一个缓存 TTL（默认 3s）。
 
 ### 2. 富文本 / 图文混排（`msg_type` = `"richtext"`）
 

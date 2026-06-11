@@ -6,14 +6,20 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/db"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/gocraft/dbr/v2"
 )
 
-// ErrQuotaExceeded 创建时配额已满，由 insertWithQuota 在事务内原子判定。
+// ErrQuotaExceeded 创建时群级配额已满，由 insertWithQuota 在事务内原子判定。
 var ErrQuotaExceeded = errors.New("incomingwebhook: per-group quota exceeded")
+
+// ErrCreatorQuotaExceeded 创建者个人配额已满（仅普通成员/bot 受限，管理员豁免），
+// 同样由 insertWithQuota 在事务内原子判定。
+var ErrCreatorQuotaExceeded = errors.New("incomingwebhook: per-creator quota exceeded")
 
 type incomingWebhookDB struct {
 	session *dbr.Session
@@ -38,7 +44,10 @@ func newDB(ctx *config.Context) *incomingWebhookDB {
 // count 检查、各自 INSERT 抢 insert-intention lock 互等 → InnoDB 死锁(1213)，且无
 // 重试，合法并发创建会以不透明的"创建失败"500 收场。锁父群这一必然存在的单行可彻底
 // 串行化而不触发 gap-lock 死锁（PR #31 yujiawei / Jerry-Xin review）。
-func (d *incomingWebhookDB) insertWithQuota(m *incomingWebhookModel, max int) error {
+// maxPerCreator <= 0 表示不启用个人配额（管理员创建路径）；> 0 时在同一事务内对
+// creator_uid 维度再做一次计数校验，超限返回 ErrCreatorQuotaExceeded。个人配额与
+// 群级配额共享同一把父群行锁，无需额外加锁。
+func (d *incomingWebhookDB) insertWithQuota(m *incomingWebhookModel, max, maxPerCreator int) error {
 	tx, err := d.session.Begin()
 	if err != nil {
 		return fmt.Errorf("incomingwebhook: begin tx: %w", err)
@@ -63,6 +72,26 @@ func (d *incomingWebhookDB) insertWithQuota(m *incomingWebhookModel, max int) er
 	}
 	if count >= max {
 		return ErrQuotaExceeded
+	}
+
+	if maxPerCreator > 0 {
+		var creatorCount int
+		if _, err = tx.SelectBySql(
+			// 与群级配额同口径：只排除软删除（statusDeleted）。【禁用】的 webhook 刻意
+			// 仍占个人配额——否则成员可用 disable→create→disable→create 循环无限囤积
+			// 可随时启用的 webhook，配额就形同虚设。释放名额只能走删除。这也意味着：
+			//   - 创建者退群被懒级联禁用的 webhook 仍占其个人配额，本人重新入群后可
+			//     自行删除释放；
+			//   - 配额是【创建闸】而非持续约束：调低 max_per_creator 不会回收已超额
+			//     成员的存量，只是不允许再建。
+			"SELECT count(*) FROM incoming_webhook WHERE group_no=? AND creator_uid=? AND status != ?",
+			m.GroupNo, m.CreatorUID, statusDeleted,
+		).Load(&creatorCount); err != nil {
+			return fmt.Errorf("incomingwebhook: creator count: %w", err)
+		}
+		if creatorCount >= maxPerCreator {
+			return ErrCreatorQuotaExceeded
+		}
 	}
 
 	m.CreatedAt = db.Time(time.Now())
@@ -140,6 +169,43 @@ func (d *incomingWebhookDB) deleteByWebhookID(webhookID string) error {
 		Set("status", statusDeleted).
 		Where("webhook_id=?", webhookID).
 		Where("status != ?", statusDeleted).Exec()
+	return err
+}
+
+// queryMemberRole 一次点读返回 uid 在 groupNo 的成员资格与管理员身份：
+//   - isMember：是【内部、正常状态、未删除】成员（与 group.QueryIsGroupManagerOrCreator
+//     的 fail-safe 口径一致：is_deleted=0 + is_external=0 + status=Normal）；
+//   - isAdmin：在 isMember 基础上 role ∈ {creator, manager}。
+//
+// 单查询同时服务三处（一次往返拿全两个事实，省掉管理路径的二连击）：
+//   - 管理路径的 actor 解析（resolveActor：成员资格 + 管理员判定）；
+//   - 管理路径的"创建者仍在群内"闸（requireCreatorInGroup）；
+//   - push 路径的创建者在群闸 + 覆盖权限（cachedCreatorMembership 的回源查询，
+//     isAdmin 决定 push 的 username/avatar_url 覆盖是否生效）。
+//
+// 直接点读 group_member 表而非经 group 模块 DB：该表已是 bot_api 等模块的既有
+// 跨模块读取面，且这里只需一行，避免给 group.DB 增加仅本模块使用的接口。
+func (d *incomingWebhookDB) queryMemberRole(groupNo, uid string) (isMember, isAdmin bool, err error) {
+	var roles []int
+	_, err = d.session.Select("role").From("group_member").
+		Where("group_no=? AND uid=? AND is_deleted=0 AND is_external=0 AND status=?",
+			groupNo, uid, int(common.GroupMemberStatusNormal)).
+		Limit(1).Load(&roles)
+	if err != nil || len(roles) == 0 {
+		return false, false, err
+	}
+	return true, roles[0] == group.MemberRoleCreator || roles[0] == group.MemberRoleManager, nil
+}
+
+// disableEnabledByWebhookID 把【仍处于启用态】的单个 webhook 置为禁用，用于 push
+// 路径发现创建者已退群时的懒级联禁用。status=statusEnabled 守卫保证：
+//   - 幂等（并发懒禁用只有一次生效）；
+//   - 绝不触碰软删除行（不会把 deleted 翻成 disabled 而复活到管理列表）。
+func (d *incomingWebhookDB) disableEnabledByWebhookID(webhookID string) error {
+	_, err := d.session.Update("incoming_webhook").
+		Set("status", statusDisabled).
+		Where("webhook_id=?", webhookID).
+		Where("status = ?", statusEnabled).Exec()
 	return err
 }
 

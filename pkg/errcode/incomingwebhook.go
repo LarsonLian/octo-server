@@ -87,12 +87,15 @@ var (
 // (403/404/409/400/500). This replaces the legacy raw-string
 // c.ResponseError(errors.New(...)) pattern (#246 follow-up).
 var (
-	// ErrIncomingWebhookForbidden (403) — caller is neither group owner nor
-	// admin; the only role allowed to manage a group's webhooks.
+	// ErrIncomingWebhookForbidden (403) — caller lacks permission: not an
+	// (internal, active) member of the group, or a plain member/bot touching a
+	// webhook created by someone else. Owners/admins manage any webhook;
+	// members and bots manage only their own. One generic code for every
+	// permission failure — the precise reason is not surfaced.
 	ErrIncomingWebhookForbidden = register(codes.Code{
 		ID:             "err.server.incomingwebhook.mgmt_forbidden",
 		HTTPStatus:     http.StatusForbidden,
-		DefaultMessage: "Only the group owner or an admin can manage webhooks.",
+		DefaultMessage: "You do not have permission to manage this webhook.",
 	})
 
 	// ErrIncomingWebhookRequestInvalid (400) — malformed body or invalid field
@@ -128,6 +131,29 @@ var (
 		ID:             "err.server.incomingwebhook.mgmt_quota_exceeded",
 		HTTPStatus:     http.StatusConflict,
 		DefaultMessage: "Each group allows at most {{.max}} webhooks.",
+	})
+
+	// ErrIncomingWebhookCreatorQuotaExceeded (409) — the calling member/bot has
+	// reached its per-creator cap in this group (owners/admins are exempt and
+	// only bounded by the group cap). Params["max"] carries the configured cap.
+	ErrIncomingWebhookCreatorQuotaExceeded = register(codes.Code{
+		ID:             "err.server.incomingwebhook.mgmt_creator_quota_exceeded",
+		HTTPStatus:     http.StatusConflict,
+		DefaultMessage: "You can create at most {{.max}} webhooks in this group.",
+	})
+
+	// ErrIncomingWebhookCreatorLeft (409) — the webhook's creator is no longer
+	// an (internal, active) member of the group, so operations that would make
+	// or keep it pushable (enable / regenerate / test push) are refused. The
+	// webhook can still be deleted; pushes are lazily disabled by the push
+	// path's creator-membership gate. Recovery: the creator rejoins the group,
+	// after which the creator or an admin can re-enable it — the message must
+	// state that path and offer deletion only as the cleanup option (PR #340
+	// review, Jerry-Xin: do not tell users delete-and-recreate is the only way).
+	ErrIncomingWebhookCreatorLeft = register(codes.Code{
+		ID:             "err.server.incomingwebhook.mgmt_creator_left",
+		HTTPStatus:     http.StatusConflict,
+		DefaultMessage: "The webhook's creator has left the group, so it cannot be enabled. It can be re-enabled after the creator rejoins, or deleted and recreated by someone in the group.",
 	})
 
 	// ErrIncomingWebhookQueryFailed (500, Internal) — a read (group / webhook /

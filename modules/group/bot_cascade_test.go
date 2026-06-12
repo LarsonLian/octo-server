@@ -328,42 +328,94 @@ func TestQuitGroup_CreatorOwnsNoBot_NoOp(t *testing.T) {
 	assert.True(t, exist, "他人 bot 无关，不应被误伤")
 }
 
-// TestQuitGroup_CreatorRoleSkipsCascade 验证 edge case：若退群的人是群主，
-// groupExit 上层会跳过 cascade（见 api.go 的 if loginMember.Role != MemberRoleCreator 守卫）。
-// 本测试直接不调 cascade，只断言 bot 不被带走，体现守卫语义。
-func TestQuitGroup_CreatorRoleSkipsCascade(t *testing.T) {
+// TestQuitGroup_CreatorCascadesBots 验证 #354 产品决策：bot 永远跟随其主人，无角色例外。
+// 群主退群时（角色先转让给 newGrouper），其名下 bot 同样被级联带走；
+// 新群主人选必须排除退群群主名下的 bot（否则新群主在同一事务内即被级联删除）。
+// 本测试按 groupExit 的新事务序列组装：选主（排除 leaver 的 bot）→ 转让 → 删 leaver → cascade。
+func TestQuitGroup_CreatorCascadesBots(t *testing.T) {
 	svc, userDB := setupServiceTest(t)
 	insertTestUsers(t, userDB, testutil.UID, "m1")
 
 	resp, err := svc.CreateGroup(&CreateGroupServiceReq{
 		Creator: testutil.UID,
 		Members: []string{"m1"},
-		Name:    "quit-cascade-creator-skip",
+		Name:    "quit-cascade-creator",
 	})
 	assert.NoError(t, err)
 	groupNo := resp.GroupNo
 
 	s := svc.(*Service)
-	// 群主自己拉的 bot
+	// 群主自己拉的 bot；把 bot 的 created_at 提前，使其成为「第二元老」，
+	// 验证选主 SQL 确实排除 leaver 名下 bot 而选中人类成员 m1。
 	seedBotMember(t, s, groupNo, "bot_by_creator", "creator-bot", testutil.UID)
+	_, err = s.ctx.DB().UpdateBySql(
+		"UPDATE group_member SET created_at = DATE_SUB(NOW(), INTERVAL 1 DAY) WHERE group_no=? AND uid=?",
+		groupNo, "bot_by_creator",
+	).Exec()
+	assert.NoError(t, err)
 
-	// 模拟 groupExit 里的守卫：role==creator 时跳过 cascade，这里 role 确实是 creator
 	member, err := s.db.QueryMemberWithUID(testutil.UID, groupNo)
 	assert.NoError(t, err)
 	assert.Equal(t, MemberRoleCreator, member.Role)
 
+	// 选主：必须跳过 leaver 名下的 bot，选中 m1
+	newGrouper, err := s.db.QuerySecondOldestMemberExcludingBotsOf(groupNo, testutil.UID)
+	assert.NoError(t, err)
+	assert.NotNil(t, newGrouper)
+	assert.Equal(t, "m1", newGrouper.UID, "新群主不能是退群群主名下的 bot")
+
 	tx, err := s.ctx.DB().Begin()
 	assert.NoError(t, err)
-	leaverVersion, _ := s.ctx.GenSeq(common.GroupMemberSeqKey)
-	assert.NoError(t, s.db.DeleteMemberTx(groupNo, testutil.UID, leaverVersion, tx))
-	// 守卫条件触发 → 不调 cascade
-	if member.Role != MemberRoleCreator {
-		_, _ = cascadeRemoveBotsInvitedByUIDTx(s.db, s.ctx, groupNo, testutil.UID, tx)
-	}
+	version, _ := s.ctx.GenSeq(common.GroupMemberSeqKey)
+	assert.NoError(t, s.db.UpdateMemberRoleTx(groupNo, newGrouper.UID, MemberRoleCreator, version, tx))
+	assert.NoError(t, s.db.DeleteMemberTx(groupNo, testutil.UID, version, tx))
+	// #354：cascade 无角色例外，群主退群同样触发
+	cascaded, err := cascadeRemoveBotsInvitedByUIDTx(s.db, s.ctx, groupNo, testutil.UID, tx)
+	assert.NoError(t, err)
 	assert.NoError(t, tx.Commit())
 
-	// bot 应留下（留给继任群主）
+	assert.ElementsMatch(t, []string{"bot_by_creator"}, cascaded, "群主的 bot 必须随群主离群（#354）")
+
 	exist, err := s.db.ExistMember("bot_by_creator", groupNo)
 	assert.NoError(t, err)
-	assert.True(t, exist, "creator 退群不触发 cascade（由 DismissGroup 兜底）")
+	assert.False(t, exist, "creator 退群其 bot 必须被级联带走，无角色例外（#354）")
+
+	// 新群主 m1 仍在群且为 creator
+	m1Member, err := s.db.QueryMemberWithUID("m1", groupNo)
+	assert.NoError(t, err)
+	assert.NotNil(t, m1Member)
+	assert.Equal(t, MemberRoleCreator, m1Member.Role)
+	assert.Equal(t, 0, m1Member.IsDeleted)
+}
+
+// TestQuerySecondOldestMemberExcludingBotsOf_OnlyBotsLeft 群里除群主外只剩群主自己的 bot 时，
+// 选主返回 nil（群随之清空），不能把即将级联离群的 bot 提为新群主。
+func TestQuerySecondOldestMemberExcludingBotsOf_OnlyBotsLeft(t *testing.T) {
+	svc, userDB := setupServiceTest(t)
+	insertTestUsers(t, userDB, testutil.UID, "m1")
+
+	resp, err := svc.CreateGroup(&CreateGroupServiceReq{
+		Creator: testutil.UID,
+		Members: []string{"m1"},
+		Name:    "quit-cascade-only-bots",
+	})
+	assert.NoError(t, err)
+	groupNo := resp.GroupNo
+
+	s := svc.(*Service)
+	// m1 离群，群里只剩群主 + 群主自己的 bot
+	version, _ := s.ctx.GenSeq(common.GroupMemberSeqKey)
+	assert.NoError(t, s.db.DeleteMember(groupNo, "m1", version))
+	seedBotMember(t, s, groupNo, "bot_only", "only-bot", testutil.UID)
+
+	newGrouper, err := s.db.QuerySecondOldestMemberExcludingBotsOf(groupNo, testutil.UID)
+	assert.NoError(t, err)
+	assert.Nil(t, newGrouper, "群里只剩 leaver 自己的 bot 时不应选出新群主")
+
+	// 他人的 bot 不受排除影响（保持旧选主语义）
+	seedBotMember(t, s, groupNo, "bot_other", "other-bot", "someone_else")
+	newGrouper, err = s.db.QuerySecondOldestMemberExcludingBotsOf(groupNo, testutil.UID)
+	assert.NoError(t, err)
+	assert.NotNil(t, newGrouper)
+	assert.Equal(t, "bot_other", newGrouper.UID, "他人的 bot 不在排除范围内（与旧 QuerySecondOldestMember 语义一致）")
 }

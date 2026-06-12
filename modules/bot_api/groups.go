@@ -656,6 +656,35 @@ func (ba *BotAPI) botGroupMemberRemove(c *wkhttp.Context) {
 		return
 	}
 
+	// PR#355 review: bot_admin 与人类管理员同权，不能踢群主/管理员——对齐
+	// Web API memberRemove 的角色守卫（manager 不可移除 manager/creator）。
+	// #354 把 service 层 RemoveGroupMembers 的 manager 豁免去掉后，目标角色
+	// 校验完全由调用方负责；不在这里拦截的话，bot_admin=1 的 bot 可以越权
+	// 踢任意管理员并级联带走其 bot。
+	//
+	// 角色校验必须基于 DB 解析后的目标行：WHERE 条件与 service 层
+	// QueryMembersWithUids 完全一致，由 MySQL collation 决定 uid 匹配
+	// （utf8mb4_*_ci 大小写不敏感）。如果改在 Go 里做大小写敏感的字符串
+	// 比对，请求方用 uid 的大小写变体即可绕过守卫、却仍命中 service 层的
+	// 真实 manager 行。
+	var targetRows []struct {
+		UID  string `db:"uid"`
+		Role int    `db:"role"`
+	}
+	_, err = ba.db.session.Select("uid", "role").From("group_member").
+		Where("uid in ? and group_no=? and is_deleted=0", filteredMembers, groupNo).Load(&targetRows)
+	if err != nil {
+		ba.Error("query target members failed", zap.Error(err), zap.String("groupNo", groupNo))
+		httperr.ResponseErrorL(c, errcode.ErrBotAPIQueryFailed, nil, nil)
+		return
+	}
+	for _, row := range targetRows {
+		if row.Role != group.MemberRoleCommon {
+			httperr.ResponseErrorLWithStatus(c, errcode.ErrBotAPICannotRemovePrivileged, nil, i18n.Details{"uid": row.UID})
+			return
+		}
+	}
+
 	removeResp, err := ba.groupService.RemoveGroupMembers(&group.RemoveGroupMembersServiceReq{
 		GroupNo:      groupNo,
 		Members:      filteredMembers,

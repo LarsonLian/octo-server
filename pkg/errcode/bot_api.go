@@ -123,6 +123,17 @@ var (
 		HTTPStatus:     http.StatusForbidden,
 		DefaultMessage: "The bot is not an admin of this group.",
 	})
+	// ErrBotAPICannotRemovePrivileged covers the bot-API member-remove role
+	// guard: a bot admin is manager-level at most, so it may not remove the
+	// group owner or a manager (mirrors the Web API memberRemove rule where a
+	// manager cannot kick managers/creator). The first offending uid is
+	// surfaced via Details so the adapter can pinpoint the rejected target.
+	ErrBotAPICannotRemovePrivileged = register(codes.Code{
+		ID:             "err.server.bot_api.cannot_remove_privileged",
+		HTTPStatus:     http.StatusForbidden,
+		DefaultMessage: "The group owner and managers cannot be removed through the bot API.",
+		SafeDetailKeys: []string{"uid"},
+	})
 	// ErrBotAPINotSpaceMember covers the bot/user-not-a-space-member guard.
 	ErrBotAPINotSpaceMember = register(codes.Code{
 		ID:             "err.server.bot_api.not_space_member",

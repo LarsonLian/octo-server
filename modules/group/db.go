@@ -80,13 +80,6 @@ func (d *DB) deleteMembersWithGroupNOTx(groupNo string, tx *dbr.Tx) error {
 	return err
 }
 
-// QuerySecondOldestMember 查询群里第二长老
-func (d *DB) QuerySecondOldestMember(groupNo string) (*MemberModel, error) {
-	var memberModel *MemberModel
-	_, err := d.session.Select("*").From("group_member").Where("group_no=? and role<>? and is_deleted=0", groupNo, MemberRoleCreator).OrderDir("created_at", true).Load(&memberModel)
-	return memberModel, err
-}
-
 // 通过vercode查询某个群成员
 func (d *DB) queryMemberWithVercode(vercode string) (*MemberModel, error) {
 	var memberModel *MemberModel
@@ -766,6 +759,48 @@ func (d *DB) QueryBotsInvitedByUIDTx(groupNo string, inviterUID string, tx *dbr.
 		groupNo, inviterUID,
 	).Load(&uids)
 	return uids, err
+}
+
+// QueryBotUIDsOwnedByUIDs 查询群内由 ownerUIDs 中任一用户名下（robot.creator_uid）
+// 的未删除 bot 成员 UID 列表。与 QueryBotsInvitedByUIDTx 同口径：只命中
+// group_member.robot=1 AND is_deleted=0 且 robot.status=1 的 bot；孤儿（无 robot 行）
+// 或禁用（status=0）bot 不视为任何人的 bot，不被级联。
+//
+// 非事务、无行锁版本，供拉黑/解除拉黑级联（#354）这类不开事务的路径使用：
+// 被拉黑用户的 bot 若不连带拉黑，用户可经 bot 旁路读群/子区内容，
+// 绕过 ExistMemberActive 加固线（#343/#345）。
+// 故意不过滤 group_member.status：解除拉黑时需要把已是 Blacklist 状态的 bot 一并恢复。
+func (d *DB) QueryBotUIDsOwnedByUIDs(groupNo string, ownerUIDs []string) ([]string, error) {
+	if groupNo == "" || len(ownerUIDs) == 0 {
+		return nil, nil
+	}
+	var uids []string
+	_, err := d.session.SelectBySql(
+		"SELECT gm.uid FROM group_member gm "+
+			"INNER JOIN robot r ON r.robot_id = gm.uid AND r.status = 1 "+
+			"WHERE gm.group_no = ? AND gm.robot = 1 AND gm.is_deleted = 0 "+
+			"AND r.creator_uid IN ?",
+		groupNo, ownerUIDs,
+	).Load(&uids)
+	return uids, err
+}
+
+// QuerySecondOldestMemberExcludingBotsOf 选出第二元老成员（群主退群时的新群主人选），
+// 在 QuerySecondOldestMember 的基础上额外排除 leaverUID 名下（robot.creator_uid）的
+// 活跃 bot：#354 起群主退群也会级联带走自己的 bot，这些 bot 在同一事务内即将离群，
+// 不能被选为新群主（否则会出现「新群主刚上任就被级联删除」的孤儿群）。
+// 其他人的 bot 不受影响，保持与旧选主逻辑一致。
+func (d *DB) QuerySecondOldestMemberExcludingBotsOf(groupNo string, leaverUID string) (*MemberModel, error) {
+	var memberModel *MemberModel
+	_, err := d.session.SelectBySql(
+		"SELECT gm.* FROM group_member gm "+
+			"LEFT JOIN robot r ON r.robot_id = gm.uid AND r.status = 1 AND r.creator_uid = ? "+
+			"WHERE gm.group_no = ? AND gm.role <> ? AND gm.is_deleted = 0 "+
+			"AND r.robot_id IS NULL "+
+			"ORDER BY gm.created_at ASC LIMIT 1",
+		leaverUID, groupNo, MemberRoleCreator,
+	).Load(&memberModel)
+	return memberModel, err
 }
 
 // QueryExternalMemberCountTx 事务内查询群内「人类」外部成员数量（FOR UPDATE 行锁防并发）。

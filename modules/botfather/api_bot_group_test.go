@@ -351,9 +351,14 @@ func TestBotGroupMemberRemove_CannotRemoveCreator(t *testing.T) {
 		"members": []string{testutil.UID},
 	}))
 
-	assert.Equal(t, http.StatusOK, w.Code)
-	result := jsonResult(t, w)
-	assert.Equal(t, float64(0), result["removed"])
+	// PR#355 review (Jerry-Xin): the bot member-remove role guard now rejects
+	// the request outright instead of silently skipping the creator. This
+	// mirrors the Web API memberRemove rule (a manager cannot kick the
+	// creator/managers) — see modules/bot_api/groups.go and the matching
+	// err.server.bot_api.cannot_remove_privileged 403 in
+	// modules/bot_api/group_member_remove_guard_test.go.
+	assert.Equalf(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "cannot be removed through the bot API")
 }
 
 func TestBotGroupMemberRemove_NotBotAdmin(t *testing.T) {

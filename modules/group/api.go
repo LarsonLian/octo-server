@@ -2833,8 +2833,9 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 	**/
 	var newGrouper *MemberModel // 新群主
 	if loginMember.Role == MemberRoleCreator {
-		// 查询第二老成员
-		newGrouper, err = g.db.QuerySecondOldestMember(groupNo)
+		// 查询第二老成员。#354：排除退群群主名下的 bot——它们会在下方被级联带走，
+		// 不能被选为新群主（否则新群主在同一事务内即被删除）。
+		newGrouper, err = g.db.QuerySecondOldestMemberExcludingBotsOf(groupNo, loginUID)
 		if err != nil {
 			g.Error("查询第二元老成员失败！", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
@@ -2896,21 +2897,19 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 	}
 
 	// D-2 · 级联带走 inviter 拉入的 bot（YUJ-49 / Mininglamp-OSS/octo-server#1186）。
-	// Edge case: 群主退群时此逻辑不触发（角色转让由上方 newGrouper 兜底；
-	//            若确要销群应走 DismissGroup）——保持 bot 跟随新群主留在群中。
+	// #354 产品决策：bot 永远跟随其主人，无角色例外——群主退群（角色已由上方
+	// newGrouper 完成转让）同样级联带走自己名下的 bot，和普通成员一致。
 	var cascadedBotUsers []*user.Model
-	if loginMember.Role != MemberRoleCreator {
-		cascadedUIDs, cerr := cascadeRemoveBotsInvitedByUIDTx(g.db, g.ctx, groupNo, loginUID, tx)
-		if cerr != nil {
-			tx.Rollback()
-			g.Error("级联移除 bot 成员失败", zap.Error(cerr))
-			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
-			return
-		}
-		for _, botUID := range cascadedUIDs {
-			botUser, _ := g.userDB.QueryByUID(botUID)
-			cascadedBotUsers = append(cascadedBotUsers, botUser)
-		}
+	cascadedUIDs, cerr := cascadeRemoveBotsInvitedByUIDTx(g.db, g.ctx, groupNo, loginUID, tx)
+	if cerr != nil {
+		tx.Rollback()
+		g.Error("级联移除 bot 成员失败", zap.Error(cerr))
+		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
+		return
+	}
+	for _, botUID := range cascadedUIDs {
+		botUser, _ := g.userDB.QueryByUID(botUID)
+		cascadedBotUsers = append(cascadedBotUsers, botUser)
 	}
 
 	// 若退群者是外部成员且当前群是外部群，检查是否需要恢复普通群
@@ -3128,6 +3127,16 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrGroupManagerOnly, nil, nil)
 		return
 	}
+	// #354 · Bot 跟人走：拉黑/解除拉黑级联到目标用户名下在群的 bot
+	// （robot.creator_uid 命中）。旧行为只动用户本人，其 bot 仍 status=Normal，
+	// 被拉黑用户可经自己的 bot 旁路读群/子区内容，绕过 ExistMemberActive
+	// 加固线（#343/#345）。解除拉黑走同一扩展，对称恢复。
+	targetUIDs, err := expandBlacklistTargetsWithOwnedBots(g.db, groupNo, req.Uids)
+	if err != nil {
+		g.Error("查询拉黑级联 bot 失败", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
+		return
+	}
 	status := 0
 	if action == "add" {
 		status = int(common.GroupMemberStatusBlacklist)
@@ -3141,14 +3150,14 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 		return
 	}
-	err = g.db.updateMembersStatus(version, groupNo, status, req.Uids)
+	err = g.db.updateMembersStatus(version, groupNo, status, targetUIDs)
 	if err != nil {
 		g.Error("添加或移除群成员黑名单错误", zap.Error(err))
 		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 		return
 	}
 	if status == int(common.GroupMemberStatusBlacklist) {
-		err = g.setGroupBlacklist(groupNo, req.Uids, status == int(common.GroupMemberStatusBlacklist))
+		err = g.setGroupBlacklist(groupNo, targetUIDs, status == int(common.GroupMemberStatusBlacklist))
 		if err != nil {
 			g.Error("添加IM黑名单错误", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
@@ -3158,18 +3167,19 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 		// 仅靠 setGroupBlacklist(IMBlacklistAdd) 只挡“发送”，不断“接收”——被拉黑者仍
 		// 通过 WuKongIM WS 收子区/父群实时消息（越权读 P0）。子区订阅复用 #27/#332 统一
 		// helper；父群订阅显式 IMRemoveSubscriber。best-effort：失败只记日志、不回滚拉黑。
-		for _, uid := range req.Uids {
+		// #354：级联拉黑的 bot 同样摘除订阅（targetUIDs 已含 bot）。
+		for _, uid := range targetUIDs {
 			g.removeUserFromGroupThreads(groupNo, uid, group.SpaceID)
 		}
 		if rmErr := g.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
 			ChannelID:   groupNo,
 			ChannelType: common.ChannelTypeGroup.Uint8(),
-			Subscribers: req.Uids,
+			Subscribers: targetUIDs,
 		}); rmErr != nil {
 			g.Error("拉黑摘除父群IM订阅失败", zap.Error(rmErr), zap.String("groupNo", groupNo))
 		}
 	} else {
-		members, err := g.db.QueryMembersWithUids(req.Uids, groupNo)
+		members, err := g.db.QueryMembersWithUids(targetUIDs, groupNo)
 		if err != nil {
 			g.Error("查询移除黑名单成员错误", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
@@ -3222,7 +3232,7 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 			return
 		}
 	} else {
-		for _, uid := range req.Uids {
+		for _, uid := range targetUIDs {
 			// 发送群成员更新命令
 			err = g.ctx.SendCMD(config.MsgCMDReq{
 				ChannelID:   groupNo,

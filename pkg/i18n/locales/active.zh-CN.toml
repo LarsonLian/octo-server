@@ -934,6 +934,9 @@ other = "机器人不是该群成员。"
 ["err.server.bot_api.not_group_admin"]
 other = "机器人不是该群管理员。"
 
+["err.server.bot_api.cannot_remove_privileged"]
+other = "群主和管理员不能通过机器人 API 移除。"
+
 ["err.server.bot_api.not_space_member"]
 other = "不是该空间成员。"
 

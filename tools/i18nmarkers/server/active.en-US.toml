@@ -30,6 +30,9 @@ other = "The grantee is not a registered bot."
 ["err.server.bot_api.bot_unavailable"]
 other = "The bot is not available."
 
+["err.server.bot_api.cannot_remove_privileged"]
+other = "The group owner and managers cannot be removed through the bot API."
+
 ["err.server.bot_api.content_too_large"]
 other = "The content exceeds the maximum allowed size."
 

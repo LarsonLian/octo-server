@@ -1564,10 +1564,13 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 		return nil, errors.New("none of the members are in this group")
 	}
 
-	// 过滤：跳过群主、管理员、已删除的成员
+	// 过滤：跳过群主、已删除的成员。
+	// #354 产品决策：bot 永远跟随其主人，无角色例外——manager 不再豁免，
+	// 被踢的管理员连同其拉入的 bot 一并带走（API 层 memberRemove 已限制
+	// 只有群主能踢管理员；creator 仍不可被踢）。
 	var removableMembers []*MemberModel
 	for _, m := range targetMembers {
-		if m.IsDeleted == 1 || m.Role == MemberRoleCreator || m.Role == MemberRoleManager {
+		if m.IsDeleted == 1 || m.Role == MemberRoleCreator {
 			continue
 		}
 		removableMembers = append(removableMembers, m)
@@ -1619,8 +1622,8 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 		removedVos = append(removedVos, &config.UserBaseVo{UID: m.UID, Name: name})
 
 		// D-2 · 级联带走该成员拉入的 bot（#1186 / YUJ-49）。
-		// 只对非群主 / 非管理员成员触发；上层 filter 已排除 creator/manager，这里保底再判一次。
-		if m.Role == MemberRoleCreator || m.Role == MemberRoleManager {
+		// #354：manager 被踢时 bot 一并带走，仅 creator 保底豁免（上层 filter 已排除）。
+		if m.Role == MemberRoleCreator {
 			continue
 		}
 		cascadedUIDs, cerr := cascadeRemoveBotsInvitedByUIDTx(s.db, s.ctx, req.GroupNo, m.UID, tx)

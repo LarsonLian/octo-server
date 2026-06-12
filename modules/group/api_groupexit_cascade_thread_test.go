@@ -77,7 +77,7 @@ func TestGroupExit_CascadeBot_AlsoRemovesFromThread(t *testing.T) {
 	f := New(s.ctx)
 	ensureThreadTables(t, f)
 
-	// --- 1. 用户：群主 owner、退群者 leaver（非群主，cascade 前置条件）、bot 本体 ---
+	// --- 1. 用户：群主 owner、退群者 leaver（普通成员场景；#354 起群主退群同样 cascade）、bot 本体 ---
 	insertTestUsers(t, userDB, "owner", "leaver")
 	botUID := "yuj52_bot_by_leaver"
 	require.NoError(t, userDB.Insert(&user.Model{UID: botUID, Name: "bot-by-leaver", ShortNo: "sn_" + botUID, Robot: 1}))

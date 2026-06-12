@@ -51,6 +51,41 @@ func cascadeRemoveBotsInvitedByUIDTx(
 	return removed, nil
 }
 
+// expandBlacklistTargetsWithOwnedBots 把拉黑/解除拉黑的目标 uid 列表扩展为
+// 「用户本人 + 其名下在群 bot」，按原序去重后返回。
+//
+// #354 产品决策：bot 永远跟随其主人。拉黑用户时若不连带其 bot（旧行为：bot 仍
+// status=Normal），被拉黑用户可经自己的 bot 旁路读群/子区内容，绕过
+// ExistMemberActive 加固线（#343/#345）。解除拉黑走同一扩展，保证对称恢复。
+//
+// 查询失败返回 error，由调用方决定中断（拉黑是权限敏感操作，fail closed）。
+func expandBlacklistTargetsWithOwnedBots(db *DB, groupNo string, uids []string) ([]string, error) {
+	botUIDs, err := db.QueryBotUIDsOwnedByUIDs(groupNo, uids)
+	if err != nil {
+		return nil, fmt.Errorf("query bots owned by blacklist targets: %w", err)
+	}
+	if len(botUIDs) == 0 {
+		return uids, nil
+	}
+	seen := make(map[string]struct{}, len(uids)+len(botUIDs))
+	out := make([]string, 0, len(uids)+len(botUIDs))
+	for _, uid := range uids {
+		if _, ok := seen[uid]; ok {
+			continue
+		}
+		seen[uid] = struct{}{}
+		out = append(out, uid)
+	}
+	for _, uid := range botUIDs {
+		if _, ok := seen[uid]; ok {
+			continue
+		}
+		seen[uid] = struct{}{}
+		out = append(out, uid)
+	}
+	return out, nil
+}
+
 // sendBotCascadeRemovedTip 发送 D-2 级联移除 bot 的系统消息。
 //
 // 场景：inviter 离群 / 被踢时，其邀请的 bot 被同事务级联移除。为避免「bot 神秘消失」

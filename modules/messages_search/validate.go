@@ -25,13 +25,16 @@ type SearchFilters struct {
 
 // SearchMessagesReq is the request body for POST /v1/messages/_search.
 //
-// `Keyword` is required and non-empty per A doc §2.1. `Sort` accepts
-// time_desc (default) | time_asc | relevance. `PageSize` is normalised into
-// [1, 100] with a default of 20.
+// `Keyword` is optional; when empty the DSL drops the multi_match clause and
+// the endpoint behaves as a time-ordered listing. To prevent an unconditional
+// full-channel scan, an empty keyword still requires at least one effective
+// filter (see validateSearchNotEmpty). `Sort` accepts time_desc (default) |
+// time_asc | relevance — relevance requires a non-empty keyword. `PageSize` is
+// normalised into [1, 100] with a default of 20.
 type SearchMessagesReq struct {
 	ChannelType uint8         `json:"channel_type"`
 	ChannelID   string        `json:"channel_id"`
-	Keyword     string        `json:"keyword"`
+	Keyword     string        `json:"keyword,omitempty"`
 	Filters     SearchFilters `json:"filters,omitempty"`
 	Sort        string        `json:"sort,omitempty"`
 	PageSize    int           `json:"page_size,omitempty"`
@@ -65,7 +68,7 @@ type SearchFilesReq struct {
 }
 
 // SearchAllReq is the request body for POST /v1/messages/_search_all. Same
-// shape as _search; keyword required.
+// shape as _search; keyword optional and gated identically.
 type SearchAllReq = SearchMessagesReq
 
 // SearchAroundReq is the request body for POST /v1/messages/_search_around.
@@ -163,11 +166,10 @@ func validateBase(c *wkhttp.Context, cfg SearchConfig, channelType uint8, channe
 	return page, true
 }
 
-// validateKeywordRequired runs the keyword length / non-empty check.
-func validateKeywordRequired(c *wkhttp.Context, keyword string) bool {
+// validateKeywordOptional accepts an empty keyword but still bounds length.
+func validateKeywordOptional(c *wkhttp.Context, keyword string) bool {
 	if keyword == "" {
-		respondValidation(c, "keyword", "required")
-		return false
+		return true
 	}
 	if utf8.RuneCountInString(keyword) > maxKeywordLen {
 		respondValidationDetails(c, i18n.Details{
@@ -180,17 +182,42 @@ func validateKeywordRequired(c *wkhttp.Context, keyword string) bool {
 	return true
 }
 
-// validateKeywordOptional accepts an empty keyword but still bounds length.
-func validateKeywordOptional(c *wkhttp.Context, keyword string) bool {
-	if keyword == "" {
+// hasEffectiveFilters reports whether the structured filters carry at least one
+// clause that survives DSL construction. It mirrors addCommonFilters' own
+// emptiness handling so the validator and the query builder agree on what
+// "has a filter" means:
+//
+//   - sender_ids is effective only if it contains a non-empty (trimmed) id.
+//     `{"sender_ids":[""]}` is NOT effective — dsl.go::addCommonFilters drops
+//     empty strings and would otherwise emit no terms clause, degenerating into
+//     a full-channel scan. This is the documented bypass the guard must close.
+//   - sent_at_from / sent_at_to is effective if either bound is set (trimmed).
+//
+// Keeping this in lockstep with addCommonFilters is the invariant: anything
+// that would not produce an OS filter clause must not count as a filter here.
+func hasEffectiveFilters(filters SearchFilters) bool {
+	for _, s := range filters.SenderIDs {
+		if strings.TrimSpace(s) != "" {
+			return true
+		}
+	}
+	if strings.TrimSpace(filters.SentAtFrom) != "" {
 		return true
 	}
-	if utf8.RuneCountInString(keyword) > maxKeywordLen {
-		respondValidationDetails(c, i18n.Details{
-			"field":      "keyword",
-			"reason":     "too long",
-			"max_length": maxKeywordLen,
-		})
+	if strings.TrimSpace(filters.SentAtTo) != "" {
+		return true
+	}
+	return false
+}
+
+// validateSearchNotEmpty is the empty-search guard for the keyword-optional
+// endpoints (_search / _search_all). With no keyword AND no effective filter,
+// the query degenerates into an unconditional full-channel scan that can pin
+// OpenSearch; reject it with 400 instead. keyword is assumed already trimmed by
+// the caller.
+func validateSearchNotEmpty(c *wkhttp.Context, keyword string, filters SearchFilters) bool {
+	if keyword == "" && !hasEffectiveFilters(filters) {
+		respondValidation(c, "keyword", "keyword or at least one filter is required")
 		return false
 	}
 	return true

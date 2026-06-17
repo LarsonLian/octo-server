@@ -104,3 +104,111 @@ func TestValidateBase_MalformedCursorRejected(t *testing.T) {
 		t.Fatalf("cursor rejection must render a validation envelope, got %q", rec.Body.String())
 	}
 }
+
+// sort=relevance with allowRelevance=false (the empty-keyword path) must be
+// refused — relevance has no _score to sort on when the multi_match clause is
+// dropped. The user-facing body is rendered through i18n templates so the
+// raw reason string is not asserted here (other validate tests follow the
+// same envelope-only pattern); the rejection itself is the contract.
+func TestValidateBase_RelevanceRequiresKeyword(t *testing.T) {
+	c, rec := newValidateCtx(t)
+	_, ok := validateBase(c, SearchConfig{}, channelTypeGroup, "G1", "relevance", "",
+		SearchFilters{}, 20, false)
+	if ok {
+		t.Fatalf("sort=relevance without keyword (allowRelevance=false) must be rejected")
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatalf("rejection must render a VALIDATION_ERROR envelope")
+	}
+
+	// And the symmetric positive: with allowRelevance=true (keyword present)
+	// the same sort value passes — guards against regressing the gate.
+	c2, _ := newValidateCtx(t)
+	if _, ok := validateBase(c2, SearchConfig{}, channelTypeGroup, "G1", "relevance", "",
+		SearchFilters{}, 20, true); !ok {
+		t.Fatalf("sort=relevance with allowRelevance=true must be accepted")
+	}
+}
+
+// Empty-search guard: empty keyword AND no effective filter must be rejected
+// with a VALIDATION_ERROR — that combination degenerates into an unconditional
+// full-channel scan that can pin OpenSearch.
+func TestValidateSearchNotEmpty_EmptyKeywordEmptyFilter_Rejected(t *testing.T) {
+	c, rec := newValidateCtx(t)
+	if validateSearchNotEmpty(c, "", SearchFilters{}) {
+		t.Fatalf("empty keyword + empty filter must be rejected")
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatalf("rejection must render a VALIDATION_ERROR envelope")
+	}
+}
+
+// 🔴 Bypass point: a sender_ids list of only empty strings must NOT count as a
+// filter. dsl.go::addCommonFilters trims empty ids and emits no terms clause,
+// so `{"sender_ids":[""]}` with an empty keyword still degenerates into a full
+// scan. The guard must reject it the same as a wholly empty filter.
+func TestValidateSearchNotEmpty_EmptyKeywordBlankSenderIDs_Rejected(t *testing.T) {
+	for _, senders := range [][]string{
+		{""},
+		{"", "  "},
+		{"\t", " "},
+	} {
+		c, rec := newValidateCtx(t)
+		if validateSearchNotEmpty(c, "", SearchFilters{SenderIDs: senders}) {
+			t.Fatalf("empty keyword + blank sender_ids %v must be rejected (bypass point)", senders)
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatalf("rejection must render a VALIDATION_ERROR envelope for %v", senders)
+		}
+	}
+}
+
+// An empty keyword with at least one effective filter is allowed — this is the
+// keyword-optional listing path the guard must NOT block.
+func TestValidateSearchNotEmpty_EmptyKeywordEffectiveFilter_Accepted(t *testing.T) {
+	cases := []SearchFilters{
+		{SenderIDs: []string{"u1"}},
+		{SenderIDs: []string{"", "u2"}},
+		{SentAtFrom: "2026-01-01"},
+		{SentAtTo: "2026-12-31"},
+	}
+	for _, f := range cases {
+		c, _ := newValidateCtx(t)
+		if !validateSearchNotEmpty(c, "", f) {
+			t.Fatalf("empty keyword with effective filter %+v must be accepted", f)
+		}
+	}
+}
+
+// A non-empty keyword always passes the guard regardless of filters.
+func TestValidateSearchNotEmpty_KeywordPresent_Accepted(t *testing.T) {
+	c, _ := newValidateCtx(t)
+	if !validateSearchNotEmpty(c, "hello", SearchFilters{}) {
+		t.Fatalf("non-empty keyword must be accepted with no filters")
+	}
+}
+
+// hasEffectiveFilters must agree with addCommonFilters on what "has a filter"
+// means — blank-only sender_ids and untrimmed-empty time bounds are not
+// effective.
+func TestHasEffectiveFilters(t *testing.T) {
+	tests := []struct {
+		name    string
+		filters SearchFilters
+		want    bool
+	}{
+		{"empty", SearchFilters{}, false},
+		{"blank sender", SearchFilters{SenderIDs: []string{""}}, false},
+		{"whitespace sender", SearchFilters{SenderIDs: []string{"  ", "\t"}}, false},
+		{"real sender", SearchFilters{SenderIDs: []string{"u1"}}, true},
+		{"mixed sender", SearchFilters{SenderIDs: []string{"", "u1"}}, true},
+		{"from set", SearchFilters{SentAtFrom: "2026-01-01"}, true},
+		{"to set", SearchFilters{SentAtTo: "2026-01-01"}, true},
+		{"blank from", SearchFilters{SentAtFrom: "   "}, false},
+	}
+	for _, tc := range tests {
+		if got := hasEffectiveFilters(tc.filters); got != tc.want {
+			t.Errorf("%s: hasEffectiveFilters=%v want %v", tc.name, got, tc.want)
+		}
+	}
+}

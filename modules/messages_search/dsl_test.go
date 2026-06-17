@@ -59,6 +59,30 @@ func TestBuildSearchMessagesDSL_Shape(t *testing.T) {
 	}
 }
 
+func TestBuildSearchMessagesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
+	req := SearchMessagesReq{
+		ChannelType: channelTypeGroup,
+		ChannelID:   "groupNo",
+	}
+	q := buildSearchMessagesDSL(req, "groupNo", "")
+	js, _ := json.Marshal(extractDSL(t, q.(interface {
+		Source() (any, error)
+	})))
+	body := string(js)
+	if strings.Contains(body, "multi_match") {
+		t.Errorf("search_messages DSL with empty keyword must not include multi_match:\n%s", body)
+	}
+	for _, want := range []string{
+		`"channelId":"groupNo"`,
+		`"revoked":true`,
+		`"payload.type":99`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("empty-keyword DSL missing %q in:\n%s", want, body)
+		}
+	}
+}
+
 func TestBuildSearchMediaDSL_FiltersTypes(t *testing.T) {
 	req := SearchMediaReq{ChannelType: channelTypeGroup, ChannelID: "g"}
 	q := buildSearchMediaDSL(req, "g", "")
@@ -121,6 +145,36 @@ func TestBuildSearchAllDSL_TypeFilter(t *testing.T) {
 		if !strings.Contains(body, want) && !strings.Contains(body, strings.ReplaceAll(want, ",", ", ")) {
 			t.Errorf("search_all DSL missing %q in:\n%s", want, body)
 		}
+	}
+}
+
+func TestBuildSearchAllDSL_NoKeywordKeepsTypeFilter(t *testing.T) {
+	req := SearchMessagesReq{ChannelType: channelTypeGroup, ChannelID: "g"}
+	q := buildSearchAllDSL(req, "g", "")
+	js, _ := json.Marshal(extractDSL(t, q.(interface {
+		Source() (any, error)
+	})))
+	body := string(js)
+	if strings.Contains(body, "multi_match") {
+		t.Errorf("search_all DSL with empty keyword must not include multi_match:\n%s", body)
+	}
+	if strings.Contains(body, "minimum_should_match") {
+		t.Errorf("search_all DSL with empty keyword must not include minimum_should_match:\n%s", body)
+	}
+	if strings.Contains(body, `"should"`) {
+		t.Errorf("search_all DSL with empty keyword must not include a should clause:\n%s", body)
+	}
+	for _, want := range []string{
+		`"channelId":"g"`,
+		`"revoked":true`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("empty-keyword search_all DSL missing %q in:\n%s", want, body)
+		}
+	}
+	// type filter must still segment message vs file
+	if !strings.Contains(body, `"payload.type":[1,8,11]`) && !strings.Contains(body, `"payload.type":[1, 8, 11]`) {
+		t.Errorf("empty-keyword search_all DSL must still filter payload.type [1,8,11]:\n%s", body)
 	}
 }
 

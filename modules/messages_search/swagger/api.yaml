@@ -29,7 +29,7 @@ paths:
         - "messages_search"
       operationId: "message.search"
       summary: "Search text + forward messages"
-      description: "Full-text search across text/forward/image/file payload fields scoped to a single channel. Required keyword."
+      description: "Full-text search across text/forward/image/file payload fields scoped to a single channel. Keyword is optional — when empty the endpoint returns the channel's messages in time order (relevance sort then requires a non-empty keyword). An empty keyword requires at least one filter (sender_ids/sent_at_*); keyword + filter both empty is rejected with 400."
       consumes:
         - "application/json"
       produces:
@@ -188,7 +188,7 @@ paths:
         - "messages_search"
       operationId: "message.search_all"
       summary: "Search across messages and files"
-      description: "Combined search across text/forward and files in a single channel; required keyword."
+      description: "Combined search across text/forward and files in a single channel. Keyword is optional — when empty the endpoint mixes messages and files in time order (relevance sort then requires a non-empty keyword). An empty keyword requires at least one filter (sender_ids/sent_at_*); keyword + filter both empty is rejected with 400."
       consumes:
         - "application/json"
       produces:
@@ -348,7 +348,6 @@ definitions:
     required:
       - channel_type
       - channel_id
-      - keyword
     properties:
       channel_type:
         type: integer

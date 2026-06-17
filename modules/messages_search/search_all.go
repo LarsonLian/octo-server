@@ -36,10 +36,13 @@ func (h *Handler) searchAll(c *wkhttp.Context) {
 	req.Keyword = strings.TrimSpace(req.Keyword)
 	loginUID := c.GetLoginUID()
 
-	if !validateKeywordRequired(c, req.Keyword) {
+	if !validateKeywordOptional(c, req.Keyword) {
 		return
 	}
-	pageSize, ok := validateBase(c, h.cfg, req.ChannelType, req.ChannelID, req.Sort, req.Cursor, req.Filters, req.PageSize, true)
+	if !validateSearchNotEmpty(c, req.Keyword, req.Filters) {
+		return
+	}
+	pageSize, ok := validateBase(c, h.cfg, req.ChannelType, req.ChannelID, req.Sort, req.Cursor, req.Filters, req.PageSize, req.Keyword != "")
 	if !ok {
 		return
 	}
@@ -80,9 +83,11 @@ func (h *Handler) searchAll(c *wkhttp.Context) {
 			Index(h.cfg.OSReadAlias).
 			Routing(normID).
 			Query(dsl).
-			Highlight(buildSearchAllHighlight()).
 			Size(size).
 			TrackTotalHits(false)
+		if req.Keyword != "" {
+			svc = svc.Highlight(buildSearchAllHighlight())
+		}
 		svc = applySort(svc, req.Sort)
 		if len(searchAfter) > 0 {
 			svc = svc.SearchAfter(searchAfter...)
@@ -127,17 +132,19 @@ func buildSearchAllDSL(req SearchAllReq, normChannelID, spaceID string) elastic.
 		payloadTypeMergeForward,
 	))
 	addCommonFilters(b, req.Filters)
-	b.Should(
-		elastic.NewMultiMatchQuery(req.Keyword,
-			"payload.text.content^3",
-			"payload.mergeForward.msgs.searchText",
-		),
-		elastic.NewMultiMatchQuery(req.Keyword,
-			"payload.file.name^2",
-			"payload.file.caption",
-		),
-	)
-	b.MinimumShouldMatch("1")
+	if req.Keyword != "" {
+		b.Should(
+			elastic.NewMultiMatchQuery(req.Keyword,
+				"payload.text.content^3",
+				"payload.mergeForward.msgs.searchText",
+			),
+			elastic.NewMultiMatchQuery(req.Keyword,
+				"payload.file.name^2",
+				"payload.file.caption",
+			),
+		)
+		b.MinimumShouldMatch("1")
+	}
 	return b
 }
 

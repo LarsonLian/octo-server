@@ -41,10 +41,13 @@ func (h *Handler) searchMessages(c *wkhttp.Context) {
 	req.Keyword = strings.TrimSpace(req.Keyword)
 	loginUID := c.GetLoginUID()
 
-	if !validateKeywordRequired(c, req.Keyword) {
+	if !validateKeywordOptional(c, req.Keyword) {
 		return
 	}
-	pageSize, ok := validateBase(c, h.cfg, req.ChannelType, req.ChannelID, req.Sort, req.Cursor, req.Filters, req.PageSize, true)
+	if !validateSearchNotEmpty(c, req.Keyword, req.Filters) {
+		return
+	}
+	pageSize, ok := validateBase(c, h.cfg, req.ChannelType, req.ChannelID, req.Sort, req.Cursor, req.Filters, req.PageSize, req.Keyword != "")
 	if !ok {
 		return
 	}
@@ -85,9 +88,11 @@ func (h *Handler) searchMessages(c *wkhttp.Context) {
 			Index(h.cfg.OSReadAlias).
 			Routing(normID).
 			Query(dsl).
-			Highlight(buildSearchMessagesHighlight()).
 			Size(size).
 			TrackTotalHits(false)
+		if req.Keyword != "" {
+			svc = svc.Highlight(buildSearchMessagesHighlight())
+		}
 		svc = applySort(svc, req.Sort)
 		if len(searchAfter) > 0 {
 			svc = svc.SearchAfter(searchAfter...)
@@ -126,12 +131,14 @@ func (h *Handler) searchMessages(c *wkhttp.Context) {
 // buildSearchMessagesDSL constructs the bool query for /_search.
 func buildSearchMessagesDSL(req SearchMessagesReq, normChannelID, spaceID string) elastic.Query {
 	b := elastic.NewBoolQuery()
-	b.Must(elastic.NewMultiMatchQuery(req.Keyword,
-		"payload.text.content^3",
-		"payload.image.caption", "payload.image.name",
-		"payload.file.caption", "payload.file.name",
-		"payload.mergeForward.msgs.searchText",
-	))
+	if req.Keyword != "" {
+		b.Must(elastic.NewMultiMatchQuery(req.Keyword,
+			"payload.text.content^3",
+			"payload.image.caption", "payload.image.name",
+			"payload.file.caption", "payload.file.name",
+			"payload.mergeForward.msgs.searchText",
+		))
+	}
 	applyChannelAndRevoked(b, normChannelID)
 	applySpaceIDScope(b, req.ChannelType, spaceID)
 	addCommonFilters(b, req.Filters)

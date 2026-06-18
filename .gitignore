@@ -79,7 +79,9 @@ docker/tsdd/.env
 # AI agent docs
 dmworkim
 scripts/healthcheck.sh
-.claude/
+.claude/*
+!.claude/commands/
+!.claude/skills/
 testenv/miniodata/
 
 # TestMakeCompose temporary fixture (modules/file/service_test.go:46)

@@ -287,6 +287,62 @@ func TestPickSnippet(t *testing.T) {
 	}
 }
 
+func TestFallbackSnippet(t *testing.T) {
+	txt := 5
+	if got := fallbackSnippet(&Payload{Type: &txt, Text: &TextPayload{Content: "群聊测试消息"}}); got != "群聊测试消息" {
+		t.Fatalf("text content: got %q", got)
+	}
+	// merge-forward: first non-empty child searchText wins.
+	mf := &Payload{MergeForward: &MergeForwardPayload{Msgs: []MergeForwardMsg{
+		{SearchText: ""}, {SearchText: "转发预览"},
+	}}}
+	if got := fallbackSnippet(mf); got != "转发预览" {
+		t.Fatalf("merge-forward: got %q", got)
+	}
+	if got := fallbackSnippet(&Payload{Image: &ImagePayload{Caption: "图说"}}); got != "图说" {
+		t.Fatalf("image caption: got %q", got)
+	}
+	if got := fallbackSnippet(&Payload{File: &FilePayload{Name: "a.pdf"}}); got != "a.pdf" {
+		t.Fatalf("file name: got %q", got)
+	}
+	// No textual projection (bare voice doc) or nil payload → empty, snippet omitted.
+	if got := fallbackSnippet(&Payload{Voice: &VoicePayload{}}); got != "" {
+		t.Fatalf("no text: got %q", got)
+	}
+	if got := fallbackSnippet(nil); got != "" {
+		t.Fatalf("nil payload: got %q", got)
+	}
+}
+
+func TestTruncateRunes(t *testing.T) {
+	// Under the cap is returned verbatim, no ellipsis.
+	if got := truncateRunes("abc", 5); got != "abc" {
+		t.Fatalf("under cap: got %q", got)
+	}
+	// Over the cap is clipped on a rune boundary with a trailing ellipsis.
+	long := strings.Repeat("中", 130)
+	got := truncateRunes(long, snippetWindow)
+	if r := []rune(got); len(r) != snippetWindow+1 || r[snippetWindow] != '…' {
+		t.Fatalf("over cap: len=%d last=%q", len(r), string(r[len(r)-1]))
+	}
+}
+
+func TestSingleMessageHit_SnippetFallback(t *testing.T) {
+	var h Handler
+	txt := 1
+	doc := Doc{MessageID: 7, Payload: &Payload{Type: &txt, Text: &TextPayload{Content: "群聊测试消息"}}}
+
+	// Keyword path: highlight wins, no fallback.
+	hl := map[string][]string{"payload.text.content": {"群聊<mark>测试</mark>消息"}}
+	if got := h.singleMessageHit(doc, "c", hl).Snippet; got != "群聊<mark>测试</mark>消息" {
+		t.Fatalf("highlight should win, got %q", got)
+	}
+	// Empty-keyword browse path: no highlight → fall back to raw content.
+	if got := h.singleMessageHit(doc, "c", nil).Snippet; got != "群聊测试消息" {
+		t.Fatalf("empty highlight should fall back to content, got %q", got)
+	}
+}
+
 // TestPayloadTypeConstants_AlignWithOctoLib pins the local payloadType*
 // constants to octo-lib/common.ContentType so a renumber upstream surfaces
 // here as a test failure rather than a silent mis-routing of message types.

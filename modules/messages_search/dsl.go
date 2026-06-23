@@ -135,6 +135,58 @@ func pickSnippet(h map[string][]string) string {
 	return ""
 }
 
+// snippetWindow caps a fallback snippet's rune length. Matches the keyword
+// path's highlight FragmentSize(120) so empty-keyword browse hits and keyword
+// hits surface a comparably sized preview.
+const snippetWindow = 120
+
+// fallbackSnippet derives a plain-text snippet straight from the doc payload
+// when the keyword highlight produced nothing — the empty-keyword browse case,
+// where no Highlight is requested at all (highlight is only attached when
+// keyword != "", see search_messages.go / search_all.go). Without this a
+// browse hit comes back with snippet="" and the client has no message text to
+// render, violating the A-doc §2.1 contract that every message hit carries
+// content.
+//
+// Field priority mirrors pickSnippet (text → merge-forward child → image
+// caption → file name) so the fallback and the highlighted path agree on which
+// field represents the message. Returns "" only when the payload has no
+// textual projection at all (e.g. a bare voice/video doc), leaving snippet
+// omitted exactly as before.
+func fallbackSnippet(p *Payload) string {
+	if p == nil {
+		return ""
+	}
+	if p.Text != nil && p.Text.Content != "" {
+		return truncateRunes(p.Text.Content, snippetWindow)
+	}
+	if p.MergeForward != nil {
+		for _, m := range p.MergeForward.Msgs {
+			if m.SearchText != "" {
+				return truncateRunes(m.SearchText, snippetWindow)
+			}
+		}
+	}
+	if p.Image != nil && p.Image.Caption != "" {
+		return truncateRunes(p.Image.Caption, snippetWindow)
+	}
+	if p.File != nil && p.File.Name != "" {
+		return truncateRunes(p.File.Name, snippetWindow)
+	}
+	return ""
+}
+
+// truncateRunes clips s to at most n runes, appending "…" when it had to cut.
+// Rune-based so it never splits a multi-byte UTF-8 codepoint — CJK content is
+// the common case here.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 // extractSortValues pulls (timestamp, messageId, score?) from a search hit's
 // `sort` array so the next-page cursor can be encoded. The shape depends on
 // the requested sort:

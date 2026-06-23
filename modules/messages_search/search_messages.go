@@ -221,11 +221,18 @@ func (h *Handler) buildMessageHits(ctx context.Context, hits []*elastic.SearchHi
 // tests can drive the field mapping (kind / snippet / outer_preview) without
 // standing up a full search loop, and so search_all can reuse it.
 func (h *Handler) singleMessageHit(doc Doc, reqChannelID string, hl map[string][]string) MessageHit {
+	// Prefer the keyword highlight fragment; on the empty-keyword browse path
+	// no highlight is requested, so fall back to the raw payload text so the
+	// hit still carries readable content (A-doc §2.1).
+	snippet := pickSnippet(hl)
+	if snippet == "" {
+		snippet = fallbackSnippet(doc.Payload)
+	}
 	return MessageHit{
 		MessageID:     strconv.FormatInt(doc.MessageID, 10),
 		MessageSeq:    int64(doc.MessageSeq),
 		MessageKind:   classifyKind(doc.Payload),
-		Snippet:       pickSnippet(hl),
+		Snippet:       snippet,
 		SenderID:      doc.From,
 		SentAt:        msToRFC3339(doc.Timestamp),
 		OuterPreview:  buildOuterPreview(doc.Payload),

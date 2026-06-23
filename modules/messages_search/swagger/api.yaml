@@ -436,6 +436,33 @@ definitions:
       child_count:
         type: integer
 
+  InnerMessage:
+    type: object
+    description: |
+      Per-child projection of a forward (type=11) message's inner msgs[].
+      `sender_id` and `sent_at` are omitted while the indexer is still
+      writing the contract-v0 shape (only message_id / type / search_text).
+      Once the indexer fills msgs[].from / msgs[].timestamp, both fields
+      surface automatically — clients must tolerate either shape.
+    required:
+      - message_id
+      - type
+    properties:
+      message_id:
+        type: string
+      type:
+        type: integer
+        description: "Inner payload content type (1=text, 8=file, ...)."
+      search_text:
+        type: string
+      sender_id:
+        type: string
+      sender_name:
+        type: string
+      sent_at:
+        type: string
+        format: date-time
+
   MessageHit:
     type: object
     required:
@@ -468,6 +495,14 @@ definitions:
         format: date-time
       outer_preview:
         $ref: "#/definitions/OuterPreview"
+      inner_messages:
+        type: array
+        description: |
+          Forward-card child messages, only emitted when message_kind=forward
+          and the OS doc carries a non-empty payload.mergeForward.msgs[].
+          Omitted entirely (not "[]") on text hits or when msgs[] is missing.
+        items:
+          $ref: "#/definitions/InnerMessage"
       channel_id:
         type: string
 

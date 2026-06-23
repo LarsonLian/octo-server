@@ -53,6 +53,139 @@ func TestUnmarshalDoc_MergeForward(t *testing.T) {
 	if len(doc.Payload.MergeForward.Msgs) != 2 {
 		t.Fatalf("msgs len: got %d", len(doc.Payload.MergeForward.Msgs))
 	}
+	// Legacy docs without msgs[].from / msgs[].timestamp must deserialise
+	// to zero values; the partial-shape contract relies on omitempty hiding
+	// these fields on the wire (see buildInnerMessages).
+	for _, m := range doc.Payload.MergeForward.Msgs {
+		if m.From != "" {
+			t.Errorf("legacy doc must not surface from, got %q", m.From)
+		}
+		if m.Timestamp != 0 {
+			t.Errorf("legacy doc must not surface timestamp, got %d", m.Timestamp)
+		}
+	}
+}
+
+// TestUnmarshalDoc_MergeForward_FutureFields covers the post-indexer-bump
+// shape where msgs[].from and msgs[].timestamp are populated. Both fields
+// flow through to buildInnerMessages → InnerMessage.SenderID / SentAt.
+func TestUnmarshalDoc_MergeForward_FutureFields(t *testing.T) {
+	src := `{
+	  "messageId": 7,
+	  "channelId": "g",
+	  "timestamp": 1717000000,
+	  "payload": {
+	    "type": 11,
+	    "mergeForward": {
+	      "childCount": 1,
+	      "msgs": [
+	        {"messageId": 99, "type": 1, "searchText": "hi",
+	         "from": "u_alice", "timestamp": 1717000099}
+	      ]
+	    }
+	  }
+	}`
+	var doc Doc
+	if err := json.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	m := doc.Payload.MergeForward.Msgs[0]
+	if m.From != "u_alice" {
+		t.Errorf("from: got %q", m.From)
+	}
+	if m.Timestamp != 1717000099 {
+		t.Errorf("timestamp: got %d", m.Timestamp)
+	}
+}
+
+// TestBuildInnerMessages_FullShape exercises the full forward-card mapping
+// once msgs[].from / msgs[].timestamp are populated. Names are NOT filled
+// here — that's senderJoin's job; this test asserts the projection only.
+func TestBuildInnerMessages_FullShape(t *testing.T) {
+	tp := payloadTypeMergeForward
+	p := &Payload{
+		Type: &tp,
+		MergeForward: &MergeForwardPayload{
+			ChildCount: 2,
+			Msgs: []MergeForwardMsg{
+				{MessageID: 100, Type: 1, SearchText: "hello", From: "u1", Timestamp: 1717000000},
+				{MessageID: 101, Type: 8, SearchText: "doc.pdf", From: "u2", Timestamp: 1717000060},
+			},
+		},
+	}
+	inner := buildInnerMessages(p)
+	if len(inner) != 2 {
+		t.Fatalf("len: got %d", len(inner))
+	}
+	if inner[0].MessageID != "100" {
+		t.Errorf("messageId[0]: got %q", inner[0].MessageID)
+	}
+	if inner[0].Type != 1 {
+		t.Errorf("type[0]: got %d", inner[0].Type)
+	}
+	if inner[0].SearchText != "hello" {
+		t.Errorf("searchText[0]: got %q", inner[0].SearchText)
+	}
+	if inner[0].SenderID != "u1" {
+		t.Errorf("senderId[0]: got %q", inner[0].SenderID)
+	}
+	if inner[0].SenderName != "" {
+		t.Errorf("senderName must be unset until senderJoin: got %q", inner[0].SenderName)
+	}
+	if inner[0].SentAt == "" {
+		t.Errorf("sentAt[0] must be populated when timestamp>0")
+	}
+	if inner[1].MessageID != "101" || inner[1].SenderID != "u2" {
+		t.Errorf("msg[1]: %+v", inner[1])
+	}
+}
+
+// TestBuildInnerMessages_PartialFields covers the contract-v0 shape where
+// msgs[].from / msgs[].timestamp are absent — the API must omit
+// sender_id / sent_at entirely (omitempty + empty zero values).
+func TestBuildInnerMessages_PartialFields(t *testing.T) {
+	p := &Payload{
+		MergeForward: &MergeForwardPayload{
+			Msgs: []MergeForwardMsg{
+				{MessageID: 42, Type: 1, SearchText: "hi"},
+			},
+		},
+	}
+	inner := buildInnerMessages(p)
+	if len(inner) != 1 {
+		t.Fatalf("len: got %d", len(inner))
+	}
+	if inner[0].SenderID != "" {
+		t.Errorf("sender_id must be empty for partial doc: got %q", inner[0].SenderID)
+	}
+	if inner[0].SentAt != "" {
+		t.Errorf("sent_at must be empty when timestamp=0: got %q", inner[0].SentAt)
+	}
+	// Wire-level omitempty: the JSON form must not emit these keys.
+	out, err := json.Marshal(inner[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	wire := string(out)
+	for _, k := range []string{`"sender_id"`, `"sender_name"`, `"sent_at"`} {
+		if strings.Contains(wire, k) {
+			t.Errorf("partial-shape wire form must omit %s, got %s", k, wire)
+		}
+	}
+}
+
+// TestBuildInnerMessages_GuardClauses: returns nil for any non-forward shape
+// or empty msgs[] so the response field is omitted entirely (omitempty).
+func TestBuildInnerMessages_GuardClauses(t *testing.T) {
+	if got := buildInnerMessages(nil); got != nil {
+		t.Errorf("nil payload: got %+v", got)
+	}
+	if got := buildInnerMessages(&Payload{}); got != nil {
+		t.Errorf("non-forward payload: got %+v", got)
+	}
+	if got := buildInnerMessages(&Payload{MergeForward: &MergeForwardPayload{}}); got != nil {
+		t.Errorf("empty msgs[]: got %+v", got)
+	}
 }
 
 func TestUnmarshalDoc_Image(t *testing.T) {

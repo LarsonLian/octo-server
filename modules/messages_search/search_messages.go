@@ -13,16 +13,17 @@ import (
 
 // MessageHit is the response shape per A doc §2.1.
 type MessageHit struct {
-	MessageID       string        `json:"message_id"`
-	MessageSeq      int64         `json:"message_seq"`
-	MessageKind     string        `json:"message_kind"`
-	Snippet         string        `json:"snippet,omitempty"`
-	SenderID        string        `json:"sender_id"`
-	SenderName      string        `json:"sender_name,omitempty"`
-	SenderAvatarURL string        `json:"sender_avatar_url,omitempty"`
-	SentAt          string        `json:"sent_at"`
-	OuterPreview    *OuterPreview `json:"outer_preview,omitempty"`
-	ChannelID       string        `json:"channel_id"`
+	MessageID       string         `json:"message_id"`
+	MessageSeq      int64          `json:"message_seq"`
+	MessageKind     string         `json:"message_kind"`
+	Snippet         string         `json:"snippet,omitempty"`
+	SenderID        string         `json:"sender_id"`
+	SenderName      string         `json:"sender_name,omitempty"`
+	SenderAvatarURL string         `json:"sender_avatar_url,omitempty"`
+	SentAt          string         `json:"sent_at"`
+	OuterPreview    *OuterPreview  `json:"outer_preview,omitempty"`
+	InnerMessages   []InnerMessage `json:"inner_messages,omitempty"`
+	ChannelID       string         `json:"channel_id"`
 }
 
 func init() {
@@ -173,7 +174,10 @@ func buildSearchMessagesHighlight() *elastic.Highlight {
 }
 
 // buildMessageHits maps the OS hits into the API response shape and joins
-// sender display name + avatar in a single batch.
+// sender display name + avatar in a single batch. The batch covers both the
+// outer message sender and any inner_messages[].sender_id (forward children),
+// so a single page incurs at most one MySQL round-trip for names regardless of
+// how many forward cards it contains.
 func (h *Handler) buildMessageHits(ctx context.Context, hits []*elastic.SearchHit, req SearchMessagesReq, loginUID string) []MessageHit {
 	if len(hits) == 0 {
 		return []MessageHit{}
@@ -187,8 +191,14 @@ func (h *Handler) buildMessageHits(ctx context.Context, hits []*elastic.SearchHi
 			continue
 		}
 		hl := map[string][]string(hit.Highlight)
-		items = append(items, h.singleMessageHit(doc, req.ChannelID, hl))
-		senderIDs = append(senderIDs, doc.From)
+		mh := h.singleMessageHit(doc, req.ChannelID, hl)
+		senderIDs = append(senderIDs, mh.SenderID)
+		for _, im := range mh.InnerMessages {
+			if im.SenderID != "" {
+				senderIDs = append(senderIDs, im.SenderID)
+			}
+		}
+		items = append(items, mh)
 	}
 
 	if len(items) == 0 {
@@ -198,6 +208,11 @@ func (h *Handler) buildMessageHits(ctx context.Context, hits []*elastic.SearchHi
 	for i := range items {
 		items[i].SenderName = join.Names[items[i].SenderID]
 		items[i].SenderAvatarURL = join.Avatars[items[i].SenderID]
+		for j := range items[i].InnerMessages {
+			if uid := items[i].InnerMessages[j].SenderID; uid != "" {
+				items[i].InnerMessages[j].SenderName = join.Names[uid]
+			}
+		}
 	}
 	return items
 }
@@ -207,13 +222,14 @@ func (h *Handler) buildMessageHits(ctx context.Context, hits []*elastic.SearchHi
 // standing up a full search loop, and so search_all can reuse it.
 func (h *Handler) singleMessageHit(doc Doc, reqChannelID string, hl map[string][]string) MessageHit {
 	return MessageHit{
-		MessageID:    strconv.FormatInt(doc.MessageID, 10),
-		MessageSeq:   int64(doc.MessageSeq),
-		MessageKind:  classifyKind(doc.Payload),
-		Snippet:      pickSnippet(hl),
-		SenderID:     doc.From,
-		SentAt:       msToRFC3339(doc.Timestamp),
-		OuterPreview: buildOuterPreview(doc.Payload),
-		ChannelID:    encodeChannelID(reqChannelID),
+		MessageID:     strconv.FormatInt(doc.MessageID, 10),
+		MessageSeq:    int64(doc.MessageSeq),
+		MessageKind:   classifyKind(doc.Payload),
+		Snippet:       pickSnippet(hl),
+		SenderID:      doc.From,
+		SentAt:        msToRFC3339(doc.Timestamp),
+		OuterPreview:  buildOuterPreview(doc.Payload),
+		InnerMessages: buildInnerMessages(doc.Payload),
+		ChannelID:     encodeChannelID(reqChannelID),
 	}
 }

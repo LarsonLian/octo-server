@@ -1,5 +1,7 @@
 package messages_search
 
+import "strconv"
+
 // Doc mirrors the OpenSearch `_source` shape produced by
 // wukongim-message-indexer (see indexer-os-changes.md §3.2). We only
 // deserialise structured `payload.*` subobjects — `payloadRaw` is
@@ -86,10 +88,17 @@ type MergeForwardPayload struct {
 	Msgs       []MergeForwardMsg `json:"msgs,omitempty"`
 }
 
+// MergeForwardMsg is the per-child projection from `payload.mergeForward.msgs[]`.
+// `from` and `timestamp` are forward-compat fields the indexer will start
+// writing in a follow-up release; both are omitempty so older OS docs (which
+// only carry messageId/type/searchText) deserialise to a zero value and the
+// API can degrade `sender_id` / `sent_at` to omitted on the wire.
 type MergeForwardMsg struct {
 	MessageID  int64  `json:"messageId"`
 	Type       int    `json:"type"`
 	SearchText string `json:"searchText,omitempty"`
+	From       string `json:"from,omitempty"`
+	Timestamp  int64  `json:"timestamp,omitempty"`
 }
 
 // Payload type IDs (mirroring dmwork-lib `common/msg.go::ContentType`). Kept
@@ -143,4 +152,46 @@ func payloadType(p *Payload) int {
 		return 0
 	}
 	return *p.Type
+}
+
+// InnerMessage is the per-child shape surfaced under MessageHit.inner_messages
+// for forward (type=11) hits. SenderName is filled in after senderJoin runs;
+// SenderID / SentAt are omitted when the indexer hasn't yet populated the
+// underlying msgs[].from / msgs[].timestamp fields.
+type InnerMessage struct {
+	MessageID  string `json:"message_id"`
+	Type       int    `json:"type"`
+	SearchText string `json:"search_text,omitempty"`
+	SenderID   string `json:"sender_id,omitempty"`
+	SenderName string `json:"sender_name,omitempty"`
+	SentAt     string `json:"sent_at,omitempty"`
+}
+
+// buildInnerMessages projects the forward card's child messages onto the API
+// shape. Returns nil for non-forward payloads or empty msgs[] so the response
+// field is omitted entirely (omitempty) rather than emitting `[]`.
+//
+// `sender_name` is left empty here — the caller batches all child uids into
+// the page's senderJoin and fills the names afterwards.
+func buildInnerMessages(p *Payload) []InnerMessage {
+	if p == nil || p.MergeForward == nil {
+		return nil
+	}
+	if len(p.MergeForward.Msgs) == 0 {
+		return nil
+	}
+	out := make([]InnerMessage, 0, len(p.MergeForward.Msgs))
+	for _, m := range p.MergeForward.Msgs {
+		im := InnerMessage{
+			MessageID:  strconv.FormatInt(m.MessageID, 10),
+			Type:       m.Type,
+			SearchText: m.SearchText,
+			SenderID:   m.From,
+		}
+		if m.Timestamp > 0 {
+			im.SentAt = msToRFC3339(m.Timestamp)
+		}
+		out = append(out, im)
+	}
+	return out
 }

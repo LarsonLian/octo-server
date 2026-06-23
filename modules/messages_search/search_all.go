@@ -190,6 +190,17 @@ func (h *Handler) buildSearchAllHits(ctx context.Context, hits []*elastic.Search
 		entry := h.singleSearchAllHit(doc, req, hl)
 		items = append(items, entry)
 		senderIDs = append(senderIDs, doc.From)
+		// Forward children: their senders need the same batched name lookup
+		// as the outer hit so a 9-msg forward card doesn't trigger 9 extra
+		// DB round-trips. payloadType=11 only — file hits never carry
+		// inner_messages.
+		if entry.Message != nil {
+			for _, im := range entry.Message.InnerMessages {
+				if im.SenderID != "" {
+					senderIDs = append(senderIDs, im.SenderID)
+				}
+			}
+		}
 	}
 
 	if len(items) == 0 {
@@ -202,6 +213,11 @@ func (h *Handler) buildSearchAllHits(ctx context.Context, hits []*elastic.Search
 			if items[i].Message != nil {
 				items[i].Message.SenderName = join.Names[items[i].Message.SenderID]
 				items[i].Message.SenderAvatarURL = join.Avatars[items[i].Message.SenderID]
+				for j := range items[i].Message.InnerMessages {
+					if uid := items[i].Message.InnerMessages[j].SenderID; uid != "" {
+						items[i].Message.InnerMessages[j].SenderName = join.Names[uid]
+					}
+				}
 			}
 		case "file":
 			if items[i].File != nil {

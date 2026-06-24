@@ -113,6 +113,15 @@ const (
 	payloadTypeFile         = 8
 	payloadTypeMergeForward = 11
 	payloadTypeCmd          = 99
+
+	// System message range per indexer spec
+	// (~/Projects/_refs/wukongim-message-indexer/docs/specs/2026-06-04-v1.6-decisions.md §2.2):
+	// payload.type 1000-2000 covers FriendApply / Group* / Hotline* / Tip etc.
+	// These are control-plane events emitted by WuKongIM and MUST be hard-filtered
+	// from /_search_messages (the legacy `_search` surface) per the indexer's
+	// "搜索硬过滤" contract.
+	payloadTypeSystemMin = 1000
+	payloadTypeSystemMax = 2000
 )
 
 // classifyKind decides the response `message_kind` for /v1/messages/_search.

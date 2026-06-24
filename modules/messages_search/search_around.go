@@ -150,10 +150,11 @@ func (h *Handler) searchAround(c *wkhttp.Context) {
 // out of Space, or filtered out; (hit, nil) when the anchor is visible.
 //
 // The lookup applies the SAME structural negations the window query uses
-// (revoked + cmd exclusion) so the anchor is held to the exact visibility
-// contract of the stream it anchors: a command message (payload.type=99) is
-// never a valid anchor, mirroring buildAroundDSL's MustNot(cmd). filterVisible
-// then layers the MySQL-resident gates (revoke/delete/offset/visibles) on top.
+// (revoked + system-message hard filter) so the anchor is held to the exact
+// visibility contract of the stream it anchors: a command message
+// (payload.type=99) or a system event (payload.type ∈ [1000, 2000]) is never
+// a valid anchor, mirroring buildAroundDSL. filterVisible then layers the
+// MySQL-resident gates (revoke/delete/offset/visibles) on top.
 func (h *Handler) fetchAnchor(ctx context.Context, client *elastic.Client, req SearchAroundReq, normID, spaceID, loginUID string, anchorID int64) (*elastic.SearchHit, error) {
 	b := buildAnchorDSL(req, normID, spaceID, anchorID)
 
@@ -225,10 +226,11 @@ func (h *Handler) aroundDirection(ctx context.Context, client *elastic.Client, r
 }
 
 // buildAnchorDSL builds the single-doc anchor lookup. It applies the same
-// structural visibility negations as the window (revoked + cmd exclusion) plus
-// the Space scope, so the anchor is held to the exact contract of the stream it
-// anchors — a command (payload.type=99) or revoked doc can never be a valid
-// anchor, mirroring buildAroundDSL. MySQL-resident gates are layered on top by
+// structural visibility negations as the window (revoked + system-message hard
+// filter) plus the Space scope, so the anchor is held to the exact contract of
+// the stream it anchors — a command (payload.type=99) or system event
+// (payload.type ∈ [1000, 2000]) or revoked doc can never be a valid anchor,
+// mirroring buildAroundDSL. MySQL-resident gates are layered on top by
 // filterVisible in fetchAnchor.
 func buildAnchorDSL(req SearchAroundReq, normChannelID, spaceID string, anchorID int64) *elastic.BoolQuery {
 	b := elastic.NewBoolQuery()
@@ -236,20 +238,21 @@ func buildAnchorDSL(req SearchAroundReq, normChannelID, spaceID string, anchorID
 	b.Filter(elastic.NewTermQuery("messageId", anchorID))
 	applySpaceIDScope(b, req.ChannelType, spaceID)
 	b.MustNot(elastic.NewTermQuery("revoked", true))
-	b.MustNot(elastic.NewTermQuery("payload.type", payloadTypeCmd))
+	applySystemMessageHardFilter(b)
 	return b
 }
 
-// buildAroundDSL is the window query (no keyword, no payload.type filter): the
-// full visible message stream of the channel, scoped to Space for p2p, with the
-// standard revoked/cmd negations. The anchor itself is excluded so it is not
-// duplicated into either wing.
+// buildAroundDSL is the window query (no keyword, no payload-type whitelist):
+// the full visible message stream of the channel, scoped to Space for p2p, with
+// the standard revoked negation and the indexer §2.4 system-message hard
+// filter. The anchor itself is excluded so it is not duplicated into either
+// wing.
 func buildAroundDSL(req SearchAroundReq, normChannelID, spaceID string) elastic.Query {
 	b := elastic.NewBoolQuery()
 	applyChannelAndRevoked(b, normChannelID)
 	applySpaceIDScope(b, req.ChannelType, spaceID)
 	addCommonFilters(b, req.Filters)
-	b.MustNot(elastic.NewTermQuery("payload.type", payloadTypeCmd))
+	applySystemMessageHardFilter(b)
 	return b
 }
 

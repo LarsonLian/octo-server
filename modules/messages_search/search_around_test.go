@@ -168,3 +168,88 @@ func TestBuildAnchorDSL_P2PSpaceScoped(t *testing.T) {
 		t.Fatalf("p2p anchor DSL must be Space-scoped, got:\n%s", body)
 	}
 }
+
+// assertSystemMessageHardFilter walks a query's bool.must_not and reports
+// whether both the term(payload.type=99) and range(payload.type ∈ [1000,2000])
+// clauses are present — the indexer §2.4 hard-filter contract.
+func assertSystemMessageHardFilter(t *testing.T, q interface {
+	Source() (any, error)
+}) {
+	t.Helper()
+	src, err := q.Source()
+	if err != nil {
+		t.Fatalf("Source(): %v", err)
+	}
+	raw, _ := json.Marshal(src)
+	var normalized map[string]any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	boolNode, ok := normalized["bool"].(map[string]any)
+	if !ok {
+		t.Fatalf("query has no bool node: %s", raw)
+	}
+	rawMN, ok := boolNode["must_not"]
+	if !ok {
+		t.Fatalf("bool has no must_not: %s", raw)
+	}
+	var mustNot []any
+	switch v := rawMN.(type) {
+	case []any:
+		mustNot = v
+	case map[string]any:
+		mustNot = []any{v}
+	default:
+		t.Fatalf("must_not has unexpected shape %T: %s", rawMN, raw)
+	}
+	var seenCmd, seenRange bool
+	for _, clause := range mustNot {
+		m, ok := clause.(map[string]any)
+		if !ok {
+			continue
+		}
+		if term, ok := m["term"].(map[string]any); ok {
+			if pt, ok := term["payload.type"].(float64); ok && int(pt) == payloadTypeCmd {
+				seenCmd = true
+			}
+		}
+		if rng, ok := m["range"].(map[string]any); ok {
+			if pt, ok := rng["payload.type"].(map[string]any); ok {
+				lo, loOK := pt["from"].(float64)
+				hi, hiOK := pt["to"].(float64)
+				incLo, _ := pt["include_lower"].(bool)
+				incHi, _ := pt["include_upper"].(bool)
+				if loOK && hiOK && int(lo) == payloadTypeSystemMin && int(hi) == payloadTypeSystemMax && incLo && incHi {
+					seenRange = true
+				}
+			}
+		}
+	}
+	if !seenCmd {
+		t.Errorf("must_not missing term payload.type=%d in:\n%s", payloadTypeCmd, raw)
+	}
+	if !seenRange {
+		t.Errorf("must_not missing range payload.type [%d,%d] in:\n%s", payloadTypeSystemMin, payloadTypeSystemMax, raw)
+	}
+}
+
+// TestBuildAroundDSL_FiltersSystemMessages pins the indexer §2.4 hard-filter
+// contract for the around window query: it must exclude payload.type=99 (Cmd)
+// AND payload.type ∈ [1000, 2000] (FriendApply..Tip). Companion to the
+// _search_messages regression — without this the around window leaks
+// GroupCreate / Tip / FriendApply system events.
+func TestBuildAroundDSL_FiltersSystemMessages(t *testing.T) {
+	req := SearchAroundReq{ChannelType: channelTypeGroup, ChannelID: "G1"}
+	assertSystemMessageHardFilter(t, buildAroundDSL(req, "G1", "").(interface {
+		Source() (any, error)
+	}))
+}
+
+// TestBuildAnchorDSL_FiltersSystemMessages pins the same §2.4 contract on the
+// anchor lookup: a system event must not be a valid anchor (cross-page
+// disclosure oracle would otherwise emit a NOT_FOUND that depends on whether
+// the system event exists for the channel).
+func TestBuildAnchorDSL_FiltersSystemMessages(t *testing.T) {
+	req := SearchAroundReq{ChannelType: channelTypeGroup, ChannelID: "G1"}
+	assertSystemMessageHardFilter(t, buildAnchorDSL(req, "G1", "", 42))
+}

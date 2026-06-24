@@ -61,6 +61,33 @@ func applyChannelAndRevoked(b *elastic.BoolQuery, normChannelID string) {
 	b.MustNot(elastic.NewTermQuery("revoked", true))
 }
 
+// applySystemMessageHardFilter layers the indexer-spec §2.4 "搜索硬过滤"
+// contract for control-plane / system payload types onto a bool query. Per
+// ~/Projects/_refs/wukongim-message-indexer/docs/specs/2026-06-04-v1.6-decisions.md §2.4:
+//
+//	must_not:
+//	  - { term:  { payload.type: 99 } }                            # Cmd
+//	  - { range: { payload.type: { gte: 1000, lte: 2000 } } }      # FriendApply..Tip
+//
+// Both /_search_messages (the legacy keyword/browse surface) and
+// /_search_around (anchor + window) need this — without it the empty-keyword
+// browse path and the around window both surface GroupCreate / Tip /
+// FriendApply events that the user never authored.
+//
+// Scope: this helper covers ONLY the payload.type negations. The `revoked`
+// negation is a separate concern (message-level state, not control-plane
+// type) and lives in applyChannelAndRevoked; search/browse paths should call
+// both.
+//
+// Note (RTC 9989-9999): the spec also reserves a Webhook/RTC range that is
+// not yet pinned by the indexer owners. Once §2.3 is finalised this helper
+// should add the matching `must_not` clause so both endpoints pick it up at
+// the same time.
+func applySystemMessageHardFilter(b *elastic.BoolQuery) {
+	b.MustNot(elastic.NewTermQuery("payload.type", payloadTypeCmd))
+	b.MustNot(elastic.NewRangeQuery("payload.type").Gte(payloadTypeSystemMin).Lte(payloadTypeSystemMax))
+}
+
 // applySpaceIDScope layers the per-Space term filter onto the bool query for
 // p2p (channel_type=1) search only. Group and thread searches are already
 // space-scoped at the channel level (channel_id encodes the parent space) so

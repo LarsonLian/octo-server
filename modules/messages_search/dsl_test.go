@@ -68,6 +68,10 @@ func TestBuildSearchMessagesDSL_Shape(t *testing.T) {
 		`"channelId":"groupNo"`,
 		`"revoked":true`,
 		`"payload.type":99`,
+		`"from":1000`,
+		`"to":2000`,
+		`"include_lower":true`,
+		`"include_upper":true`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("DSL missing %q in:\n%s", want, body)
@@ -92,10 +96,166 @@ func TestBuildSearchMessagesDSL_NoKeywordSkipsMultiMatch(t *testing.T) {
 		`"channelId":"groupNo"`,
 		`"revoked":true`,
 		`"payload.type":99`,
+		`"from":1000`,
+		`"to":2000`,
+		`"include_lower":true`,
+		`"include_upper":true`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("empty-keyword DSL missing %q in:\n%s", want, body)
 		}
+	}
+}
+
+// TestBuildSearchMessagesDSL_FiltersSystemMessages pins the indexer §2.2
+// "搜索硬过滤" contract: payload.type 1000-2000 (FriendApply / Group* / Hotline*
+// / Tip) MUST be excluded from /_search_messages, alongside the existing
+// type==99 (Cmd) exclusion. Regression test for the empty-keyword browse path
+// leaking "GroupCreate" / "GroupMemberAdd" system events to the client.
+func TestBuildSearchMessagesDSL_FiltersSystemMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		keyword string
+	}{
+		{"keyword", "hello"},
+		{"browse", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := SearchMessagesReq{
+				ChannelType: channelTypeGroup,
+				ChannelID:   "groupNo",
+				Keyword:     tc.keyword,
+			}
+			q, _ := buildSearchMessagesDSL(context.Background(), fallbackTestAnalyzer(), true, req, "groupNo", "")
+			src, err := q.(interface{ Source() (any, error) }).Source()
+			if err != nil {
+				t.Fatalf("Source(): %v", err)
+			}
+			b, _ := json.Marshal(src)
+			body := string(b)
+
+			// JSON-roundtrip so all numeric values normalize to float64 and
+			// nested objects to map[string]any, regardless of what concrete
+			// Go types elastic.BoolQuery.Source() chose to emit.
+			var normalized map[string]any
+			if err := json.Unmarshal(b, &normalized); err != nil {
+				t.Fatalf("normalize: %v", err)
+			}
+			boolNode, ok := normalized["bool"].(map[string]any)
+			if !ok {
+				t.Fatalf("query has no bool node: %s", body)
+			}
+			rawMN, ok := boolNode["must_not"]
+			if !ok {
+				t.Fatalf("bool has no must_not: %s", body)
+			}
+			var mustNot []any
+			switch v := rawMN.(type) {
+			case []any:
+				mustNot = v
+			case map[string]any:
+				mustNot = []any{v}
+			default:
+				t.Fatalf("must_not has unexpected shape %T: %s", rawMN, body)
+			}
+
+			var seenCmd, seenRange bool
+			for _, clause := range mustNot {
+				m, ok := clause.(map[string]any)
+				if !ok {
+					continue
+				}
+				if term, ok := m["term"].(map[string]any); ok {
+					if pt, ok := term["payload.type"].(float64); ok && int(pt) == payloadTypeCmd {
+						seenCmd = true
+					}
+				}
+				if rng, ok := m["range"].(map[string]any); ok {
+					if pt, ok := rng["payload.type"].(map[string]any); ok {
+						// elastic encodes Gte/Lte as from/to + include_lower/include_upper.
+						lo, loOK := pt["from"].(float64)
+						hi, hiOK := pt["to"].(float64)
+						incLo, _ := pt["include_lower"].(bool)
+						incHi, _ := pt["include_upper"].(bool)
+						if loOK && hiOK && int(lo) == payloadTypeSystemMin && int(hi) == payloadTypeSystemMax && incLo && incHi {
+							seenRange = true
+						}
+					}
+				}
+			}
+			if !seenCmd {
+				t.Errorf("must_not missing term payload.type=%d in:\n%s", payloadTypeCmd, body)
+			}
+			if !seenRange {
+				t.Errorf("must_not missing range payload.type [%d,%d] in:\n%s", payloadTypeSystemMin, payloadTypeSystemMax, body)
+			}
+		})
+	}
+}
+
+// TestApplySystemMessageHardFilter pins the shared helper that both
+// /_search_messages and /_search_around use to satisfy the indexer §2.4
+// "搜索硬过滤" contract. Empty bool query in, two must_not clauses out:
+// term(payload.type=99) and range(payload.type ∈ [1000, 2000]).
+func TestApplySystemMessageHardFilter(t *testing.T) {
+	b := elastic.NewBoolQuery()
+	applySystemMessageHardFilter(b)
+
+	src, err := b.Source()
+	if err != nil {
+		t.Fatalf("Source(): %v", err)
+	}
+	raw, _ := json.Marshal(src)
+	var normalized map[string]any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	boolNode, ok := normalized["bool"].(map[string]any)
+	if !ok {
+		t.Fatalf("query has no bool node: %s", raw)
+	}
+	rawMN, ok := boolNode["must_not"]
+	if !ok {
+		t.Fatalf("bool has no must_not: %s", raw)
+	}
+	var mustNot []any
+	switch v := rawMN.(type) {
+	case []any:
+		mustNot = v
+	case map[string]any:
+		mustNot = []any{v}
+	default:
+		t.Fatalf("must_not has unexpected shape %T: %s", rawMN, raw)
+	}
+
+	var seenCmd, seenRange bool
+	for _, clause := range mustNot {
+		m, ok := clause.(map[string]any)
+		if !ok {
+			continue
+		}
+		if term, ok := m["term"].(map[string]any); ok {
+			if pt, ok := term["payload.type"].(float64); ok && int(pt) == payloadTypeCmd {
+				seenCmd = true
+			}
+		}
+		if rng, ok := m["range"].(map[string]any); ok {
+			if pt, ok := rng["payload.type"].(map[string]any); ok {
+				lo, loOK := pt["from"].(float64)
+				hi, hiOK := pt["to"].(float64)
+				incLo, _ := pt["include_lower"].(bool)
+				incHi, _ := pt["include_upper"].(bool)
+				if loOK && hiOK && int(lo) == payloadTypeSystemMin && int(hi) == payloadTypeSystemMax && incLo && incHi {
+					seenRange = true
+				}
+			}
+		}
+	}
+	if !seenCmd {
+		t.Errorf("must_not missing term payload.type=%d in:\n%s", payloadTypeCmd, raw)
+	}
+	if !seenRange {
+		t.Errorf("must_not missing range payload.type [%d,%d] in:\n%s", payloadTypeSystemMin, payloadTypeSystemMax, raw)
 	}
 }
 

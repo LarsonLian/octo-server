@@ -111,16 +111,30 @@ type pushPayloadReq struct {
 	Mention json.RawMessage `json:"mention,omitempty"`
 }
 
-// mentionReq 是 native 推送请求里的 @ 描述（对外契约）。刻意不暴露内部线协议的
-// humans/ais/entities 字段名：调用方只描述「@ 谁(uids) / @所有人(all) / @所有 AI(bots)」，
-// 由服务端 buildMention 翻译为 mention.{uids,humans,ais} 并做权限/成员校验。
-//   - Uids ：要 @ 的成员 UID（用户或 bot），去重后受上限约束，且必须是本群当前成员。
-//   - All  ：@所有人（真人广播），受 webhook 的 allow_mention_all 能力位约束。
-//   - Bots ：@所有 AI（bot 广播），受 webhook 的 allow_mention_bots 能力位约束。
+// mentionReq 是 native 推送请求里的 @ 描述（对外契约）。两个广播位刻意不暴露内部线协议的
+// humans/ais 字段名：调用方只写「@所有人(all) / @所有 AI(bots)」，由服务端 buildMention 翻译
+// 为 mention.{humans,ais} 并做能力位校验。Entities 则【直接以线协议字段名 entities 接收】——
+// 它是渲染层 [{uid,offset,length}]，本就是端上要消费的形态、无可翻译语义，服务端只做成员闸 +
+// 越界/锚点校验后原样透传（见 Entities 字段注释）。
+//   - Uids     ：要 @ 的成员 UID（用户或 bot），去重后受上限约束，且必须是本群当前成员。
+//   - All      ：@所有人（真人广播），受 webhook 的 allow_mention_all 能力位约束。
+//   - Bots     ：@所有 AI（bot 广播），受 webhook 的 allow_mention_bots 能力位约束。
+//   - Entities ：渲染层 @ 区间（详见字段注释）；定向渲染、不受广播能力位约束。
 type mentionReq struct {
 	Uids []string `json:"uids,omitempty"`
 	All  bool     `json:"all,omitempty"`
 	Bots bool     `json:"bots,omitempty"`
+	// Entities 是【渲染层】的 @ 区间（线协议 mention.entities：[{uid,offset,length}]），
+	// 与 uids（路由层）正交：调用方自带 content 文本与每个 @ 的 offset/length，服务端只校验
+	// 每条 entity 的 uid 是本群成员、offset/length 落在 content 的 UTF-16 码元范围内且 offset
+	// 处确为 '@'，合法者原样透传到线协议供端上权威渲染气泡（web 用 entities 精确绑定、Android
+	// 校验后保留、iOS 忽略改按位置解析）。offset/length 单位是 UTF-16 码元（= JS .length /
+	// Java/Kotlin String / NSString），不是字节、也不是 rune。
+	//
+	// 类型是 []json.RawMessage 以做【逐条】宽松解码：单条形状非法（如 offset 传字符串）只丢
+	// 该条，不连累其余 entity，也不影响 mention 的 uids/all/bots——与 decodeMention 的宽松
+	// 契约（malformed → 降级、不 400、不丢消息）一致。
+	Entities []json.RawMessage `json:"entities,omitempty"`
 }
 
 // webhookBlock 是富文本消息的单个有序块（对外契约）。字段刻意与 octo-lib

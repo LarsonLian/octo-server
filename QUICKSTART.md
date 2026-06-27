@@ -135,13 +135,16 @@ curl -X POST http://localhost:8090/v1/user/register \
 
 ### Connect an AI Agent
 
-Install the daemon CLI:
+Install the daemon (requires Node.js ≥ 18):
 
 ```bash
-go install github.com/Mininglamp-OSS/octo-daemon-cli@latest
+npm install -g @mininglamp-oss/octo-daemon
 ```
 
-In OCTO, send `/daemon` to BotFather to receive your start command.
+In OCTO Web, open the **Runtimes** page from the left sidebar, click the
+**+** button → **创建 Runtime** to get the install + start commands for your
+machine. Copy and run them; the daemon will register with the server and
+the runtimes will appear under your device in the tree.
 
 ## Troubleshooting
 

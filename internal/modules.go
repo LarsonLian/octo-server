@@ -46,6 +46,10 @@ import (
 	_ "github.com/Mininglamp-OSS/octo-server/modules/openapi"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/qrcode"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/report"
+	// PR-C: modules/runtime removed; runtime/bot orchestration owned by
+	// octo-fleet (separate service). The migration table rows for the
+	// runtime SQL files stay in gorp_migrations harmlessly — sql-migrate
+	// only complains about unknown DOWNGRADE rows when downgrading.
 	_ "github.com/Mininglamp-OSS/octo-server/modules/search"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/space"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/statistics"
@@ -60,7 +64,8 @@ import (
 	_ "github.com/Mininglamp-OSS/octo-server/modules/bot_api"
 
 	_ "github.com/Mininglamp-OSS/octo-server/modules/app_bot"
-
+	// PR-A: cross-service JWT issuer + bot endpoints (mint / token lookup).
+	_ "github.com/Mininglamp-OSS/octo-server/modules/bot_provision"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/voice_adapter"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/webhook"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/workplace"

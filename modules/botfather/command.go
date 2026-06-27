@@ -1117,3 +1117,21 @@ func randomHex(n int) (string, error) {
 	}
 	return hex.EncodeToString(bytes), nil
 }
+
+// deriveServiceURL takes the server URL (e.g. http://host:8090) and swaps
+// the port suffix to derive sibling-service URLs. Falls back to keeping the
+// hostname only if the URL doesn't end in a recognizable :port. Pure
+// best-effort — operators with non-default deployments should override.
+func deriveServiceURL(serverURL, newPortSuffix string) string {
+	// strip trailing :NNNN if present
+	for i := len(serverURL) - 1; i >= 0; i-- {
+		c := serverURL[i]
+		if c == ':' {
+			return serverURL[:i] + newPortSuffix
+		}
+		if c < '0' || c > '9' {
+			break
+		}
+	}
+	return serverURL + newPortSuffix
+}

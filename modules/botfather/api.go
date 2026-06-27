@@ -19,6 +19,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/botutil"
 	octoi18n "github.com/Mininglamp-OSS/octo-server/pkg/i18n"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
@@ -96,6 +97,13 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 
 	// Robot Apply API 端点（使用用户认证）
 	bf.setupApplyRoutes(r)
+
+	// Runtime onboarding (web session auth) — replaces the legacy
+	// BotFather `/daemon` IM command. Returns api_key (lazy-create) +
+	// server/fleet/matter URLs + pre-rendered install/start command
+	// strings for the web CreateRuntimeModal.
+	runtimeAPI := r.Group("/v1", bf.ctx.AuthMiddleware(r), appwkhttp.SharedUIDRateLimiter(r, bf.ctx))
+	runtimeAPI.GET("/runtime-onboarding", bf.runtimeOnboarding)
 
 	// 初始化BotFather系统用户（使用sync.Once确保只执行一次）
 	bf.initOnce.Do(func() {

@@ -4,8 +4,25 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 )
+
+// CacheKey 从内容因子构造**单射**的共享缓存 key：长度分帧（<len>:<part>），保证不同
+// 因子序列不会拼出同一个 key。所有头像端点（user/group/…）都应用本函数构造
+// GetOrRender 的 key，覆盖与各自 ETag 相同的因子。
+//
+// 注意：缓存 key **不能**用 ETag。ETag 是 32 位 CRC32 弱指纹，仅作 If-None-Match
+// 验证符；作进程级共享缓存身份会碰撞 → 跨实体串图（且文字因子用户可控/可伪造）。
+func CacheKey(parts ...string) string {
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(strconv.Itoa(len(p)))
+		b.WriteByte(':')
+		b.WriteString(p)
+	}
+	return b.String()
+}
 
 // 进程级共享头像缓存。所有头像端点(当前是 user 的 UserAvatar;未来 group 等任何
 // 加入按需渲染的端点)都经包级 GetOrRender 共用这一个 Cache 实例,从而:

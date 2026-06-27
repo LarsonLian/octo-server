@@ -318,6 +318,38 @@ func (d *DB) updateAvatar(avatar string, avatarVersion int64, groupNo string) er
 	return err
 }
 
+// updateAvatarCustom 更新自定义群头像文字/颜色与群版本（不触碰 is_upload_avatar：
+// 自定义文字/色仍是「默认头像」范畴，渲染时实时出图，不同于上传图片）。color 为
+// *int，nil → NULL（清除自定义色，回退按 group_no 派生）。text 为空串表示清除自定义
+// 文字（回退群名前 4 字）。
+// updateAvatarCustom 只更新本次实际提供的列：text 非 nil 时写 avatar_text，setColor
+// 为 true 时写 avatar_color（*int，nil → NULL 清除自定义色）；始终 bump version。
+// 列级更新避免「读-改-写」竞态——并发只改文字 / 只改色不会互相覆盖对方的列。
+func (d *DB) updateAvatarCustom(groupNo string, text *string, setColor bool, color *int, version int64) (int64, error) {
+	// updated_at 列是 DEFAULT CURRENT_TIMESTAMP 但**无** ON UPDATE，列级 UPDATE 不会自动
+	// 刷新，故显式写入，保证 GroupResp.updated_at 反映本次自定义头像变更。
+	setMap := map[string]interface{}{
+		"version":    version,
+		"updated_at": time.Now(),
+	}
+	if text != nil {
+		setMap["avatar_text"] = *text
+	}
+	if setColor {
+		setMap["avatar_color"] = color
+	}
+	// status 入 WHERE，与服务层读取时的 disband 守卫对称：读到「未解散」之后、写入之前群
+	// 被并发解散时，这里命中 0 行而非把自定义头像写到已解散的死行上（关闭 TOCTOU）。
+	// version 每次都是新 GenSeq 值，匹配行必然变更，故 RowsAffected 反映的是「是否命中未
+	// 解散的群」；调用方据 RowsAffected==0 返回 not-found/disbanded。
+	res, err := d.session.Update("group").SetMap(setMap).
+		Where("group_no=? AND status<>?", groupNo, GroupStatusDisband).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // QueryDetailWithGroupNo 查询群详情
 func (d *DB) QueryDetailWithGroupNo(groupNo string, uid string) (*DetailModel, error) {
 	var detailModel *DetailModel
@@ -461,13 +493,6 @@ func (d *DB) QueryMembersFirstNine(groupNo string) ([]*MemberModel, error) {
 	return memberModels, err
 }
 
-// QueryMembersFirstNineTx 事务内查询最先加入群聊的九位群成员
-func (d *DB) QueryMembersFirstNineTx(groupNo string, tx *dbr.Tx) ([]*MemberModel, error) {
-	var memberModels []*MemberModel
-	_, err := tx.Select("*").From("group_member").Where("group_no=? and is_deleted=0", groupNo).OrderDir("created_at", true).Limit(9).Load(&memberModels)
-	return memberModels, err
-}
-
 // QueryMembersFirstNineExclude 查询最先加入群聊的九位群成员 【excludeUIDs】为排除的用户
 func (d *DB) QueryMembersFirstNineExclude(groupNo string, excludeUIDs []string) ([]*MemberModel, error) {
 	if len(excludeUIDs) <= 0 {
@@ -492,13 +517,6 @@ func (d *DB) membersInFirstNine(groupNo string, uids []string) (bool, error) {
 func (d *DB) QueryMemberCount(groupNo string) (int64, error) {
 	var count int64
 	_, err := d.session.Select("count(*)").From("group_member").Where("group_no=? and is_deleted=0", groupNo).Load(&count)
-	return count, err
-}
-
-// QueryMemberCountTx queries member count within a transaction using FOR UPDATE to prevent concurrent bypass.
-func (d *DB) QueryMemberCountTx(groupNo string, tx *dbr.Tx) (int64, error) {
-	var count int64
-	_, err := tx.SelectBySql("SELECT count(*) FROM group_member WHERE group_no=? AND is_deleted=0 FOR UPDATE", groupNo).Load(&count)
 	return count, err
 }
 
@@ -544,13 +562,6 @@ func (d *DB) queryForbiddenExpirationTimeMembers(limit int64) ([]*MemberModel, e
 	return models, err
 }
 
-// 查询群头像是否已被群主更新过
-func (d *DB) queryGroupAvatarIsUpload(groupNo string) (int, error) {
-	var result int
-	err := d.session.Select("is_upload_avatar").From("`group`").Where("group_no=?", groupNo).LoadOne(&result)
-	return result, err
-}
-
 // 查询用户当天建群数量
 func (d *DB) querySameDayCreateCountWitUID(uid string, day string) (int, error) {
 	var count int
@@ -585,6 +596,8 @@ type Model struct {
 	Avatar                   string     // 群头像
 	AvatarVersion            int64      // 群头像对象版本，0 表示旧版稳定路径
 	IsUploadAvatar           int        // 群头像是否已经被用户上传
+	AvatarText               string     // 自定义群头像文字，空表示用群名前 4 字派生
+	AvatarColor              *int       // 自定义群头像色板下标，nil(NULL) 表示按 group_no 派生
 	Notice                   string     // 群公告
 	Creator                  string     // 创建者uid
 	Status                   int        // 群状态

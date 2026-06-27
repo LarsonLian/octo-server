@@ -83,6 +83,10 @@ const (
 	maxFontEmRatio    = 0.46
 	// baseFontEmRatio 是墨迹测量失败时的兜底字号（设计稿 32px 容器内 10px）。
 	baseFontEmRatio = 10.0 / 32.0
+
+	// groupCircleStrokeRatio 是群头像描边宽度相对圆直径的比例。设计稿头像约 31px
+	// 直径配 1px 描边；服务端输出 200px 后通常由客户端缩小展示，所以按直径比例绘制。
+	groupCircleStrokeRatio = 1.0 / 31.0
 )
 
 // Options 描述一次头像渲染。
@@ -155,6 +159,38 @@ func drawCircle(img *image.RGBA, c color.RGBA) {
 	}
 }
 
+// drawCircleFilledStroked 在 img 上绘制群头像专用圆：浅色填充 + 主题色描边。
+// img 应由调用方先铺白底；本函数只改圆内像素，圆外保持原底色。
+func drawCircleFilledStroked(img *image.RGBA, fill, stroke color.RGBA, strokeRatio float64) {
+	b := img.Bounds()
+	d := float64(b.Dx())
+	cx, cy := d/2, d/2
+	radius := d/2 - 1
+	strokeWidth := d * strokeRatio
+	if strokeWidth < 1 {
+		strokeWidth = 1
+	}
+	innerRadius := radius - strokeWidth
+	if innerRadius < 0 {
+		innerRadius = 0
+	}
+	radiusSq := radius * radius
+	innerRadiusSq := innerRadius * innerRadius
+	for y := 0; y < b.Dy(); y++ {
+		for x := 0; x < b.Dx(); x++ {
+			dx := float64(x) - cx + 0.5
+			dy := float64(y) - cy + 0.5
+			distSq := dx*dx + dy*dy
+			switch {
+			case distSq <= innerRadiusSq:
+				img.SetRGBA(x, y, fill)
+			case distSq <= radiusSq:
+				img.SetRGBA(x, y, stroke)
+			}
+		}
+	}
+}
+
 // fitFontPx 返回 text 在 size×size 画布上应使用的字号（像素）：在参考字号下
 // 测量墨迹包围盒，线性缩放到目标墨迹盒（maxInkWidthRatio × maxInkHeightRatio）
 // 内，再施加 maxFontEmRatio 硬上限。CJK 双字先触宽度约束（结果≈设计稿的
@@ -213,4 +249,119 @@ func drawCenteredText(img *image.RGBA, fnt *sfnt.Font, text string, size int) er
 	d.Dot = fixed.Point26_6{X: startX, Y: baselineY}
 	d.DrawString(text)
 	return nil
+}
+
+//go:embed icons/group-person-front.png
+var groupIconFrontData []byte
+
+//go:embed icons/group-person-back.png
+var groupIconBackData []byte
+
+var (
+	groupIconOnce     sync.Once
+	groupIconFrontImg image.Image
+	groupIconBackImg  image.Image
+	groupIconErr      error
+)
+
+func loadGroupIconMasks() (image.Image, image.Image, error) {
+	groupIconOnce.Do(func() {
+		groupIconFrontImg, groupIconErr = png.Decode(bytes.NewReader(groupIconFrontData))
+		if groupIconErr != nil {
+			return
+		}
+		groupIconBackImg, groupIconErr = png.Decode(bytes.NewReader(groupIconBackData))
+	})
+	return groupIconFrontImg, groupIconBackImg, groupIconErr
+}
+
+// RenderIcon 渲染「白底 + 浅底描边圆 + 双色群组图标」的 PNG，用于群名为空或
+// 无法取字时的兜底。style 来自群头像专用色板，不影响个人头像 Render。
+func RenderIcon(style GroupStyle) ([]byte, error) {
+	return renderIconSized(style, DefaultSize)
+}
+
+func renderIconSized(style GroupStyle, size int) ([]byte, error) {
+	if size <= 0 {
+		size = DefaultSize
+	}
+	front, back, err := loadGroupIconMasks()
+	if err != nil {
+		return nil, fmt.Errorf("avatarrender: decode group icon masks: %w", err)
+	}
+
+	big := size * supersample
+	canvas := image.NewRGBA(image.Rect(0, 0, big, big))
+	draw.Draw(canvas, canvas.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	drawCircleFilledStroked(canvas, style.Fill, style.Main, groupCircleStrokeRatio)
+
+	backTint := tintMask(back, style.IconBack)
+	frontTint := tintMask(front, style.Main)
+	xdraw.CatmullRom.Scale(canvas, canvas.Bounds(), backTint, backTint.Bounds(), xdraw.Over, nil)
+	xdraw.CatmullRom.Scale(canvas, canvas.Bounds(), frontTint, frontTint.Bounds(), xdraw.Over, nil)
+
+	out := image.NewRGBA(image.Rect(0, 0, size, size))
+	xdraw.CatmullRom.Scale(out, out.Bounds(), canvas, canvas.Bounds(), xdraw.Over, nil)
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, out); err != nil {
+		return nil, fmt.Errorf("avatarrender: encode png: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func tintMask(mask image.Image, c color.RGBA) *image.RGBA {
+	bounds := mask.Bounds()
+	out := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	if nm, ok := mask.(*image.NRGBA); ok {
+		// 快路径：直读 NRGBA.Pix，避免 mask.At() 每像素把颜色装箱进 color.Color
+		// 接口（800×800 mask ≈ 64 万次/张分配）。复刻 color.NRGBA.RGBA() 的预乘后
+		// max(r,g,b) 作为覆盖 alpha，输出与通用路径逐字节一致。
+		w, h := bounds.Dx(), bounds.Dy()
+		for y := 0; y < h; y++ {
+			si := nm.PixOffset(bounds.Min.X, bounds.Min.Y+y)
+			di := out.PixOffset(0, y)
+			for x := 0; x < w; x++ {
+				alpha := premulMax(uint32(nm.Pix[si]), uint32(nm.Pix[si+1]), uint32(nm.Pix[si+2]), uint32(nm.Pix[si+3]))
+				out.Pix[di] = c.R
+				out.Pix[di+1] = c.G
+				out.Pix[di+2] = c.B
+				out.Pix[di+3] = uint8(alpha >> 8)
+				si += 4
+				di += 4
+			}
+		}
+		return out
+	}
+	// 通用回退路径（非 NRGBA 解码结果）：行为与历史一致。
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, _ := mask.At(x, y).RGBA()
+			alpha := uint8(max16(r, g, b) >> 8)
+			out.SetRGBA(x-bounds.Min.X, y-bounds.Min.Y, color.RGBA{R: c.R, G: c.G, B: c.B, A: alpha})
+		}
+	}
+	return out
+}
+
+// premulMax 复刻 color.NRGBA.RGBA() 的「预乘 alpha 后取 max(r,g,b)」，返回 16-bit。
+// 用于从非预乘 NRGBA 字节直接求白色/灰度剪影的覆盖 alpha，避免接口装箱。
+func premulMax(r8, g8, b8, a8 uint32) uint32 {
+	r := r8 | r8<<8
+	r = r * a8 / 0xff
+	g := g8 | g8<<8
+	g = g * a8 / 0xff
+	b := b8 | b8<<8
+	b = b * a8 / 0xff
+	return max16(r, g, b)
+}
+
+func max16(a, b, c uint32) uint32 {
+	if b > a {
+		a = b
+	}
+	if c > a {
+		a = c
+	}
+	return a
 }

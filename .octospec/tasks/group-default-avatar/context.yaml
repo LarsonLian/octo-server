@@ -1,0 +1,43 @@
+---
+type: TaskContext
+slug: group-default-avatar
+timestamp: 2026-06-25T03:00:28Z
+---
+# Rules resolved for this task (read in full, followed).
+rules_injected:
+  - id: error-handling
+    tier: repo
+    load_bearing: true
+    why: |
+      groupReq gains avatar_text/avatar_color (wire-contract, additive/optional).
+      New param validation (avatar_color range, avatar_text length) must use
+      httperr.ResponseErrorL + a registered errcode — reuse the catch-all
+      ErrGroupRequestInvalid via respondGroupRequestInvalid(c, "field"); no new
+      code, so no i18n churn. avatarGet stays a binary endpoint (raw bytes /
+      status codes), out of the i18n envelope — unchanged this increment.
+  - id: space-isolation
+    tier: repo
+    load_bearing: true
+    why: |
+      groupCreate already runs under Space validation; this increment adds only
+      optional avatar fields and does NOT widen any WHERE clause, weaken Space
+      isolation, or change AuthMiddleware/openGroups boundaries.
+  - id: testing
+    tier: repo
+    load_bearing: false
+    why: |
+      New unit tests: GroupText (first-4 trunc, CJK/latin/mixed/invisible/empty),
+      ColorByIndex bounds, groupCreate avatar field round-trip. Setup via
+      testutil.NewTestServer + CleanAllTables.
+
+decisions:
+  - take first 4 visible runes of group name (avatarrender.GroupText), distinct
+    from IndividualText (last 2).
+  - custom text+color persisted (avatar_text VARCHAR(16) '', avatar_color TINYINT
+    -1 sentinel); rendered server-side in a later increment.
+  - reuse existing pkg/avatarrender palette (pixel-verified identical to the
+    group color enumeration); add ColorByIndex + PaletteSize accessors.
+  - avatar_color uses *int in groupReq to distinguish "absent" from index 0.
+  - group icon asset + exact custom palette values are placeholders this phase.
+
+increment: 1  # create API + data model (+ avatarrender helpers)

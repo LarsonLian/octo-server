@@ -12,14 +12,11 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
-	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/conversation_ext"
 	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/pushcache"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
-	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
 )
 
@@ -124,6 +121,8 @@ type IService interface {
 	RemoveUserFromGroupThreads(groupNo, uid, spaceID string)
 	// UpdateGroupInfo 更新群信息
 	UpdateGroupInfo(req *UpdateGroupInfoServiceReq) error
+	// UpdateGroupAvatarCustom 更新自定义群头像文字/颜色
+	UpdateGroupAvatarCustom(req *UpdateGroupAvatarCustomServiceReq) error
 }
 
 // Service Service
@@ -797,6 +796,8 @@ type GroupResp struct {
 	GroupType                GroupType `json:"group_type"`                  // 群类型
 	Category                 string    `json:"category"`                    // 群分类
 	Name                     string    `json:"name"`                        // 群名称
+	AvatarText               string    `json:"avatar_text"`                 // 自定义群头像文字（空=用群名前 4 字派生）
+	AvatarColor              *int      `json:"avatar_color"`                // 自定义群头像色板下标（null=按 group_no 派生）
 	Remark                   string    `json:"remark"`                      // 群备注
 	Notice                   string    `json:"notice"`                      // 群公告
 	Mute                     int       `json:"mute"`                        // 免打扰
@@ -841,6 +842,8 @@ func (g *GroupResp) from(model *DetailModel) *GroupResp {
 		GroupType:                GroupType(model.GroupType),
 		Category:                 model.Category,
 		Name:                     model.Name,
+		AvatarText:               model.AvatarText,
+		AvatarColor:              model.AvatarColor,
 		Notice:                   model.Notice,
 		Mute:                     model.Mute,
 		Top:                      model.Top,
@@ -883,6 +886,8 @@ func (g *GroupResp) fromModel(model *Model) *GroupResp {
 		GroupType:                GroupType(model.GroupType),
 		Category:                 model.Category,
 		Name:                     model.Name,
+		AvatarText:               model.AvatarText,
+		AvatarColor:              model.AvatarColor,
 		Notice:                   model.Notice,
 		Forbidden:                model.Forbidden,
 		Invite:                   model.Invite,
@@ -945,12 +950,14 @@ func GetGroupMdMaxSize() int {
 
 // CreateGroupServiceReq 创建群请求
 type CreateGroupServiceReq struct {
-	Creator    string   // 创建者 UID
-	Members    []string // 成员 UID 列表（不含创建者，Service 内部会自动加入）
-	Name       string   // 群名称（可为空，Service 会自动生成）
-	SpaceID    string   // Space ID（可为空）
-	BotUID     string   // Bot UID（可为空；非空时自动加入群并设为 bot_admin）
-	CategoryID string   // 群聊分组 ID（可为空；非空时自动设置创建者的 group_setting）
+	Creator     string   // 创建者 UID
+	Members     []string // 成员 UID 列表（不含创建者，Service 内部会自动加入）
+	Name        string   // 群名称（可为空，Service 会自动生成）
+	SpaceID     string   // Space ID（可为空）
+	BotUID      string   // Bot UID（可为空；非空时自动加入群并设为 bot_admin）
+	CategoryID  string   // 群聊分组 ID（可为空；非空时自动设置创建者的 group_setting）
+	AvatarText  string   // 自定义群头像文字（可为空；空=渲染时用群名前 4 字派生）
+	AvatarColor *int     // 自定义群头像色板下标（nil=渲染时按 group_no 派生）
 }
 
 // CreateGroupServiceResp 创建群响应
@@ -995,6 +1002,19 @@ type UpdateGroupInfoServiceReq struct {
 	OperatorName string  // 操作者名称
 	Name         *string // 新群名（nil 表示不更新）
 	Notice       *string // 新公告（nil 表示不更新）
+}
+
+// UpdateGroupAvatarCustomServiceReq 更新自定义群头像文字/颜色（二次弹窗保存）。
+type UpdateGroupAvatarCustomServiceReq struct {
+	GroupNo      string
+	OperatorUID  string
+	OperatorName string
+	// AvatarText：nil 表示不更新文字；非 nil（含 ""）表示设置，"" 即清除自定义文字（回退群名）。
+	AvatarText *string
+	// SetAvatarColor：是否更新颜色。为 true 时按 AvatarColor 设置：nil 清除（NULL，回退派生），
+	// 非 nil 为色板下标。为 false 时不动颜色。
+	SetAvatarColor bool
+	AvatarColor    *int
 }
 
 // ---------- Service method implementations ----------
@@ -1146,6 +1166,8 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 		AllowExternal:       1, // 向后兼容：默认允许外部成员
 		AllowNoMention:      1, // 向后兼容：默认允许群级免@
 		IsExternalGroup:     isExternalGroup,
+		AvatarText:          req.AvatarText,  // 空=渲染时回退群名前 4 字
+		AvatarColor:         req.AvatarColor, // nil=渲染时按 group_no 派生
 	}, tx)
 	if err != nil {
 		s.Error("insert group record failed", zap.Error(err))
@@ -1230,29 +1252,10 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 		}
 	}
 
-	// 生成群头像事件（事务内）
-	n := len(realMemberUIDs)
-	if n > 9 {
-		n = 9
-	}
-	avatarMembers := make([]string, n)
-	copy(avatarMembers, realMemberUIDs[:n])
-	groupAvatarEventID, err := beginAvatarUpdateEvent(s.ctx, s.db, groupNo, avatarMembers, nil, tx)
-	if err != nil {
-		tx.Rollback()
-		s.Error("begin group avatar update event failed", zap.Error(err))
-		return nil, err
-	}
-
 	// 提交事务
 	if err := tx.Commit(); err != nil {
 		s.Error("commit transaction failed", zap.Error(err))
 		return nil, errors.New("failed to commit transaction")
-	}
-
-	// 提交头像生成事件
-	if groupAvatarEventID != 0 {
-		s.ctx.EventCommit(groupAvatarEventID)
 	}
 
 	// 事务提交后设置 Bot 为 bot_admin
@@ -1768,17 +1771,6 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 		}
 	}
 
-	// 生成群头像更新事件（best-effort，不阻塞踢人）
-	var groupAvatarEventID int64
-	if len(removedUIDs) > 0 {
-		avatarEventID, avatarErr := beginAvatarUpdateEvent(s.ctx, s.db, req.GroupNo, nil, removedUIDs, tx)
-		if avatarErr != nil {
-			s.Error("begin group avatar update event failed", zap.Error(avatarErr))
-		} else {
-			groupAvatarEventID = avatarEventID
-		}
-	}
-
 	// 提交事务
 	if err := tx.Commit(); err != nil {
 		s.Error("commit transaction failed", zap.Error(err))
@@ -1788,11 +1780,6 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 	// 外部群标记发生变化时，通知成员刷新频道信息
 	if resetExternalGroup {
 		s.ctx.SendChannelUpdateToGroup(req.GroupNo)
-	}
-
-	// 提交头像生成事件
-	if groupAvatarEventID != 0 {
-		s.ctx.EventCommit(groupAvatarEventID)
 	}
 
 	// IM 操作（事务提交之后）
@@ -1940,64 +1927,52 @@ func (s *Service) UpdateGroupInfo(req *UpdateGroupInfoServiceReq) error {
 	return nil
 }
 
-// ---------- Service internal helpers (thread sync, no thread package import) ----------
-
-func contains(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
+// UpdateGroupAvatarCustom 更新自定义群头像文字/颜色（二次弹窗保存）。未提供的字段
+// 保持现值；落库后 bump 群版本并通知客户端刷新频道信息——头像 URL 稳定，客户端据此
+// 重新拉取，靠 avatarGet 的内容相关 ETag 取到新图。校验由 API 层完成。
+func (s *Service) UpdateGroupAvatarCustom(req *UpdateGroupAvatarCustomServiceReq) error {
+	if req.GroupNo == "" {
+		return errors.New("group_no is required")
 	}
-	return false
-}
-
-// beginAvatarUpdateEvent 在事务内创建群头像更新事件（公共逻辑）。
-// memberUIDs 非空时直接使用（新建群场景）；为空时从事务内查询当前成员。
-// excludeUIDs 用于过滤已删除但事务外仍可见的成员。
-// 返回 eventID（0 表示无需更新）和 error。
-func beginAvatarUpdateEvent(ctx *config.Context, db *DB, groupNo string, memberUIDs []string, excludeUIDs []string, tx *dbr.Tx) (int64, error) {
-	if ctx.Event == nil {
-		return 0, nil
+	if req.AvatarText == nil && !req.SetAvatarColor {
+		return errors.New("nothing to update")
 	}
 
-	// 新建群不需要检查 is_upload_avatar
-	if len(memberUIDs) == 0 {
-		isUpload, err := db.queryGroupAvatarIsUpload(groupNo)
-		if err != nil {
-			return 0, nil
-		}
-		if isUpload == 1 {
-			return 0, nil
-		}
-
-		members, err := db.QueryMembersFirstNineTx(groupNo, tx)
-		if err != nil {
-			return 0, nil
-		}
-		for _, m := range members {
-			if !contains(excludeUIDs, m.UID) {
-				memberUIDs = append(memberUIDs, m.UID)
-			}
-		}
-	}
-
-	if len(memberUIDs) == 0 {
-		return 0, nil
-	}
-
-	eventID, err := ctx.EventBegin(&wkevent.Data{
-		Event: event.GroupAvatarUpdate,
-		Type:  wkevent.CMD,
-		Data: &config.CMDGroupAvatarUpdateReq{
-			GroupNo: groupNo,
-			Members: memberUIDs,
-		},
-	}, tx)
+	groupModel, err := s.db.QueryWithGroupNo(req.GroupNo)
 	if err != nil {
-		return 0, fmt.Errorf("begin group avatar update event: %w", err)
+		s.Error("query group failed", zap.Error(err))
+		return errors.New("failed to query group")
 	}
-	return eventID, nil
+	if groupModel == nil || groupModel.Status == GroupStatusDisband {
+		return errors.New("group not found or disbanded")
+	}
+
+	version, err := s.ctx.GenSeq(common.GroupSeqKey)
+	if err != nil {
+		s.Error("generate group version failed", zap.Error(err))
+		return errors.New("failed to generate group version")
+	}
+	// 只更新本次实际提供的列（不读回未提供字段再整体写），避免「读-改-写」竞态：并发
+	// 「只改文字」与「只改色」不会互相覆盖。existence/disband 检查的读不回写，故无竞态。
+	// updateAvatarCustom 的 WHERE 带 status<>disband：若读到未解散之后、写入之前群被并发
+	// 解散，则命中 0 行——据此返回 not-found/disbanded，不把 version/通知误发到死行（关闭
+	// 上面 read-check 与本次 write 之间的 TOCTOU）。
+	affected, err := s.db.updateAvatarCustom(req.GroupNo, req.AvatarText, req.SetAvatarColor, req.AvatarColor, version)
+	if err != nil {
+		s.Error("update group avatar custom failed", zap.Error(err))
+		return errors.New("failed to update group avatar")
+	}
+	if affected == 0 {
+		return errors.New("group not found or disbanded")
+	}
+
+	// 通知客户端刷新频道信息 → 重新拉取头像。
+	s.ctx.SendChannelUpdateToGroup(req.GroupNo)
+
+	return nil
 }
+
+// ---------- Service internal helpers (thread sync, no thread package import) ----------
 
 // removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录、IM 订阅和置顶。
 // 委托给包级 removeUserFromGroupThreadsCleanup（见 thread_cleanup.go，Issue #27）。

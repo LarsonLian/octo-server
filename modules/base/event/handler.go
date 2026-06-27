@@ -1,15 +1,11 @@
 package event
 
 import (
-	"fmt"
 	"sync"
-	"time"
 
-	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/pool"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
-	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
 	"go.uber.org/zap"
 )
 
@@ -30,7 +26,6 @@ func (e *Event) registerHandlers() {
 		// GroupMemberAdd:             e.handleGroupMemberAddEvent,      // 群成员添加
 		GroupMemberRemove: e.handleGroupMemberRemoveEvent, // 群成员移除
 		GroupUpdate:       e.handleGroupUpdateEvent,       // 群更新
-		GroupAvatarUpdate: e.handleGroupAvatarUpdateEvent, // 群头像更新
 		// GroupMemberScanJoin:        e.handleGroupMemberScanJoin,      // 群扫码入群
 		GroupMemberTransferGrouper: e.handleGroupTransferGrouper,     // 群转让
 		GroupMemberInviteRequest:   e.handleGroupMemberInviteRequest, // 群成员邀请
@@ -159,73 +154,10 @@ func (e *Event) handleGroupMemberRemoveEvent(model *Model) {
 	}
 }
 
-// 处理群成头像更新事件
-func (e *Event) handleGroupAvatarUpdateEvent(model *Model) {
-
-	e.ctx.EventPool.Work <- &pool.Job{
-		Data: model,
-		JobFunc: func(id int64, data interface{}) {
-			var model = data.(*Model)
-			var req *config.CMDGroupAvatarUpdateReq
-			err := util.ReadJsonByByte([]byte(model.Data), &req)
-			if err != nil {
-				e.Error("解析JSON失败！", zap.Error(err), zap.String("data", model.Data))
-				return
-			}
-			state, err := e.db.queryGroupAvatarState(req.GroupNo)
-			if err != nil {
-				e.Error("查询群头像状态失败！", zap.String("groupNo", req.GroupNo), zap.Error(err))
-				return
-			}
-			if state == nil || !shouldComposeGroupAvatar(state.IsUploadAvatar) {
-				e.updateEventStatus(nil, model.VersionLock, model.Id)
-				return
-			}
-			// 组合群头像
-			downloadURLs := make([]string, 0)
-			for _, member := range req.Members {
-				if len(downloadURLs) >= 9 {
-					break
-				}
-				downloadURLs = append(downloadURLs, fmt.Sprintf("%s/users/%s/avatar?v=%d", e.ctx.GetConfig().External.APIBaseURL, member, time.Now().UnixNano()))
-			}
-			avatarVersion := avatarversion.New()
-			uploadPath := e.ctx.GetConfig().GetGroupAvatarFilePath(req.GroupNo, avatarVersion)
-			_, err = e.fileService.DownloadAndMakeCompose(uploadPath, downloadURLs)
-			if err != nil {
-				e.Error("组合群头像失败！", zap.String("groupNo", req.GroupNo), zap.Any("members", req.Members), zap.Error(err))
-				return
-			}
-			updated, err := e.db.updateGeneratedGroupAvatar(req.GroupNo, uploadPath, avatarVersion)
-			if err != nil {
-				e.Error("更新合成群头像版本失败！", zap.String("groupNo", req.GroupNo), zap.String("avatar", uploadPath), zap.Error(err))
-				return
-			}
-			if !updated {
-				e.updateEventStatus(nil, model.VersionLock, model.Id)
-				return
-			}
-			// 发送群头像更新命令
-			err = e.ctx.SendCMD(config.MsgCMDReq{
-				ChannelID:   req.GroupNo,
-				ChannelType: common.ChannelTypeGroup.Uint8(),
-				CMD:         common.CMDGroupAvatarUpdate,
-				Param: map[string]interface{}{
-					"group_no": req.GroupNo,
-				},
-			})
-			if err != nil {
-				e.Error("发送群头像更新命令失败！", zap.String("groupNo", req.GroupNo), zap.Any("members", req.Members), zap.Error(err))
-				return
-			}
-			e.updateEventStatus(err, model.VersionLock, model.Id)
-		},
-	}
-}
-
-func shouldComposeGroupAvatar(isUploadAvatar int) bool {
-	return isUploadAvatar != 1
-}
+// 群默认头像不再由「成员头像九宫格合成」异步生成（旧 handleGroupAvatarUpdateEvent）。
+// 现在 modules/group avatarGet 在请求时服务端渲染「色块圆 + 群名前 4 字 / 群组图标」，
+// 历史合成图不再被读取，故合成事件链路（含 GroupAvatarUpdate 事件、queryGroupAvatarState、
+// updateGeneratedGroupAvatar）已整体移除。
 
 // 群成员扫码加入
 func (e *Event) handleGroupMemberScanJoin(model *Model) {

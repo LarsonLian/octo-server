@@ -3,7 +3,6 @@ package event
 import (
 	"fmt"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -26,8 +25,6 @@ const (
 	GroupMemberScanJoin string = "group.member.scan.join"
 	// GroupMemberTransferGrouper 转让群主
 	GroupMemberTransferGrouper string = "group.member.transfer.grouper"
-	// GroupAvatarUpdate 群头像更新
-	GroupAvatarUpdate string = "group.avatar.update"
 	// GroupMemberRemove 群成员移除
 	GroupMemberRemove string = "group.memberremove"
 	// GroupDisband 群解散
@@ -65,16 +62,14 @@ type Event struct {
 	db  *DB
 	ctx *config.Context
 	log.Log
-	fileService file.IService
 }
 
 // New 创建一个事件
 func New(ctx *config.Context) *Event {
 	e := &Event{
-		ctx:         ctx,
-		db:          NewDB(ctx.DB()),
-		Log:         log.NewTLog("Event"),
-		fileService: file.NewService(ctx),
+		ctx: ctx,
+		db:  NewDB(ctx.DB()),
+		Log: log.NewTLog("Event"),
 	}
 	e.registerHandlers()
 	return e

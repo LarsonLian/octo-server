@@ -164,6 +164,7 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 		openGroup.POST("invite/sure", g.groupMemberInviteSure)                 // 确认邀请
 		openGroup.GET("/invite", groupInviteLimit, g.groupInvitePage)          // H5 邀请落地页（公开）
 		openGroup.GET("/invite/detail", groupInviteLimit, g.groupInviteDetail) // 群邀请预览信息（公开）
+		openGroup.GET("/avatar_palette", g.avatarPalette)                      // 群头像色板（公开静态设计色，供前端本地预览/色圈与服务端渲染一致）
 	}
 	// 邀请详情需要认证
 	group.GET("/invites/:invite_no", g.groupMemberInviteDetail) // 获取邀请详情
@@ -423,14 +424,14 @@ func (g *Group) avatarGet(c *wkhttp.Context) {
 		return
 	}
 
-	// 无自定义上传（含历史合成群、新建群）：服务端实时渲染默认头像——
-	// 浅底描边圆 + 群名前 2 字（或自定义文字），群名为空/不可渲染时回退群组图标。
+	// 无自定义上传（含历史合成群、新建群）：服务端实时渲染默认头像——有自定义文字则渲染
+	// 该文字；否则命名群（is_named=1）取群名前 2 字，自动名群（is_named=0）回退双人图标。
 	g.writeGroupDefaultAvatar(c, groupNo, groupInfo)
 }
 
-// writeGroupDefaultAvatar 服务端渲染并返回群默认头像（无自定义上传时）。文字优先
-// 自定义 avatar_text，否则群名前 2 字；颜色优先自定义 avatar_color，否则按 group_no
-// 稳定派生（改名不变色、跨页面一致）。群名为空或不可渲染时回退群组图标。
+// writeGroupDefaultAvatar 服务端渲染并返回群默认头像（无自定义上传时）。文字优先级：
+// 自定义 avatar_text > 命名群（is_named=1）的群名前 2 字 > 空（自动名群 → 双人图标）。
+// 颜色优先自定义 avatar_color，否则按 group_no 稳定派生（改名不变色、跨页面一致）。
 //
 // URL 稳定为 groups/{group_no}/avatar，内容随群名/自定义变化，故用内容相关弱 ETag +
 // 短缓存 + must-revalidate：改名后最多 5 分钟内 revalidate 到新图，并支持 304 省渲染。
@@ -440,13 +441,14 @@ func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, group
 	colorTag := "seed"
 	var text string
 	if groupInfo != nil {
+		// 默认头像取字规则(产品 2026-06-29 定稿)：
+		//   1. 用户在「修改头像」显式设了自定义文字 → 原样渲染(写入时已 ≤4 规范化、不取字);
+		//   2. 否则群是用户**显式起名**(is_named=1) → 取群名前 2 字(script 感知);
+		//   3. 否则(成员名拼接的自动默认名 is_named=0) → text 留空 → 回退双人图标
+		//      (不把「张三、李四、王五」这类拼接名渲成头像文字)。
 		if groupInfo.AvatarText != "" {
-			// 用户**显式设置**的自定义文字：原样渲染(写入时已按 ≤4 规范化)，不走群名
-			// 自动取字规则(不截成 2 字、不做首字母缩写)。
 			text = avatarrender.GroupText(groupInfo.AvatarText)
-		} else {
-			// 无自定义文字：按群名**自动取字**(script 感知 —— 汉字前2 / 纯数字前2 /
-			// 纯英文首字母缩写 / 否则空→回退群组图标)。
+		} else if groupInfo.IsNamed == 1 {
 			text = avatarrender.GroupNameText(groupInfo.Name)
 		}
 		if groupInfo.AvatarColor != nil {
@@ -459,10 +461,10 @@ func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, group
 	renderable := avatarrender.Renderable(text)
 
 	// ETag 覆盖决定图像内容的因子：渲染模式版本 + group_no(派生色) + 实际色 + 文字。
-	// 改名/改自定义文字 → text 变 → ETag 变；改自定义色 → colorTag 变 → ETag 变。
-	// 渲染**视觉/取字规则**改动(像素变但因子不变，如 #486 透明四角、本次取字改版)必须
-	// bump 版本段，否则已缓存旧图的客户端 If-None-Match 命中同一 ETag → 304 → 一直返旧图。
-	// group-name-v4: 群名取字改为 script 感知前 2 字(原 v3 取前 4)。
+	// 改名/改自定义文字/改 is_named → text 变(或在 name 模式与 icon 模式间切换) → ETag 变；
+	// 改自定义色 → colorTag 变 → ETag 变。命名群走 group-name-v4(+text)、自动名群走
+	// group-icon-v3(无 text)，模式不同因子串天然不同，故两类切换无需 bump 版本。渲染
+	// **视觉**改动(像素变但因子不变，如 #486 透明四角)才必须 bump 版本段。
 
 	etag := avatarrender.ETag("group-icon-v3", groupNo, colorTag)
 	if renderable {
@@ -496,7 +498,7 @@ func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, group
 		c.Header("ETag", avatarrender.ETag("group-icon-v3", groupNo, colorTag))
 	}
 
-	// 群名为空 / 不可渲染（如纯 emoji）/ 渲染失败 → 群组图标。
+	// 无自定义文字 / 自定义文字不可渲染（如纯 emoji）/ 渲染失败 → 双人图标。
 	iconKey := avatarrender.CacheKey("group-icon-v3", groupNo, colorTag)
 	iconData, iconErr := avatarrender.GetOrRender(iconKey, func() ([]byte, error) {
 		return avatarrender.RenderIcon(style)
@@ -507,6 +509,47 @@ func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, group
 		return
 	}
 	c.Data(http.StatusOK, "image/png", iconData)
+}
+
+// avatarPaletteColorResp 是单档群头像配色的对外（JSON）形式，字段下划线命名，与
+// avatarrender.GroupColorHex 一一对应。
+type avatarPaletteColorResp struct {
+	Index    int    `json:"index"`     // 色板下标，与 avatar_color 取值一致
+	Main     string `json:"main"`      // 主题主色 #RRGGBB
+	Fill     string `json:"fill"`      // 圆填充浅色 #RRGGBB
+	IconBack string `json:"icon_back"` // 双人图标后景人浅色 #RRGGBB
+}
+
+// avatarPaletteResp 是 GET /v1/group/avatar_palette 的响应：固定色板的对外契约。
+type avatarPaletteResp struct {
+	Size   int                      `json:"size"`   // 色板档数（= avatar_color 合法上界）
+	Colors []avatarPaletteColorResp `json:"colors"` // 按下标 0..Size 有序
+}
+
+// avatarPalette 返回固定的群头像色板（公开、静态设计 token）。前端用它渲染「修改头像」
+// 的色圈与本地实时预览，使预览与建群/改群后服务端渲染的 PNG 配色完全一致——色板的
+// **唯一数据源**在服务端 avatarrender.palette，前端不再硬编码、不会漂移。公开（不鉴权）：
+// 与已公开的 /v1/groups/:group_no/avatar 渲染端点同级，内容非敏感且需在登录前即可取用。
+func (g *Group) avatarPalette(c *wkhttp.Context) {
+	hex := avatarrender.PaletteHex()
+	colors := make([]avatarPaletteColorResp, len(hex))
+	// 内容相关弱 ETag：把色板版本段 + 全部色值作为因子，色板任意改动即 ETag 变 → 已缓存
+	// 客户端 revalidate 到新色（不会被长缓存钉死旧色，对齐「单一数据源、不漂移」目标）。
+	etagParts := make([]string, 0, len(hex)*3+1)
+	etagParts = append(etagParts, "avatar-palette-v1")
+	for i, h := range hex {
+		colors[i] = avatarPaletteColorResp{Index: h.Index, Main: h.Main, Fill: h.Fill, IconBack: h.IconBack}
+		etagParts = append(etagParts, h.Main, h.Fill, h.IconBack)
+	}
+	etag := avatarrender.ETag(etagParts...)
+	// 固定设计 token：可缓存，但带内容 ETag + must-revalidate，色板变更可及时失效。
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "public, max-age=300, must-revalidate")
+	if avatarrender.IfNoneMatch(c.GetHeader("If-None-Match"), etag) {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	c.Response(avatarPaletteResp{Size: len(colors), Colors: colors})
 }
 
 func (g *Group) avatarUpload(c *wkhttp.Context) {
@@ -960,9 +1003,9 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 		respondGroupRequestInvalid(c, "")
 		return
 	}
-	// 查询群信息
-	group, err := g.getGroupInfo(groupNo)
-	if err != nil {
+	// 群存在性 + 状态检查（不缓存整行：下方 invite 分支改用列级写，避免用旧快照全列回写
+	// 覆盖掉 name 分支刚提交的 name/is_named，见 DB.UpdateInviteTx 注释）。
+	if _, err := g.getGroupInfo(groupNo); err != nil {
 		respondGroupInfoError(c, err)
 		return
 	}
@@ -1048,17 +1091,16 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 		}
 	}
 
-	// invite 属性单独处理（保留原有事务逻辑）
+	// invite 属性单独处理（保留原有事务逻辑）。列级写仅更新 invite/version，避免覆盖
+	// name 分支刚提交的 name/is_named（见 DB.UpdateInviteTx）。
 	if hasInvite {
 		invite, _ := strconv.ParseInt(inviteValue, 10, 64)
-		group.Invite = int(invite)
 		version, err := g.ctx.GenSeq(common.GroupSeqKey)
 		if err != nil {
 			g.Error("生成序列号失败", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 			return
 		}
-		group.Version = version
 
 		tx, err := g.ctx.DB().Begin()
 		if err != nil {
@@ -1072,10 +1114,10 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 				fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 			}
 		}()
-		err = g.db.UpdateTx(group, tx)
+		err = g.db.UpdateInviteTx(groupNo, int(invite), version, tx)
 		if err != nil {
 			tx.Rollback()
-			g.Error("更新群信息失败！", zap.Error(err), zap.String("group_no", group.GroupNo))
+			g.Error("更新群信息失败！", zap.Error(err), zap.String("group_no", groupNo))
 			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 			return
 		}
@@ -4168,7 +4210,7 @@ type groupReq struct {
 	Members     []string `json:"members"`      // 成员uid
 	SpaceID     string   `json:"space_id"`     // Space ID（可选）
 	CategoryID  string   `json:"category_id"`  // 群聊分组 ID（可选，需配合 space_id 使用）
-	AvatarText  string   `json:"avatar_text"`  // 自定义群头像文字（可选，最多 4 个中文/英文字符；空=用群名派生）
+	AvatarText  string   `json:"avatar_text"`  // 自定义群头像文字（可选，最多 4 个中文/英文字符；空=按 is_named 回退：命名群群名/自动名群双人图标）
 	AvatarColor *int     `json:"avatar_color"` // 自定义群头像色板下标（可选，[0,palette)；不传=按 group_no 派生）
 }
 

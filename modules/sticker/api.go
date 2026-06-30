@@ -8,6 +8,7 @@ import (
 	commonmod "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
+	"github.com/Mininglamp-OSS/octo-server/pkg/stickersig"
 	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"go.uber.org/zap"
 )
@@ -34,12 +35,22 @@ type Sticker struct {
 // New 创建 Sticker 实例。settings 走进程内共享单例，配额变更（管理端写
 // system_setting）经其 60s 快照在多实例间收敛。
 func New(ctx *config.Context) *Sticker {
-	return &Sticker{
+	s := &Sticker{
 		ctx:      ctx,
 		Log:      log.NewTLog("Sticker"),
 		db:       newStickerDB(ctx),
 		settings: commonmod.EnsureSystemSettings(ctx),
 	}
+	// 运营可见性：上传句柄（stickersig）是阻断「跨 type / 他人 / 外部对象注册成贴纸」
+	// 的强保护，仅当 OCTO_MASTER_KEY 配成恰好 32 字节时生效；否则 add() 退化为仅路径
+	// 形状校验。把这个降级姿态在启动时打一条 WARN，使「未配 / 配错长度」对运营可见，
+	// 而不是埋在 leaf 包的注释里。一次性、进程级；未配 key 是 brief 记录的受支持部署，
+	// 但安全降级仍值得提示。
+	if !stickersig.Enabled() {
+		s.Warn("OCTO_MASTER_KEY 未配置或非恰好 32 字节：自定义贴纸上传句柄校验已禁用，" +
+			"注册退化为仅路径形状校验（配置 32 字节 OCTO_MASTER_KEY 可启用密码学来源绑定）")
+	}
+	return s
 }
 
 // Route 路由配置。所有路由经 AuthMiddleware（个人维度，按 login uid 隔离），
@@ -96,11 +107,16 @@ func (s *Sticker) add(ctx *wkhttp.Context) {
 		respondStickerFormatUnsupported(ctx, format)
 		return
 	}
-	// path 必须指向「本人」走 type=sticker 强约束上传产生的对象
-	// （sticker/{loginUID}/<name>.<ext>，且 ext == format）。否则客户端可上传
-	// type=chat（100MB/宽松白名单）再把该 URL 注册成贴纸，绕过 1MB + 仅位图的
-	// 上传契约；或注册他人/外部对象（PR#508 review）。
-	if !validateStickerPath(req.Path, loginUID, format) {
+	// path 必须指向「本人」走 type=sticker 强约束上传产生的对象。两层防护：
+	//  (1) 路径形状校验 validateStickerPath（始终执行）——挡住他人 uid 段 / 非
+	//      sticker 桶 / 缺扩展名 / ext≠format 等明显非法路径；
+	//  (2) 上传句柄 stickersig.Verify（配置了 OCTO_MASTER_KEY 时附加）——密码学证明
+	//      Path 确由本人经 type=sticker 上传门（1MB + 魔数 + 仅位图）产生。这层封死
+	//      (1) 的尾匹配残留：形如 "chat/sticker/{uid}/x.gif" 能过形状校验，但客户端
+	//      无法为未经贴纸上传的对象伪造句柄，故被拒——堵住「以 type=chat(100MB/宽松
+	//      白名单)上传再注册成贴纸」的旁路。未配置 master key 时退化为仅 (1)，与引入
+	//      句柄前一致（不回归）。两类失败都收敛到同一 request_invalid，不暴露具体原因。
+	if !stickerPathTrusted(req.Path, loginUID, format, req.Handle) {
 		respondStickerRequestInvalid(ctx, "path")
 		return
 	}
@@ -165,6 +181,24 @@ func (s *Sticker) add(ctx *wkhttp.Context) {
 	}
 
 	ctx.Response(toStickerResp(m))
+}
+
+// stickerPathTrusted authorizes a client-supplied sticker object path for
+// registration. It always applies the path-shape check (validateStickerPath);
+// when upload-handle signing is active (OCTO_MASTER_KEY configured) it
+// additionally requires a valid HMAC handle minted by modules/file at upload
+// time, which cryptographically proves the object was produced by THIS user's
+// content-validated (1MB + magic-number + raster-only) sticker upload — closing
+// the tail-match residual of the shape check. When no master key is configured
+// it degrades to the shape check alone, matching the pre-handle posture.
+func stickerPathTrusted(path, loginUID, format, handle string) bool {
+	if !validateStickerPath(path, loginUID, format) {
+		return false
+	}
+	if stickersig.Enabled() {
+		return stickersig.Verify(loginUID, path, handle)
+	}
+	return true
 }
 
 // delete 软删除当前用户名下的一张贴纸。删除他人贴纸或不存在的贴纸一律按

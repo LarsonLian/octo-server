@@ -5,6 +5,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	// Register the raster decoders so image.DecodeConfig can read W×H for the
+	// sticker dimension guard (header-only, no full bitmap decode).
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime"
 	"net/http"
@@ -18,9 +24,11 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/pkg/stickersig"
 	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	_ "golang.org/x/image/webp" // register webp for image.DecodeConfig
 )
 
 // File 文件操作
@@ -156,6 +164,32 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 		}
 	}
 
+	// 保留 sticker/ keyspace：非贴纸类型不得写入 sticker/ 路径（见
+	// violatesStickerKeyspace）。否则在 OSS.BucketName 等于该类型前缀的部署里，归一化
+	// 会把 type=chat&path=/sticker/{uid}/x 覆盖到合法贴纸的同一对象 key，且不使其
+	// upload handle 失效——keyed 态也能绕过贴纸门。在上传边界堵死该覆盖向量。
+	if violatesStickerKeyspace(Type(fileType), uploadPath) {
+		f.Warn("非贴纸上传不得写入 sticker/ keyspace",
+			zap.String("type", fileType), zap.String("path", uploadPath))
+		c.ResponseError(errors.New("无效的文件路径"))
+		return
+	}
+
+	// 自定义贴纸：path 首段必须等于认证上传者 uid。getFilePath 按 /{loginUID}/{uuid}.ext
+	// 生成贴纸路径、validateStickerPath 在注册时校验 uid==loginUID，但上传侧此前不校验，
+	// 故已认证用户可用 path=/{victimUID}/{uuid}.ext 上传自己的合法图覆盖他人贴纸对象
+	// （字节变、URL 与受害者 handle 不变 → 跨用户内容劫持；贴纸 URL 会发给会话对端，
+	// key 可知）。在上传边界绑定 uid，闭合同类型跨用户覆盖（与上面跨类型覆盖同一 bug 类）。
+	if Type(fileType) == TypeSticker {
+		loginUID := c.GetLoginUID()
+		if loginUID == "" || !strings.HasPrefix(uploadPath, "/"+loginUID+"/") {
+			f.Warn("贴纸上传路径 uid 段与登录用户不一致",
+				zap.String("path", uploadPath), zap.String("uid", loginUID))
+			c.ResponseError(errors.New("无效的文件路径"))
+			return
+		}
+	}
+
 	// 限制请求体大小，防止大文件 DoS
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxFileSize+1024*1024)
 
@@ -236,11 +270,53 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 		return
 	}
 
+	// 自定义贴纸：存储 path 的扩展名必须等于「内容已过魔数校验」的扩展名。魔数
+	// 校验绑定的是文件名 ext（fileName），而存储 path 来自独立的 ?path= query，二者
+	// 可被构造成不一致（如 path=/uid/x.png 配 gif 内容 + gif 文件名）。若放行，注册侧
+	// sticker.add 以 path 的 ext 当作 format（validateStickerPath 要求 ext==format），
+	// 会登记出「format=png / 实际是 gif」的错配元数据。此处是唯一同时掌握 path 与
+	// 已校验 ext 的点，收口使 format==pathExt==内容 ext 三者一致。错误用
+	// c.ResponseError 与本（未迁移 i18n 的）file 模块其余响应保持一致。
+	if Type(fileType) == TypeSticker {
+		pathExt := strings.ToLower(filepath.Ext(uploadPath))
+		if pathExt != ext {
+			f.Warn("贴纸存储路径扩展名与文件内容不一致",
+				zap.String("path_ext", pathExt), zap.String("content_ext", ext))
+			c.ResponseError(errors.New("贴纸路径扩展名与文件内容不一致"))
+			return
+		}
+	}
+
 	// 重置文件指针到开头
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		f.Error("重置文件指针失败", zap.Error(err))
 		c.ResponseError(errors.New("文件处理失败"))
 		return
+	}
+
+	// 自定义贴纸：限制解码后的像素尺寸。StickerMaxFileSize(1MB) 只约束压缩后的
+	// 字节数，不约束解码维度——一张高压缩比的小文件可解出极大位图把内联渲染端
+	// 撑爆内存，而贴纸会发送给会话对方，等同跨用户 DoS。用 image.DecodeConfig 只读
+	// 图像头拿 W×H（不解整图），任一边超过 StickerMaxDimension(512) 即拒。此时 ext
+	// 已限定在 gif/png/jpg/jpeg/webp，对应解码器均已注册。
+	if Type(fileType) == TypeSticker {
+		cfg, _, decErr := image.DecodeConfig(file)
+		if decErr != nil {
+			f.Warn("贴纸无法解析图像尺寸", zap.String("ext", ext), zap.Error(decErr))
+			c.ResponseError(errors.New("无法解析贴纸图像，可能已损坏或格式不受支持"))
+			return
+		}
+		if cfg.Width > StickerMaxDimension || cfg.Height > StickerMaxDimension {
+			f.Warn("贴纸尺寸超出限制", zap.Int("width", cfg.Width), zap.Int("height", cfg.Height), zap.Int("max", StickerMaxDimension))
+			c.ResponseError(fmt.Errorf("贴纸尺寸不能超过 %d×%d 像素", StickerMaxDimension, StickerMaxDimension))
+			return
+		}
+		// DecodeConfig 读掉了图像头，复位指针供后续签名/上传读取完整内容。
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			f.Error("重置文件指针失败", zap.Error(err))
+			c.ResponseError(errors.New("文件处理失败"))
+			return
+		}
 	}
 
 	contentType = inferContentType(contentType, ext)
@@ -303,6 +379,16 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	if signatureInt == 1 {
 		encoded := base64.StdEncoding.EncodeToString(sign[:])
 		resp["sha512"] = encoded
+	}
+	// 自定义贴纸：签发上传句柄。此处是唯一同时掌握「认证上传者」与「内容已过
+	// type=sticker 门(1MB + 魔数 + 仅位图)」的点，故在这里用 HMAC 绑定
+	// (上传者 uid, 存储 path) 并随响应下发；sticker.add 校验它即可证明该对象确由
+	// 本人经贴纸上传产生，杜绝把 type=chat(100MB/宽松白名单)/他人/外部对象注册成
+	// 贴纸。未配置 OCTO_MASTER_KEY 时不下发，sticker 侧回退到路径形状校验（不回归）。
+	if Type(fileType) == TypeSticker {
+		if handle, ok := stickersig.Sign(c.GetLoginUID(), fullURL); ok {
+			resp["sticker_handle"] = handle
+		}
 	}
 	c.Response(resp)
 }
@@ -535,6 +621,15 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		}
 		if !strings.HasPrefix(sanitized, "/") {
 			sanitized = "/" + sanitized
+		}
+		// 同 uploadFile：预签名直传也必须保留 sticker/ keyspace，否则 type=chat 预签名
+		// PUT 到 /sticker/... 可在 OSS bucket==类型 时覆盖合法贴纸对象（见
+		// violatesStickerKeyspace）。贴纸本就已在上面被拒走预签名，这里覆盖其它类型。
+		if violatesStickerKeyspace(Type(fileType), sanitized) {
+			f.Warn("非贴纸预签名上传不得写入 sticker/ keyspace",
+				zap.String("type", fileType), zap.String("path", sanitized))
+			c.ResponseError(errors.New("无效的文件路径"))
+			return
 		}
 		objectKey = fileType + sanitized
 	} else if filename != "" {

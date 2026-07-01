@@ -43,13 +43,16 @@ func TestBuildMediaHits_VideoCoverIsThumbAndSecondToMs(t *testing.T) {
 	doc := Doc{
 		Payload: &Payload{
 			Type:  &tp,
-			Video: &VideoPayload{Cover: "cover.jpg", Second: 5, Width: 1920, Height: 1080},
+			Video: &VideoPayload{URL: "https://cdn/v.mp4", Cover: "cover.jpg", Second: 5, Width: 1920, Height: 1080},
 		},
 	}
 	h := &Handler{cfg: SearchConfig{}, cache: newSenderCache(8, 0)}
 	got := h.singleMediaHit(doc, SearchMediaReq{ChannelType: channelTypeGroup, ChannelID: "g"})
 	if got.ThumbURL != "cover.jpg" {
 		t.Errorf("expected cover as thumb_url, got %q", got.ThumbURL)
+	}
+	if got.VideoURL != "https://cdn/v.mp4" {
+		t.Errorf("expected payload.video.url as video_url, got %q", got.VideoURL)
 	}
 	// v1.8: indexer stores second (s); BFF surfaces duration_ms (ms).
 	if got.DurationMs != 5000 {
@@ -72,5 +75,25 @@ func TestBuildMediaHits_VideoZeroSecondOmitsDuration(t *testing.T) {
 	got := h.singleMediaHit(doc, SearchMediaReq{ChannelType: channelTypeGroup, ChannelID: "g"})
 	if got.DurationMs != 0 {
 		t.Errorf("missing second should yield duration_ms=0, got %d", got.DurationMs)
+	}
+}
+
+// Video without a cover still surfaces video_url — the play URL is the
+// primary renderable, cover is only a poster.
+func TestBuildMediaHits_VideoNoCoverStillHasVideoURL(t *testing.T) {
+	tp := payloadTypeVideo
+	doc := Doc{
+		Payload: &Payload{
+			Type:  &tp,
+			Video: &VideoPayload{URL: "https://cdn/v.mp4"},
+		},
+	}
+	h := &Handler{cfg: SearchConfig{}, cache: newSenderCache(8, 0)}
+	got := h.singleMediaHit(doc, SearchMediaReq{ChannelType: channelTypeGroup, ChannelID: "g"})
+	if got.ThumbURL != "" {
+		t.Errorf("thumb_url should be empty when cover missing, got %q", got.ThumbURL)
+	}
+	if got.VideoURL != "https://cdn/v.mp4" {
+		t.Errorf("video_url must be populated even without cover, got %q", got.VideoURL)
 	}
 }

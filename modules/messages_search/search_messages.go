@@ -33,6 +33,7 @@ type MessageHit struct {
 	InnerMessages   []InnerMessage `json:"inner_messages,omitempty"`
 	ChannelID       string         `json:"channel_id"`
 	ThumbURL        string         `json:"thumb_url,omitempty"`
+	VideoURL        string         `json:"video_url,omitempty"`
 	Width           int            `json:"width,omitempty"`
 	Height          int            `json:"height,omitempty"`
 	DurationMs      int64          `json:"duration_ms,omitempty"`
@@ -304,6 +305,7 @@ func applyMediaProjection(mh *MessageHit, p *Payload) {
 	case payloadTypeVideo:
 		if vid := videoPayloadOf(p); vid != nil {
 			mh.ThumbURL = vid.Cover
+			mh.VideoURL = vid.URL
 			mh.Width = vid.Width
 			mh.Height = vid.Height
 			if vid.Second > 0 {

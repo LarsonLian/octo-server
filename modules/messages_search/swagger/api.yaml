@@ -519,6 +519,15 @@ definitions:
           when message_kind ∈ ["image", "video"] — i.e. on /_search_all
           browse mode (no keyword) and /_search_around media hits. Omitted
           on text / forward hits.
+      video_url:
+        type: string
+        format: uri
+        description: |
+          Video playback URL (mirrors MediaHit.video_url; distinct from the
+          poster/cover surfaced via thumb_url). Only present when
+          message_kind="video" — i.e. on /_search_all browse mode (no
+          keyword) and /_search_around video hits. Omitted on image / text /
+          forward hits.
       width:
         type: integer
         description: |
@@ -572,6 +581,13 @@ definitions:
       thumb_url:
         type: string
         format: uri
+      video_url:
+        type: string
+        format: uri
+        description: |
+          Video playback URL, distinct from the poster/cover surfaced via
+          thumb_url. Only present when media_kind="video". Omitted on image
+          hits.
       width:
         type: integer
       height:

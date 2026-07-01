@@ -23,6 +23,7 @@ type MediaHit struct {
 	MessageSeq  int64  `json:"message_seq"`
 	MediaKind   string `json:"media_kind"`
 	ThumbURL    string `json:"thumb_url,omitempty"`
+	VideoURL    string `json:"video_url,omitempty"`
 	Width       int    `json:"width,omitempty"`
 	Height      int    `json:"height,omitempty"`
 	DurationMs  int64  `json:"duration_ms,omitempty"`
@@ -190,6 +191,7 @@ func (h *Handler) singleMediaHit(doc Doc, req SearchMediaReq) MediaHit {
 		if vid := videoPayloadOf(doc.Payload); vid != nil {
 			mh.MediaKind = "video"
 			mh.ThumbURL = vid.Cover
+			mh.VideoURL = vid.URL
 			mh.Width = vid.Width
 			mh.Height = vid.Height
 			mh.DurationMs = int64(vid.Second) * 1000

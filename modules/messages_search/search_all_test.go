@@ -219,6 +219,9 @@ func TestSingleSearchAllHit_Video(t *testing.T) {
 	if got.Message.ThumbURL != "https://cdn/v.jpg" {
 		t.Errorf("thumb_url must mirror payload.video.cover: got %q", got.Message.ThumbURL)
 	}
+	if got.Message.VideoURL != "https://cdn/v.mp4" {
+		t.Errorf("video_url must mirror payload.video.url: got %q", got.Message.VideoURL)
+	}
 	if got.Message.Width != 1280 || got.Message.Height != 720 {
 		t.Errorf("dimensions: got %dx%d want 1280x720", got.Message.Width, got.Message.Height)
 	}

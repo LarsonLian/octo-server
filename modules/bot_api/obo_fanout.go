@@ -237,6 +237,53 @@ func (ba *BotAPI) fanoutForMessage(m *config.MessageResp) int {
 		return 0
 	}
 
+	// 群解散守卫（点2 补全 — OBO fan-out 绕过）：fanoutForMessage 最终经
+	// dispatchFanoutCopy → ba.ctx.SendMessage() 直发 WuKongIM，既不过
+	// checkSendPermission（点2 只拦 /v1/bot/sendMessage 入口），也因为以系统/
+	// bot 身份发而命中 WuKongIM 发送鉴权最前面的 systemUID 白名单短路、跳过
+	// disband 检查。结果：群解散后 @AI / @所有人 触发的 OBO 转发仍会把消息打进
+	// 已解散群。这里在转发入口按父群 status 兜底拦住，与 send.go 的
+	// isGroupDisbanded 同源（查 server MySQL group.status）。
+	//   - 仅对群 / 子区生效；DM（Person）无父群概念，跳过。
+	//   - 子区取 group_no____thread 的父群段，复用现成解析。
+	//   - 查库失败时丢弃转发（fail-closed）：与 send.go 的 fail-closed 行为对齐。
+	//     OBO fan-out 绕过 checkSendPermission 和 WuKongIM systemUID 白名单，
+	//     是解散守卫最薄弱的路径，不应 fail-open。
+	if m.ChannelType == common.ChannelTypeGroup.Uint8() ||
+		m.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+		disbandGroupNo := m.ChannelID
+		if m.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+			parts := strings.SplitN(m.ChannelID, threadChannelIDSeparator, 2)
+			if len(parts) == 2 && parts[0] != "" {
+				disbandGroupNo = parts[0]
+			} else {
+				// fail-closed：畸形 thread channel_id 丢弃转发，
+				// 与 message/api.go 的 thread disband guard 保持一致。
+				ba.Error("OBO fan-out: 解析子区频道ID失败，丢弃转发",
+					zap.String("channel_id", m.ChannelID))
+				return 0
+			}
+		}
+		if disbandGroupNo != "" {
+			if disbanded, err := ba.isGroupDisbanded(disbandGroupNo); err != nil {
+				// fail-closed：DB 查询失败时丢弃转发，与 bot_api/send.go 的
+				// fail-closed 行为对齐。OBO fan-out 绕过 checkSendPermission 和
+				// WuKongIM systemUID 白名单，是解散守卫最薄弱的路径，不应 fail-open。
+				ba.Error("OBO fan-out: 群解散查询失败，丢弃转发",
+					zap.String("group_no", disbandGroupNo),
+					zap.String("channel_id", m.ChannelID),
+					zap.Error(err))
+				return 0
+			} else if disbanded {
+				ba.Info("OBO fan-out: 父群已解散，丢弃转发",
+					zap.String("group_no", disbandGroupNo),
+					zap.String("channel_id", m.ChannelID),
+					zap.Uint8("channel_type", m.ChannelType))
+				return 0
+			}
+		}
+	}
+
 	store := ba.oboStoreOrDefault()
 
 	// YUJ-1465 / Mininglamp-OSS/octo-server#108 — OBO v2 fan-out

@@ -18,6 +18,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
@@ -148,6 +149,37 @@ func (m *Manager) delete(c *wkhttp.Context) {
 	fakeChannelID := req.ChannelID
 	if req.ChannelType == common.ChannelTypePerson.Uint8() {
 		fakeChannelID = common.GetFakeChannelIDWith(req.ChannelID, req.FromUID)
+	}
+	// 解散守卫（企业微信式只读）：群解散后禁止删除消息，超管路径也不例外。
+	// 与用户路径 Message.delete（api.go:2179-2208）及 Manager.sendMsg（同文件 :810）对齐。
+	if req.ChannelType == common.ChannelTypeGroup.Uint8() {
+		groupInfo, err := m.groupService.GetGroupWithGroupNo(req.ChannelID)
+		if err != nil {
+			m.Error("查询群信息失败（delete）", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+			return
+		}
+		if groupInfo != nil && groupInfo.Status == group.GroupStatusDisband {
+			httperr.ResponseErrorL(c, errcode.ErrMessageGroupDisbanded, nil, nil)
+			return
+		}
+	} else if req.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+		parentGroupNo, _, perr := thread.ParseChannelID(req.ChannelID)
+		if perr != nil || parentGroupNo == "" {
+			m.Error("解析子区频道ID失败（delete）", zap.Error(perr), zap.String("channelID", req.ChannelID))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+			return
+		}
+		groupInfo, err := m.groupService.GetGroupWithGroupNo(parentGroupNo)
+		if err != nil {
+			m.Error("查询父群信息失败（delete）", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+			return
+		}
+		if groupInfo != nil && groupInfo.Status == group.GroupStatusDisband {
+			httperr.ResponseErrorL(c, errcode.ErrMessageGroupDisbanded, nil, nil)
+			return
+		}
 	}
 	tx, err := m.ctx.DB().Begin()
 	if err != nil {
@@ -794,17 +826,24 @@ func (m *Manager) sendMsg(c *wkhttp.Context) {
 		receiverName = user.Name
 	}
 	if req.ReceivedChannelType == int(common.ChannelTypeGroup) {
-		group, err := m.groupService.GetGroupWithGroupNo(req.ReceivedChannelID)
+		groupInfo, err := m.groupService.GetGroupWithGroupNo(req.ReceivedChannelID)
 		if err != nil {
 			m.Error("查询接受群信息错误", zap.Error(err), zap.String("groupNo", req.ReceivedChannelID))
 			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
-		if group == nil {
+		if groupInfo == nil {
 			httperr.ResponseErrorL(c, errcode.ErrMessageGroupNotFound, nil, nil)
 			return
 		}
-		receiverName = group.Name
+		// 解散守卫：群解散后只读，超管代发也不例外（与用户路径 /v1/message/send、
+		// bot 路径 bot_api/send.go 一致）。部署版 WuKongIM 对解散群拒发不返回失败
+		// 信号，故此处自查 group.status，避免超管绕过解散限制。
+		if groupInfo.Status == group.GroupStatusDisband {
+			httperr.ResponseErrorL(c, errcode.ErrMessageGroupDisbanded, nil, nil)
+			return
+		}
+		receiverName = groupInfo.Name
 	}
 	// YUJ-660 Medium-1 partial: super-admin sendMsg path also needs server-
 	// authoritative payload.space_id. /v1/manager has no SpaceMiddleware

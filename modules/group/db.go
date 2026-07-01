@@ -270,6 +270,23 @@ func (d *DB) QueryWithGroupNos(groupNos []string) ([]*Model, error) {
 	return models, err
 }
 
+// queryThreadShortIDsByGroup 返回该群下所有"未删除"子区的 short_id（含归档）。
+// 解散事件用它把每个子区频道也推一遍 disband=1——子区在 WuKongIM 里是独立频道
+// （channel_type=5，channel_id=groupNo____shortId），其 disband 标记与父群相互
+// 独立，只推父群拦不住真人直连子区发送（已实测漏发）。
+//
+// 用裸 SQL 直查 thread 表（同库），而非 import thread 模块：thread 已 import
+// group，反向引用会形成包导入环（见 event.go 注释）。status!=Deleted(3) 与
+// thread 模块语义对齐（归档子区历史仍在、仍需拦发送）。
+func (d *DB) queryThreadShortIDsByGroup(groupNo string) ([]string, error) {
+	var shortIDs []string
+	_, err := d.session.
+		Select("short_id").From("thread").
+		Where("group_no=? AND status!=?", groupNo, 3).
+		Load(&shortIDs)
+	return shortIDs, err
+}
+
 func (d *DB) queryUserSupers(uid string) ([]*Model, error) {
 	var models []*Model
 	_, err := d.session.Select("`group`.*").From("group_member").LeftJoin("group", "group.group_no=group_member.group_no").Where("group.group_type=? and group.status=? and group_member.is_deleted=0 and group_member.uid=?", GroupTypeSuper, GroupStatusNormal, uid).Load(&models)
@@ -299,6 +316,19 @@ func (d *DB) UpdateTx(model *Model, tx *dbr.Tx) error {
 func (d *DB) UpdateInviteTx(groupNo string, invite int, version int64, tx *dbr.Tx) error {
 	_, err := tx.Update("group").SetMap(map[string]interface{}{
 		"invite":  invite,
+		"version": version,
+	}).Where("group_no=?", groupNo).Exec()
+	return err
+}
+
+// UpdateStatusTx 仅更新「群状态」与群版本（列级写，事务内）。
+// disband() 不能用 UpdateTx 整行回写：行 183 的 SELECT 无锁，FOR UPDATE 行 233 只读
+// status 不刷新其他列，若并发 groupUpdate（改名/公告/禁言等）在窗口内提交了新值，
+// UpdateTx 全列回写会用旧快照覆盖并发修改（lost-update）。列级写只动 status/version，
+// 与并发的群设置变更互不踩踏，对齐 UpdateInviteTx 的设计。
+func (d *DB) UpdateStatusTx(groupNo string, status int, version int64, tx *dbr.Tx) error {
+	_, err := tx.Update("group").SetMap(map[string]interface{}{
+		"status":  status,
 		"version": version,
 	}).Where("group_no=?", groupNo).Exec()
 	return err

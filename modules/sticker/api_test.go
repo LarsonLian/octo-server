@@ -181,6 +181,135 @@ func TestSticker_AddAndList(t *testing.T) {
 	assert.Equal(t, "[笑]", item["placeholder"])
 }
 
+func TestSticker_CollectForeignPathIdempotent(t *testing.T) {
+	route, _, f := setupSticker(t)
+
+	beforeSuccess := promtestutil.ToFloat64(metricStickerCollectTotal.WithLabelValues("success"))
+	beforeIDHit := promtestutil.ToFloat64(metricStickerCollectTotal.WithLabelValues("idempotent_hit"))
+	sourcePath := "file/preview/sticker/source-uid/foreign.png"
+	first := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]interface{}{
+		"path":        sourcePath,
+		"placeholder": "[收藏]",
+		"shortcode":   "fav_one",
+		"keywords":    []string{"收藏", "贴纸"},
+	})
+	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
+	firstBody := parseJSON(t, first)
+	firstID := firstBody["sticker_id"].(string)
+	assert.Equal(t, sourcePath, firstBody["path"])
+	assert.Equal(t, "png", firstBody["format"])
+	assert.Equal(t, "[收藏]", firstBody["placeholder"])
+	assert.Equal(t, "fav_one", firstBody["shortcode"])
+	assert.Equal(t, beforeSuccess+1, promtestutil.ToFloat64(metricStickerCollectTotal.WithLabelValues("success")))
+
+	second := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]interface{}{
+		"path":        sourcePath,
+		"placeholder": "[重复点击不应覆盖]",
+		"shortcode":   "ignored",
+	})
+	require.Equal(t, http.StatusOK, second.Code, "body: %s", second.Body.String())
+	secondBody := parseJSON(t, second)
+	assert.Equal(t, firstID, secondBody["sticker_id"], "same source path must be idempotent")
+	assert.Equal(t, "[收藏]", secondBody["placeholder"], "idempotent collect must return existing record")
+	assert.Equal(t, beforeIDHit+1, promtestutil.ToFloat64(metricStickerCollectTotal.WithLabelValues("idempotent_hit")))
+
+	stickers, err := f.db.listByUID(testutil.UID)
+	require.NoError(t, err)
+	require.Len(t, stickers, 1)
+	assert.Equal(t, sourcePath, stickers[0].Path)
+	assert.NotEmpty(t, stickers[0].SourcePathHash)
+}
+
+func TestSticker_CollectAlreadyExistsDoesNotConsumeQuota(t *testing.T) {
+	route, ctx, f := setupSticker(t)
+	setStickerQuota(t, ctx, 1)
+
+	sourcePath := "file/preview/sticker/source-uid/quota.png"
+	first := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]string{
+		"path": sourcePath,
+	})
+	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
+
+	second := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]string{
+		"path": sourcePath,
+	})
+	require.Equal(t, http.StatusOK, second.Code, "repeat collect must not fail quota: %s", second.Body.String())
+	assert.Equal(t, parseJSON(t, first)["sticker_id"], parseJSON(t, second)["sticker_id"])
+
+	other := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]string{
+		"path": "file/preview/sticker/source-uid/other.png",
+	})
+	env := decodeErrEnvelope(t, other.Body.Bytes())
+	assert.Equal(t, "err.server.sticker.quota_exceeded", env.Error.Code)
+
+	stickers, err := f.db.listByUID(testutil.UID)
+	require.NoError(t, err)
+	assert.Len(t, stickers, 1)
+}
+
+func TestSticker_CollectAfterDeleteCreatesNewRecord(t *testing.T) {
+	route, _, _ := setupSticker(t)
+
+	sourcePath := "file/preview/sticker/source-uid/readd.png"
+	first := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]string{
+		"path": sourcePath,
+	})
+	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
+	firstID := parseJSON(t, first)["sticker_id"].(string)
+
+	del := doRequest(t, route, "DELETE", "/v1/sticker/user/"+firstID, nil)
+	require.Equal(t, http.StatusOK, del.Code, "body: %s", del.Body.String())
+
+	second := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]string{
+		"path": sourcePath,
+	})
+	require.Equal(t, http.StatusOK, second.Code, "body: %s", second.Body.String())
+	secondID := parseJSON(t, second)["sticker_id"].(string)
+	assert.NotEqual(t, firstID, secondID, "soft delete must release live collect idempotency")
+}
+
+func TestSticker_CollectRejectsInvalidSourcePath(t *testing.T) {
+	route, _, _ := setupSticker(t)
+
+	beforePathInvalid := promtestutil.ToFloat64(metricStickerCollectTotal.WithLabelValues("path_invalid"))
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"empty", ""},
+		{"non sticker url", "https://example.com/avatar/x.png"},
+		{"unsupported extension", "file/preview/sticker/source-uid/x.tiff"},
+		{"missing extension", "file/preview/sticker/source-uid/x"},
+		{"nested object", "file/preview/sticker/source-uid/nested/x.png"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]string{
+				"path": tc.path,
+			})
+			assertStickerErrorCode(t, w, "err.server.sticker.request_invalid")
+		})
+	}
+	assert.Equal(t, beforePathInvalid+float64(len(cases)), promtestutil.ToFloat64(metricStickerCollectTotal.WithLabelValues("path_invalid")))
+}
+
+func TestSticker_CollectMetricsForQuota(t *testing.T) {
+	route, ctx, _ := setupSticker(t)
+	setStickerQuota(t, ctx, 1)
+
+	ok := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]string{
+		"path": "file/preview/sticker/source-uid/quota-metric-ok.png",
+	})
+	require.Equal(t, http.StatusOK, ok.Code, "body: %s", ok.Body.String())
+
+	beforeQuota := promtestutil.ToFloat64(metricStickerCollectTotal.WithLabelValues("quota_exceeded"))
+	w := doRequest(t, route, "POST", "/v1/sticker/user/collect", map[string]string{
+		"path": "file/preview/sticker/source-uid/quota-metric.png",
+	})
+	assertStickerErrorCode(t, w, "err.server.sticker.quota_exceeded")
+	assert.Equal(t, beforeQuota+1, promtestutil.ToFloat64(metricStickerCollectTotal.WithLabelValues("quota_exceeded")))
+}
+
 func TestSticker_UpdatePartialAndListSortOrder(t *testing.T) {
 	route, _, _ := setupSticker(t)
 

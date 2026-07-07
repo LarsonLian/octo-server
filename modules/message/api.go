@@ -31,6 +31,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/auth"
+	"github.com/Mininglamp-OSS/octo-server/pkg/cardmsg"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	"github.com/Mininglamp-OSS/octo-server/pkg/mentionrewrite"
@@ -391,6 +392,18 @@ func (m *Message) sendMsg(c *wkhttp.Context) {
 	uid := info.UID
 	if uid == "" {
 		respondMessageRequestInvalid(c, "from_uid")
+		return
+	}
+
+	// card-message-protocol P1 Decision 2 layer (a)：InteractiveCard(=17) 仅
+	// bot/webhook 可发，用户 ingress 一律拒绝（层 (b) 为客户端 from_uid 渲染
+	// 门禁，层 (c) 为 P2 action 端点的 sender 复验 —— webhook 通知是存储后
+	// 无否决权的，HTTP ingress 拦截是服务端唯一入口防线）。拒卡是与频道类型/
+	// 好友关系无关的绝对策略，故置于频道成员/好友前置检查之前 —— 无论收件人是谁，
+	// 用户都不能发卡片，且该判定不触库（PR#543 review：让拒卡不依赖 DB 前置）。
+	if cardmsg.IsCardPayload(req.Payload) {
+		m.Warn("用户 ingress 拒绝卡片消息", zap.String("channelID", req.ReceiveChannelID), zap.String("fromUID", uid))
+		httperr.ResponseErrorL(c, errcode.ErrMessageCardSendForbidden, nil, nil)
 		return
 	}
 
@@ -794,6 +807,16 @@ func (m *Message) messageEdit(c *wkhttp.Context) {
 		return
 	}
 
+	// card-message-protocol P1 Decision 7：卡片不可变 —— 先于属主校验 / IM 查询
+	// 拦截 type-17 编辑体（Normalize 以 IsRichTextPayload 为门，卡片编辑体会「原样、
+	// 零校验」通过，使编辑通道成为绕过 cardmsg.Validate 的未守卫 ingress，PR#525
+	// round-2 finding #1）。用户编辑路径对卡片永久关闭（用户不拥有 bot 卡片，且拒卡
+	// 是与消息归属无关的绝对策略，故不触库、置于 IM 查询前，PR#543 review）。
+	if cardmsg.IsCardContentEdit(req.ContentEdit) {
+		httperr.ResponseErrorL(c, errcode.ErrMessageCardEditForbidden, nil, nil)
+		return
+	}
+
 	// 权限检查：只允许编辑自己发送的消息
 	loginUID := c.GetLoginUID()
 	messageSeqs := []uint32{req.MessageSeq}
@@ -814,6 +837,16 @@ func (m *Message) messageEdit(c *wkhttp.Context) {
 	// TOCTOU 交叉校验：确保权限检查的消息与待编辑的消息是同一条
 	if req.MessageID != strconv.FormatInt(resp.Messages[0].MessageID, 10) {
 		httperr.ResponseErrorL(c, errcode.ErrMessageIDSeqMismatch, nil, nil)
+		return
+	}
+
+	// card-message-protocol P1 Decision 7（防御性对称，PR#543 review 🟡）：
+	// 上方 pre-fetch 已拒「编辑体是卡片」这一可达路径；此处再拒「目标消息本身是
+	// 卡片」，与 bot/robot 编辑路径的双向 RejectsCardEdit 对齐。当前不可达（用户
+	// send 绝对拒 type-17 → 用户无法拥有卡片行），保留为 belt-and-suspenders，
+	// 防未来出现用户可拥有卡片的入口时静默回归。
+	if cardmsg.IsCardRawPayload(resp.Messages[0].Payload) {
+		httperr.ResponseErrorL(c, errcode.ErrMessageCardEditForbidden, nil, nil)
 		return
 	}
 

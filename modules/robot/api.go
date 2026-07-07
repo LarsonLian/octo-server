@@ -31,6 +31,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/cardmsg"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	octoi18n "github.com/Mininglamp-OSS/octo-server/pkg/i18n"
@@ -493,6 +494,7 @@ func (rb *Robot) typing(c *wkhttp.Context) {
 }
 
 func (rb *Robot) sendMessage(c *wkhttp.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, cardmsg.MaxSendBodyBytes)
 	var messageReq *MessageReq
 	if err := c.BindJSON(&messageReq); err != nil {
 		rb.Error("数据格式有误！", zap.Error(err))
@@ -608,6 +610,16 @@ func (rb *Robot) sendMessage(c *wkhttp.Context) {
 		return
 	}
 
+	// card-message-protocol P1 Decision 8：InteractiveCard(=17) 的 server 权威
+	// plain 收尾 + 真实出站 payload 512KiB 复检（与上方 richtext.Finalize 同位、
+	// 同口径；Decision 9 保证 enrich 只触碰信封顶层键，card 树永不被改写）。
+	// 非 type=17 为 no-op。
+	if err := cardmsg.Finalize(payload); err != nil {
+		rb.Error("InteractiveCard finalize 失败", zap.Error(err), zap.String("robotID", robotID), zap.String("channelID", messageReq.ChannelID))
+		respondRobotContentInvalid(c, "payload")
+		return
+	}
+
 	// YUJ-202 / Mininglamp-OSS#94 / #142 — mention pass-through
 	// chokepoint. Same contract as the user and bot API ingresses:
 	// post-#142 the helper no longer infers `mention.ais=1` from
@@ -646,6 +658,17 @@ func (rb *Robot) sendMessage(c *wkhttp.Context) {
 	wirePayload := mentionrewrite.CloneForExpansion(payload)
 	wirePayload = mentionrewrite.ExpandAisToBotUIDs(wirePayload, messageReq.ChannelType, messageReq.ChannelID, rb.fetchBotMemberUIDs)
 
+	// card-message-protocol P1 Decision 3a：ExpandAisToBotUIDs 是 Finalize 之后
+	// 唯一会增大 payload 的 mutation（追加频道 bot 成员 UID 到 mention 子表）。
+	// Finalize 的 512KiB 复检发生在展开之前，覆盖不到真实出站字节，故对最终
+	// wirePayload 再复检一次（PR#543 review：与 bot_api 出站口径对称、与 richtext
+	// PR#232「最后一次 mutation 后复检」不变量对齐）。非 type=17 为 no-op。
+	if err := cardmsg.RecheckPayloadSize(wirePayload); err != nil {
+		rb.Error("InteractiveCard 出站 payload 超限", zap.Error(err), zap.String("robotID", robotID), zap.String("channelID", messageReq.ChannelID))
+		respondRobotContentInvalid(c, "payload")
+		return
+	}
+
 	result, err := rb.ctx.SendMessageWithResult(&config.MsgSendReq{
 		StreamNo:    messageReq.StreamNo,
 		ChannelID:   messageReq.ChannelID,
@@ -665,7 +688,8 @@ func (rb *Robot) supportContentType(contentType common.ContentType) bool {
 	switch contentType {
 	case common.Text, common.Image, common.GIF, common.Voice,
 		common.Video, common.Location, common.Card, common.File,
-		common.RichText, common.VectorSticker, common.EmojiSticker:
+		common.RichText, common.VectorSticker, common.EmojiSticker,
+		cardmsg.InteractiveCard:
 		return true
 	}
 	return false
@@ -688,6 +712,20 @@ func (rb *Robot) payloadIsVail(payloadResult maputil.Data) bool {
 		return payloadResult.Get("uid") != nil || payloadResult.Get("name") != nil
 	case common.File:
 		return payloadResult.Get("url") != nil
+	case cardmsg.InteractiveCard:
+		// card-message-protocol P1：robot 是三个卡片生产者入口之一，与 bot_api
+		// 的 send gate 对称（rollout flag + write-strict Validate）。本 ingress
+		// 的错误形状是单一 content-invalid 400（防枚举）——flag 关闭 / 白名单 /
+		// 大小 / URL 失败的具体原因只进日志。
+		if !cardmsg.Enabled() {
+			rb.Warn("卡片消息未启用,robot ingress 拒绝(Decision 2 rollout gate)")
+			return false
+		}
+		if err := cardmsg.Validate(map[string]interface{}(payloadResult)); err != nil {
+			rb.Warn("InteractiveCard payload 校验失败", zap.Error(err))
+			return false
+		}
+		return true
 	case common.RichText:
 		// 图文混排 RichText(=14)：发送端 write-strict 校验。升级为调
 		// common.ValidateRichTextPayload，对序列化后的 payload 做大小上限、
@@ -1820,6 +1858,7 @@ func (rb *Robot) botUploadPresigned(c *wkhttp.Context) {
 
 // botMessageEdit Bot 编辑自己发送的消息
 func (rb *Robot) botMessageEdit(c *wkhttp.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, cardmsg.MaxSendBodyBytes)
 	var req struct {
 		MessageID   string `json:"message_id"`
 		MessageSeq  uint32 `json:"message_seq"`
@@ -1903,6 +1942,16 @@ func (rb *Robot) botMessageEdit(c *wkhttp.Context) {
 	// write-strict 校验 + 权威 plain 重算（契约 §2，plain 服务端重算不信客户端）。
 	// 编辑语义为整体替换 content blocks；非 14 / 非 JSON 体为 no-op。脏/超限 payload
 	// 落库前以错误拒绝。MD5 去重 hash 落在 normalize 后的 canonical 体上。
+	// card-message-protocol P1 Decision 7：卡片不可变 —— 目标消息为 type-17、
+	// 或编辑体为 type-17（把普通消息改写成卡片）都在此拒绝，与 bot_api 编辑路径
+	// 共用 cardmsg.RejectsCardEdit 单点谓词（避免两条路拼守卫漂移 —— PR#543 review
+	// 发现本路径原先漏查目标是否卡片）。richtext 的 NormalizeContentEdit 是
+	// IsRichTextPayload 门控的，卡片体会「原样、零校验」通过（PR#525 round-2
+	// finding #1）。resp.Messages[0] 已在上方属主校验取出。
+	if cardmsg.RejectsCardEdit(resp.Messages[0].Payload, req.ContentEdit) {
+		httperr.ResponseErrorL(c, errcode.ErrRobotCardEditForbidden, nil, nil)
+		return
+	}
 	normalizedEdit, err := richtext.NormalizeContentEdit(req.ContentEdit)
 	if err != nil {
 		rb.Error("RichText content_edit 校验失败", zap.Error(err), zap.String("messageID", req.MessageID))

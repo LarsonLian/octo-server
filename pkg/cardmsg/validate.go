@@ -240,6 +240,11 @@ func (w *walker) element(el map[string]interface{}, depth int) error {
 				if err := w.bump(depth + 1); err != nil {
 					return err
 				}
+				// Fact 是叶子（title/value）—— 不得携带任何子集合字段（PR#556 review：flat-validated 子位置
+				// 同一纪律，堵伪装容器夹带未走查子树）。
+				if err := checkConstrainedChild(fact, "FactSet.facts[]", ""); err != nil {
+					return err
+				}
 				for _, k := range [2]string{"title", "value"} {
 					if v, ok := fact[k]; ok {
 						s, isStr := v.(string)
@@ -259,10 +264,154 @@ func (w *walker) element(el map[string]interface{}, depth int) error {
 				}
 			}
 		}
-	case "Input.Text", "Input.Toggle", "Input.ChoiceSet":
-		// P2 元素（octo/v2 白名单，sibling brief D1）。octo/v1 一律拒绝：正常情况
-		// octo/v2 信封已被 profile 协商挡在前面，此分支拦截「octo/v1 信封携带
-		// P2 元素」的越级形状。
+	case "ImageSet":
+		// AC 1.0：一组 Image。images[] 每项是 Image 对象，逐个走与顶层 "Image" 同款纪律
+		// （url 必填 + 正向 allowlist；backgroundImage/selectAction 等 URL/动作面同校验）。
+		if imgs, present := el["images"]; present {
+			list, ok := imgs.([]interface{})
+			if !ok {
+				return fmt.Errorf("%w: ImageSet.images 必须是数组", ErrCardBadShape)
+			}
+			for _, it := range list {
+				img, ok := it.(map[string]interface{})
+				if !ok {
+					return fmt.Errorf("%w: ImageSet.images 元素必须是对象", ErrCardBadShape)
+				}
+				if err := w.imageChild(img, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+	case "RichTextBlock":
+		// AC 1.2：inlines[] 是字符串或 TextRun 对象。TextRun 不渲染 markdown（AC 语义，
+		// 故 text 无 markdown URL 面），但可携带 selectAction —— 那是动作/URL 面，逐个走
+		// allowlist（校验面 ≥ 派发面；element() 顶部只校验 RichTextBlock 自身的 selectAction）。
+		if inlines, present := el["inlines"]; present {
+			list, ok := inlines.([]interface{})
+			if !ok {
+				return fmt.Errorf("%w: RichTextBlock.inlines 必须是数组", ErrCardBadShape)
+			}
+			for _, it := range list {
+				switch inl := it.(type) {
+				case string:
+					// 纯文本 run，无 URL/动作面。
+				case map[string]interface{}:
+					if err := w.bump(depth + 1); err != nil {
+						return err
+					}
+					// AC：inlines[] 的对象必须是**叶子 TextRun**：type 显式给出时必须是 "TextRun"，且
+					// 不得携带子集合字段 —— 堵住伪类型 / typeless 的「伪装容器」把未校验 URL 面藏在
+					// items 等子树里绕过（PR#556 review P1 + residual：校验面 ≥ 渲染面）。
+					if err := checkConstrainedChild(inl, "RichTextBlock.inlines[]", "TextRun"); err != nil {
+						return err
+					}
+					if err := w.selectAction(inl); err != nil {
+						return err
+					}
+				default:
+					return fmt.Errorf("%w: RichTextBlock.inlines 元素必须是字符串或对象", ErrCardBadShape)
+				}
+			}
+		}
+	case "Table":
+		// AC 1.5：rows[] → TableRow.cells[] → TableCell.items[]（递归标准元素）。行/单元格
+		// 计入节点预算；行/单元格的 backgroundImage、单元格的 selectAction 都是 URL/动作面。
+		if rows, present := el["rows"]; present {
+			list, ok := rows.([]interface{})
+			if !ok {
+				return fmt.Errorf("%w: Table.rows 必须是数组", ErrCardBadShape)
+			}
+			for _, r := range list {
+				row, ok := r.(map[string]interface{})
+				if !ok {
+					return fmt.Errorf("%w: TableRow 必须是对象", ErrCardBadShape)
+				}
+				if err := w.bump(depth + 1); err != nil {
+					return err
+				}
+				if err := checkNodeURLs(row); err != nil {
+					return err
+				}
+				// TableRow.selectAction 与其它一切节点的 selectAction 同权威过 allowlist
+				// （element() 顶部对每个 body 元素、column()/cell 都无条件校验 selectAction；row
+				// 原先漏了这一层 —— 补齐使「每个节点的 selectAction 都被校验」不留缺口，OpenUrl 的
+				// javascript: 面在 row 上也被拒；派发侧 findSubmitInElements 对齐读 row.selectAction，
+				// PR#556 review P2）。
+				if err := w.selectAction(row); err != nil {
+					return err
+				}
+				// TableRow 必须是 TableRow 且只带 cells 子集合（同 column()/imageChild 纪律）——堵伪类型
+				//（{"type":"Container","items":[…]}）/ typeless（{"items":[…]}）伪装行把未走查子树藏进
+				// items 等绕过（PR#556 review P1：校验面 ≥ 渲染面）。
+				if err := checkConstrainedChild(row, "Table.rows[]", "TableRow", "cells"); err != nil {
+					return err
+				}
+				cells, present := row["cells"]
+				if !present {
+					continue
+				}
+				clist, ok := cells.([]interface{})
+				if !ok {
+					return fmt.Errorf("%w: TableRow.cells 必须是数组", ErrCardBadShape)
+				}
+				for _, c := range clist {
+					cell, ok := c.(map[string]interface{})
+					if !ok {
+						return fmt.Errorf("%w: TableCell 必须是对象", ErrCardBadShape)
+					}
+					if err := w.bump(depth + 2); err != nil {
+						return err
+					}
+					// TableCell 必须是 TableCell 且只带 items 子集合 —— 堵伪类型单元格
+					//（{"type":"Image","url":"javascript:"} 会被当扁平 cell、其 url 永不走查）及 typeless
+					// 伪装容器（PR#556 review P1：校验面 ≥ 渲染面）。
+					if err := checkConstrainedChild(cell, "Table.rows[].cells[]", "TableCell", "items"); err != nil {
+						return err
+					}
+					if err := checkNodeURLs(cell); err != nil {
+						return err
+					}
+					if err := w.selectAction(cell); err != nil {
+						return err
+					}
+					if items, present := cell["items"]; present {
+						ilist, ok := items.([]interface{})
+						if !ok {
+							return fmt.Errorf("%w: TableCell.items 必须是数组", ErrCardBadShape)
+						}
+						if err := w.elements(ilist, depth+3); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	case "ActionSet":
+		// AC 1.2：body 内的动作组。actions[] 每项走同一动作 allowlist（Action.OpenUrl；
+		// Action.Submit 仍受 octo/v2 门控）。Submit 由此可出现在 body（非仅 card.actions /
+		// selectAction），派发侧 findSubmitInElements 已对齐遍历 ActionSet.actions。
+		if acts, present := el["actions"]; present {
+			list, ok := acts.([]interface{})
+			if !ok {
+				return fmt.Errorf("%w: ActionSet.actions 必须是数组", ErrCardBadShape)
+			}
+			for _, a := range list {
+				if err := w.action(a); err != nil {
+					return err
+				}
+			}
+		}
+	default:
+		// 校验器不枚举字面量，新增输入元素只改 inputElements 一处，发送期放行 / inputs 采集
+		// / D12 清单三方自动同步（D12.2 反漂移）。非输入类型即未知元素。
+		// 六个输入元素共享发送期纪律：id 必填且帧内唯一、label/errorMessage 的 markdown URL
+		// 面走正向 allowlist、inlineAction 路由。Number/Date/Time 为 P3-3 追加（AC 1.0，落在
+		// 固定 card_version="1.5" 内，白名单增量而非版本升级）。
+		if !isInputElement(t) {
+			return fmt.Errorf("%w: %q", ErrCardUnknownElement, t)
+		}
+		// octo/v1 一律拒绝：正常情况 octo/v2 信封已被 profile 协商挡在前面，此分支拦截
+		// 「octo/v1 信封携带交互元素」的越级形状。
 		if !w.interactive {
 			return fmt.Errorf("%w: %q（octo/v2 起）", ErrCardUnknownElement, t)
 		}
@@ -304,10 +453,90 @@ func (w *walker) element(el map[string]interface{}, depth int) error {
 		if err := w.inlineAction(el); err != nil {
 			return err
 		}
-	default:
-		return fmt.Errorf("%w: %q", ErrCardUnknownElement, t)
 	}
 	return nil
+}
+
+// imageChild 校验 ImageSet 内的单个 Image。ImageSet.images 不经 element() 分派（其项
+// 常省略 type），故这里补齐顶层 "Image" case 依赖 element() 提供的公共校验：节点预算、
+// backgroundImage 等 URL 面（checkNodeURLs）、selectAction，再加 Image 自身的 url 必填 +
+// 正向 allowlist。
+// childCollectionFields 是 octo 支持的容器/集合类元素的全部「子集合」字段名 —— 承载子元素的
+// 数组字段。任何按位置约束的子节点（column / imageChild / inline / table row·cell / fact）只允许
+// 其类型契约内的那个（或零个）子集合字段，其余一律视为「伪装容器」夹带未走查子树。
+var childCollectionFields = [...]string{
+	"items", "columns", "rows", "cells", "inlines", "actions", "facts", "images",
+}
+
+// childTypeMatches 报告 node 的显式 type 是否为 expected（type 缺省视为相符 —— AC 允许省略 type，
+// 显式给出则必须相符，同 column() 纪律）。**校验期与派发期共用同一判定**：校验期据此拒（reject
+// foreign child），派发期据此跳过（skip），两面结构上不可能漂移（PR#556 review：shared predicate）。
+func childTypeMatches(node map[string]interface{}, expected string) bool {
+	t, present := node["type"]
+	if !present {
+		return true
+	}
+	s, _ := t.(string)
+	return s == expected
+}
+
+// rejectForeignSubtree 拒绝一个按位置约束的子节点携带其类型契约之外的子集合字段。allowed 是该
+// 节点合法的子集合字段（叶子 Image/TextRun/Fact 传空；TableRow 传 "cells"；TableCell/Column 传
+// "items"）。堵住伪类型 / typeless 的「伪装容器」把未走查的 URL 面藏在越界子树里绕过发送期
+// allowlist —— 校验面 ≥ 渲染面（类型门只挡显式伪类型，此层兜 typeless 及「类型合法但夹带越界
+// 子树」，PR#556 review P1 + residual）。
+func rejectForeignSubtree(node map[string]interface{}, where string, allowed ...string) error {
+	for _, f := range childCollectionFields {
+		if _, present := node[f]; !present {
+			continue
+		}
+		permitted := false
+		for _, a := range allowed {
+			if f == a {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			return fmt.Errorf("%w: %s 携带非法子集合字段 %q（超出其类型契约）", ErrCardUnknownElement, where, f)
+		}
+	}
+	return nil
+}
+
+// checkConstrainedChild 校验一个「按位置约束」的子节点（ColumnSet.columns[] / ImageSet.images[] /
+// RichTextBlock.inlines[] / Table.rows[]·cells[] / FactSet.facts[]）：显式 type 必须是 expectedType
+// （缺省放行；expectedType=="" 表示该位置无类型标签，如 Fact），且除 allowedCollections 外不得携带
+// 任何子集合字段。是「校验面 ≥ 渲染面」在所有 flat-validated 子位置上的统一纪律（PR#556 review）。
+func checkConstrainedChild(node map[string]interface{}, where, expectedType string, allowedCollections ...string) error {
+	if expectedType != "" && !childTypeMatches(node, expectedType) {
+		return fmt.Errorf("%w: %s 内元素类型 %v", ErrCardUnknownElement, where, node["type"])
+	}
+	return rejectForeignSubtree(node, where, allowedCollections...)
+}
+
+func (w *walker) imageChild(img map[string]interface{}, depth int) error {
+	if err := w.bump(depth); err != nil {
+		return err
+	}
+	// AC：ImageSet.images[] 每项必须是**叶子 Image**：type 显式给出时必须是 "Image"，且不得携带
+	// 任何子集合字段。否则伪类型（{"type":"Container",…}）或 typeless（{"url":ok,"items":[…]}）的
+	// 「伪装容器」会被当扁平 Image 只校 url、其 items 子树永不走查 —— 夹带 javascript: 链接绕过发送
+	// 期校验（PR#556 review P1 + residual：校验面必须 ≥ 渲染面，同 column()/PR#543）。
+	if err := checkConstrainedChild(img, "ImageSet.images[]", "Image"); err != nil {
+		return err
+	}
+	if err := checkNodeURLs(img); err != nil {
+		return err
+	}
+	if err := w.selectAction(img); err != nil {
+		return err
+	}
+	u, _ := img["url"].(string)
+	if u == "" {
+		return fmt.Errorf("%w: ImageSet.images[].url 必填", ErrCardBadShape)
+	}
+	return checkURL(u)
 }
 
 // column 校验 ColumnSet 中的单列。AC 允许 Column 省略 type 字段；显式给出时必须
@@ -320,10 +549,11 @@ func (w *walker) column(col map[string]interface{}, depth int) error {
 	if err := checkNodeURLs(col); err != nil {
 		return err
 	}
-	if t, present := col["type"]; present {
-		if s, _ := t.(string); s != "Column" {
-			return fmt.Errorf("%w: columns 内元素类型 %v", ErrCardUnknownElement, t)
-		}
+	// Column 必须是 Column 且只带 items 子集合（type 缺省放行 —— AC 允许省略）——堵伪类型/typeless
+	// 伪装列把未走查子树藏进 rows/columns 等越界字段绕过（PR#556 review：全 flat-validated 子位置同一
+	// 纪律，校验面 ≥ 渲染面）。
+	if err := checkConstrainedChild(col, "ColumnSet.columns[]", "Column", "items"); err != nil {
+		return err
 	}
 	if items, present := col["items"]; present {
 		list, ok := items.([]interface{})

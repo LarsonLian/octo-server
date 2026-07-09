@@ -4,6 +4,72 @@ Change history for this repo's `.octospec/`, following the
 [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 change-log convention (§7). Newest first.
 
+## 2026-07-09 (P3-3)
+
+- **Change** — Task `card-message-p3-rich-inputs` (card message P3-3): extend the
+  octo/v2 input whitelist with `Input.Number/Date/Time` (all AC 1.0, within the
+  pinned `card_version:"1.5"` — additive, no version bump). Submit-time value
+  validation added (format/type only: Number = finite JSON number; Date =
+  `YYYY-MM-DD`; Time = `HH:MM`; `""` = unfilled; declared min/max range NOT
+  server-enforced — delegated to bot, same class as `isRequired`/`regex`, which
+  likewise stay unenforced). Refactored the element
+  whitelist into a single `pkg/cardmsg` authority (`whitelist.go`:
+  `displayElements`/`inputElements` + `DisplayElements()`/`InputElements()` +
+  `isInputElement`) that send-time validation, submit-time collection, action
+  dispatch, and the D12 manifest all derive from — no drifting literals. D12
+  `GET /v1/bot/card/profile` additively advertises `elements`/`inputs` for
+  element-granularity feature detection. Review-caught fixes folded in: reject
+  non-finite `Input.Number` (NaN/±Inf bypass `ParseFloat`); strict JSON-number
+  grammar so the server's "valid number" matches the bot's JSON parser (reject
+  `ParseFloat`'s Go-only superset — `1_000`/`0x1p4`/leading-`+`/leading-zero —
+  which would silently corrupt the value the bot re-parses); `default`
+  fail-closed arm in the submit-time type switch; `Column` dropped from the
+  manifest `elements` (it is a `ColumnSet` child, not a top-level element the
+  validator accepts — advertising it lied about capability); and symmetric
+  `inlineAction` dispatch for the new types (no dead buttons). No new errcode /
+  i18n / DB / migration / endpoint; additive-only wire contract. Brief
+  + journal under `.octospec/tasks/card-message-p3-rich-inputs/` and
+  `.octospec/journal/shared/card-message-p3-rich-inputs.md`; learning candidate
+  in `.octospec/learnings/pending/`.
+- **Change** — Same task/PR, follow-on: **AC 1.5 display-element completion (Tier 1)** —
+  added `ImageSet`(1.0) / `RichTextBlock`(1.2) / `Table`(1.5) / `ActionSet`(1.2) to the
+  octo/v2 display whitelist (versions verified against adaptivecards.io). Each covers
+  send-time validation (structure + URL allowlist + recursion budget), dispatch symmetry
+  (`findSubmitInElements` walks ActionSet.actions / Table cells / ImageSet images /
+  RichTextBlock inlines for Submit — no dead buttons), plain derivation, and D12 manifest
+  `elements` (auto via the displayElements single authority). Corrected the pre-existing
+  `TestValidateWhitelistRejections` which mislabeled Table as "AC 1.6, reject" (Table is
+  1.5, now supported) → replaced with still-unsupported Media(1.1)/ToggleVisibility(1.2).
+  Still out (later, on demand): Media, Action.ShowCard/ToggleVisibility/Execute, templating,
+  AC 1.6.
+- **Change** — Same task/PR, review hardening (PR#556 review of head `7559c526`): fixed a
+  **send-time URL-allowlist bypass (P1)** in the two Tier-1 flat-leaf handlers — `imageChild`
+  (`ImageSet.images[]`) and the `RichTextBlock.inlines[]` object branch accepted a child
+  without enforcing its declared `type` and never recursed its `items`, so a mislabeled child
+  (`{"type":"Container","url":"http://ok","items":[TextBlock with javascript:]}`) passed
+  `Validate` with the nested `javascript:` link unchecked. Now both enforce a *leaf* contract —
+  reject a present `type` ≠ `Image`/`TextRun` (same discipline as `column()`) AND reject any
+  child-collection field (`items`/`columns`/… via `rejectLeafSubtree`), which also closes the
+  **typeless-child residual** a conditional `if type present` check leaves open (a no-`type`
+  child with a nested subtree) — restoring "校验面 ≥ 渲染面" (`TestTier1MislabeledChildRejected`
+  covers typed + typeless). Also completed `TableRow.selectAction` (P2): added it to
+  validation (`w.selectAction(row)`) and dispatch (`findSubmitInElements` reads
+  `row.selectAction`) symmetrically — row was the only node whose `selectAction` was neither
+  validated nor dispatched. Brief updated; `inputs` manifest field confirmed in-scope.
+- **Change** — Same task/PR, review hardening cont'd (heads `2c8f1003`→`85baabdf`, three
+  reviewers): the foreign-typed-child bypass turned out to recur one child collection at a time
+  (ImageSet → its typeless variant → `Table` rows/cells), so generalized the fix into one shared
+  discipline instead of patching each instance. New `checkConstrainedChild` (type-pin via a shared
+  `childTypeMatches` predicate + closed-set `rejectForeignSubtree`) is now applied to **every**
+  flat-validated child position — `ColumnSet.columns[]`, `ImageSet.images[]`,
+  `RichTextBlock.inlines[]`, `Table.rows[]`/`cells[]`, `FactSet.facts[]` — closing the `Table`
+  send-time bypass (mislabeled cell as `Image` with a `javascript:` url; mislabeled/typeless row
+  hiding an un-recursed `items` subtree) plus the Column/Fact instances of the same class. The
+  dispatch walker (`findSubmitInElements`) reuses the same `childTypeMatches` predicate to skip
+  foreign-typed children, so validate-surface == dispatch-surface can't drift (P2). Tests:
+  `TestTier1MislabeledChildRejected` (Table/Column/Fact, typed + typeless) +
+  `TestTier1DispatchSkipsMislabeledChild`. Lesson: patch the class, not the flagged instance.
+
 ## 2026-07-08 (PR-D)
 
 - **Change** — Task `card-message-p2-capability-manifest` (PR-D, card message P2

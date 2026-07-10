@@ -55,12 +55,14 @@ type cardProfileManifest struct {
 	Profiles    []string `json:"profiles"`
 	Elements    []string `json:"elements"`
 	Inputs      []string `json:"inputs"`
+	Actions     []string `json:"actions"`
 	Limits      struct {
 		MaxPayloadBytes   int `json:"max_payload_bytes"`
 		MaxNodes          int `json:"max_nodes"`
 		MaxDepth          int `json:"max_depth"`
 		MaxInputTextBytes int `json:"max_input_text_bytes"`
 		MaxInputsBytes    int `json:"max_inputs_bytes"`
+		MaxCopyTextBytes  int `json:"max_copy_text_bytes"`
 	} `json:"limits"`
 }
 
@@ -79,6 +81,7 @@ func TestBotCardProfile_ElementsInputsFromConstants(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &m))
 	assert.Equal(t, cardmsg.DisplayElements(), m.Elements)
 	assert.Equal(t, cardmsg.InputElements(), m.Inputs)
+	assert.Equal(t, cardmsg.DisplayActions(), m.Actions)
 }
 
 // TestBotCardProfile_ValuesFromConstants：清单每个值必须等于 pkg/cardmsg 常量
@@ -100,6 +103,7 @@ func TestBotCardProfile_ValuesFromConstants(t *testing.T) {
 	assert.Equal(t, cardmsg.MaxDepth, m.Limits.MaxDepth)
 	assert.Equal(t, cardmsg.MaxInputTextBytes, m.Limits.MaxInputTextBytes)
 	assert.Equal(t, cardmsg.MaxInputsBytes, m.Limits.MaxInputsBytes)
+	assert.Equal(t, cardmsg.MaxCopyTextBytes, m.Limits.MaxCopyTextBytes)
 }
 
 // TestBotCardProfile_DisabledStillReturnsManifestAndSendRejects（D12.3）：rollout
@@ -168,7 +172,7 @@ func TestBotCardProfile_AdditiveContractFieldSet(t *testing.T) {
 	for k := range raw {
 		gotTop = append(gotTop, k)
 	}
-	assert.ElementsMatch(t, []string{"enabled", "card_version", "profiles", "limits", "elements", "inputs"}, gotTop,
+	assert.ElementsMatch(t, []string{"enabled", "card_version", "profiles", "limits", "elements", "inputs", "actions"}, gotTop,
 		"D12 additive-only：顶层字段集冻结（新增新字段，绝不改名/删除）")
 
 	var limits map[string]json.RawMessage
@@ -179,5 +183,6 @@ func TestBotCardProfile_AdditiveContractFieldSet(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{
 		"max_payload_bytes", "max_nodes", "max_depth", "max_input_text_bytes", "max_inputs_bytes",
+		"max_copy_text_bytes",
 	}, gotLimits, "D12 additive-only：limits 字段集冻结")
 }

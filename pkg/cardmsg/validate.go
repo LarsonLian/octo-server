@@ -92,7 +92,9 @@ func validateCard(card map[string]interface{}, interactive bool) error {
 			return err
 		}
 	}
-	return nil
+	// 全卡遍历结束 —— 统一解析 ToggleVisibility.targetElements 引用（前向引用安全：所有元素 id
+	// 此时都已收集）。
+	return w.resolveTargetRefs()
 }
 
 // interactiveByProfile 报告 profile 对应的能力档位；未知 profile 返回 (false,
@@ -118,13 +120,22 @@ type walker struct {
 	// interactive octo/v2 档位放行 Action.Submit 与 Input.*（P2 D1）。octo/v1 恒为
 	// false（interactiveByProfile 只对 octo/v2 置 true）。
 	interactive bool
-	// seenIDs P2 D1（round-3 nit）：Action.Submit / Input.* 的 id 必须帧内唯一 ——
-	// D3 action 寻址、D4 幂等键、D11 inputs 声明匹配都以 id 为键，重复 id 会让这三处
-	// 语义歧义。懒初始化（仅 octo/v2 帧才有交互元素）。
+	// seenIDs 帧内 id 唯一命名空间：Action.Submit / Input.* 的 id（P2 D1：D3 action 寻址、
+	// D4 幂等键、D11 inputs 声明匹配以 id 为键，重复 id 三处语义歧义），以及任意声明 id 的
+	// 展示元素（ToggleVisibility.targetElements 以 id 寻址，重复 id 让目标歧义）。三类共享**一个**
+	// 帧内唯一空间（对齐 AC 的 card-global id 模型）。懒初始化。
 	seenIDs map[string]struct{}
+	// elementIDs 帧内**元素**声明的 id 集合（展示 + 输入元素；不含 action id）——
+	// Action.ToggleVisibility.targetElements 引用的解析目标。懒初始化。
+	elementIDs map[string]struct{}
+	// targetRefs 遍历期累积的 ToggleVisibility.targetElements 引用；全卡走完后由
+	// resolveTargetRefs 统一校验存在性 —— 前向引用安全（target 可先于/后于 toggle 出现）。
+	targetRefs []string
 }
 
-// registerID 记录一个 Action.Submit / Input.* 的 id 并强制帧内唯一（P2 D1）。
+// registerID 记录一个 Action.Submit / Input.* / 展示元素 的 id 并强制帧内唯一（P2 D1 +
+// ToggleVisibility）。三类共享同一 seenIDs 空间：Submit id 与元素 id 同名亦判重复（对齐 AC 的
+// card-global id 模型；重复 id 会让 action 寻址 / targetElements 寻址歧义）。
 func (w *walker) registerID(kind, id string) error {
 	if w.seenIDs == nil {
 		w.seenIDs = make(map[string]struct{})
@@ -133,6 +144,53 @@ func (w *walker) registerID(kind, id string) error {
 		return fmt.Errorf("%w: %s.id %q 帧内重复", ErrCardBadShape, kind, id)
 	}
 	w.seenIDs[id] = struct{}{}
+	return nil
+}
+
+// noteIDAndVisibility 处理**可寻址元素/容器**上通用的 id / isVisible 属性 —— 由每一个此类节点的
+// 访问点调用：element()（展示/输入元素）、column()（列）、imageChild()（ImageSet 子 Image）、
+// Table 的 row/cell。使「任一声明 id 的可寻址节点都可作 ToggleVisibility 目标、其 id 帧内唯一、
+// isVisible 为 bool」这条不变量在**可寻址节点**上无缺口。
+//
+// 刻意不覆盖两类**叶子/内联节点**（PR#561 review：AC 未在其上定义 id/isVisible，也不可作 toggle
+// 目标）：FactSet.facts[] 的 Fact（title/value 叶子，checkConstrainedChild 已约束其无子集合）与
+// RichTextBlock.inlines[] 的 TextRun（内联 run）。它们的 title/value markdown、selectAction 仍完整
+// 校验 + 计入预算（无渲染面逃逸）；其上若出现 id 不登记（targetElements 指向它 → 悬空 fail-closed）、
+// isVisible 不做 bool 校验（AC 无该语义，惰性放过）。
+//   - isVisible 出现时必须是 bool（否则结构非法）；
+//   - id 出现且 TrimSpace 后非空时，登记进帧内唯一命名空间（registerID，与 Action.Submit/Input.*
+//     共享）并记入 elementIDs 供 targetElements 解析。非字符串 / 空 / 纯空白 id 保持宽容
+//     （前向兼容，且无法作为合法 target）。
+//
+// 隐藏节点（isVisible:false）仍由调用方照常递归、计入节点/深度预算 —— 可见性**不豁免**任何
+// 白名单/URL/预算校验（trust-boundary：校验面 ≥ 渲染面，隐藏子树不得成为绕过通道）。
+func (w *walker) noteIDAndVisibility(node map[string]interface{}) error {
+	if vis, present := node["isVisible"]; present {
+		if _, ok := vis.(bool); !ok {
+			return fmt.Errorf("%w: isVisible 必须是布尔", ErrCardBadShape)
+		}
+	}
+	if id, ok := node["id"].(string); ok && strings.TrimSpace(id) != "" {
+		if err := w.registerID("element", id); err != nil {
+			return err
+		}
+		if w.elementIDs == nil {
+			w.elementIDs = make(map[string]struct{})
+		}
+		w.elementIDs[id] = struct{}{}
+	}
+	return nil
+}
+
+// resolveTargetRefs 在全卡遍历结束后校验所有 ToggleVisibility.targetElements 引用都指向本帧
+// 声明的元素 id（elementIDs 集）。**全卡走完才解析** —— 支持前向引用（target 可先于/后于其
+// toggle 出现）。悬空引用 → 结构非法（整卡拒）。
+func (w *walker) resolveTargetRefs() error {
+	for _, ref := range w.targetRefs {
+		if _, ok := w.elementIDs[ref]; !ok {
+			return fmt.Errorf("%w: Action.ToggleVisibility.targetElements 引用不存在的元素 id %q", ErrCardBadShape, ref)
+		}
+	}
 	return nil
 }
 
@@ -174,6 +232,11 @@ func (w *walker) element(el map[string]interface{}, depth int) error {
 	// FactSet 等「叶子」上的 selectAction 会「派发期可解析、发送期没校验」，Action.Submit
 	// 的 D1 帧内唯一 id / data-必须是对象被旁路（PR#548 review：校验面必须 ≥ 派发面）。
 	if err := w.selectAction(el); err != nil {
+		return err
+	}
+	// id / isVisible 是任意元素通用属性 —— 登记 id（帧内唯一 + 记入 targetElements 解析集）、
+	// 校验 isVisible 为 bool。置于类型分派前，覆盖所有展示/输入元素。
+	if err := w.noteIDAndVisibility(el); err != nil {
 		return err
 	}
 	t, _ := el["type"].(string)
@@ -346,6 +409,10 @@ func (w *walker) element(el map[string]interface{}, depth int) error {
 				if err := checkConstrainedChild(row, "Table.rows[]", "TableRow", "cells"); err != nil {
 					return err
 				}
+				// TableRow 也可携带 id / isVisible（可作 ToggleVisibility 目标）—— 与展示元素同权威登记/校验。
+				if err := w.noteIDAndVisibility(row); err != nil {
+					return err
+				}
 				cells, present := row["cells"]
 				if !present {
 					continue
@@ -366,6 +433,10 @@ func (w *walker) element(el map[string]interface{}, depth int) error {
 					//（{"type":"Image","url":"javascript:"} 会被当扁平 cell、其 url 永不走查）及 typeless
 					// 伪装容器（PR#556 review P1：校验面 ≥ 渲染面）。
 					if err := checkConstrainedChild(cell, "Table.rows[].cells[]", "TableCell", "items"); err != nil {
+						return err
+					}
+					// TableCell 也可携带 id / isVisible（可作 ToggleVisibility 目标）—— 同权威登记/校验。
+					if err := w.noteIDAndVisibility(cell); err != nil {
 						return err
 					}
 					if err := checkNodeURLs(cell); err != nil {
@@ -415,13 +486,11 @@ func (w *walker) element(el map[string]interface{}, depth int) error {
 		if !w.interactive {
 			return fmt.Errorf("%w: %q（octo/v2 起）", ErrCardUnknownElement, t)
 		}
-		// D1：输入控件 id 必填且帧内唯一（提交时 inputs 以 id 为键）。
-		id, _ := el["id"].(string)
-		if id == "" {
+		// D1：输入控件 id 必填且须有意义（提交时 inputs 以 id 为键）。帧内唯一 + 记入 elementIDs
+		// 已由 element() 顶部 noteIDAndVisibility 统一登记（TrimSpace 后非空即登记），此处只强制
+		// 「必填」——与登记同口径用 TrimSpace，纯空白 id 视同缺失（PR#561 review nit）。
+		if id, _ := el["id"].(string); strings.TrimSpace(id) == "" {
 			return fmt.Errorf("%w: %s.id 必填", ErrCardBadShape, t)
-		}
-		if err := w.registerID(t, id); err != nil {
-			return err
 		}
 		// Input.label / Input.errorMessage 与 TextBlock.text 同为 AC markdown 渲染面
 		// （AC 1.3+：label 富文本标签、errorMessage 校验失败提示），其 markdown 链接
@@ -529,6 +598,10 @@ func (w *walker) imageChild(img map[string]interface{}, depth int) error {
 	if err := checkNodeURLs(img); err != nil {
 		return err
 	}
+	// ImageSet 子 Image 也可携带 id / isVisible（可作 ToggleVisibility 目标）—— 与展示元素同权威登记/校验。
+	if err := w.noteIDAndVisibility(img); err != nil {
+		return err
+	}
 	if err := w.selectAction(img); err != nil {
 		return err
 	}
@@ -547,6 +620,10 @@ func (w *walker) column(col map[string]interface{}, depth int) error {
 	}
 	// Column.backgroundImage 等 URL 面。
 	if err := checkNodeURLs(col); err != nil {
+		return err
+	}
+	// Column 也可携带 id / isVisible（可作 ToggleVisibility 目标）—— 与展示元素同权威登记/校验。
+	if err := w.noteIDAndVisibility(col); err != nil {
 		return err
 	}
 	// Column 必须是 Column 且只带 items 子集合（type 缺省放行 —— AC 允许省略）——堵伪类型/typeless
@@ -613,6 +690,14 @@ func (w *walker) action(a interface{}) error {
 			return fmt.Errorf("%w: Action.OpenUrl.url 必填", ErrCardBadShape)
 		}
 		return checkURL(u)
+	case "Action.ToggleVisibility":
+		// octo/v1 本地动作（折叠/展开，无服务端回调，与 Action.OpenUrl 同档）—— 两档均放行，
+		// 不受 w.interactive 门控。selectAction / inlineAction / ActionSet 携带时同样走到这里
+		// （分期继承）。targetElements 引用在全卡走完后由 resolveTargetRefs 统一解析（前向引用）。
+		return w.toggleVisibility(act)
+	case "Action.CopyToClipboard":
+		// octo 自定义本地动作（标准 AC 无此动作）—— 复制 text 到剪贴板、无服务端回调，两档均放行。
+		return w.copyToClipboard(act)
 	case "Action.Submit":
 		// P2 动作（octo/v2，sibling brief D1）。octo/v1 一律拒绝 —— selectAction
 		// 携带时同样走到这里（分期继承：selectAction 继承所载动作的分期）。
@@ -640,6 +725,75 @@ func (w *walker) action(a interface{}) error {
 	default:
 		return fmt.Errorf("%w: %q", ErrCardUnknownAction, t)
 	}
+}
+
+// toggleVisibility 校验 Action.ToggleVisibility（octo/v1 本地折叠动作）。targetElements 必填、
+// 非空数组；每项是元素 id 字符串或 AC TargetElement 对象 {elementId:string, isVisible?:bool}。
+// 引用的元素 id 存在性在全卡遍历结束后由 resolveTargetRefs 统一校验（前向引用安全）。
+// 本动作无 URL/回调面 —— 端上纯本地翻转可见性。
+func (w *walker) toggleVisibility(act map[string]interface{}) error {
+	te, present := act["targetElements"]
+	if !present {
+		return fmt.Errorf("%w: Action.ToggleVisibility.targetElements 必填", ErrCardBadShape)
+	}
+	list, ok := te.([]interface{})
+	if !ok || len(list) == 0 {
+		return fmt.Errorf("%w: Action.ToggleVisibility.targetElements 必须是非空数组", ErrCardBadShape)
+	}
+	for _, item := range list {
+		id, err := targetElementID(item)
+		if err != nil {
+			return err
+		}
+		w.targetRefs = append(w.targetRefs, id)
+	}
+	return nil
+}
+
+// targetElementID 从一个 targetElements 条目提取被引用的元素 id：AC 允许字符串简写（元素 id）或
+// 对象全写 {elementId:string, isVisible?:bool}。两形态外 / 空 elementId / 非布尔 isVisible → 结构非法。
+func targetElementID(item interface{}) (string, error) {
+	switch v := item.(type) {
+	case string:
+		// 与 noteIDAndVisibility 的登记口径一致：纯空白 id 视同缺失，在 parse 期即拒
+		// （否则纯空白 ref 会晚到 resolveTargetRefs 才作悬空拒 —— 同为 fail-closed，但理由更含糊）。
+		if strings.TrimSpace(v) == "" {
+			return "", fmt.Errorf("%w: targetElements 条目 id 不能为空/纯空白", ErrCardBadShape)
+		}
+		return v, nil
+	case map[string]interface{}:
+		id, _ := v["elementId"].(string)
+		if strings.TrimSpace(id) == "" {
+			return "", fmt.Errorf("%w: targetElements 条目缺 elementId（或纯空白）", ErrCardBadShape)
+		}
+		if vis, present := v["isVisible"]; present {
+			if _, ok := vis.(bool); !ok {
+				return "", fmt.Errorf("%w: targetElements 条目 isVisible 必须是布尔", ErrCardBadShape)
+			}
+		}
+		return id, nil
+	default:
+		return "", fmt.Errorf("%w: targetElements 条目必须是字符串或对象", ErrCardBadShape)
+	}
+}
+
+// copyToClipboard 校验 octo 自定义 Action.CopyToClipboard（本地复制，无服务端回调）。text 必填、
+// 字符串、≤ MaxCopyTextBytes；title 可选字符串。text **逐字复制、不渲染** —— 无 URL/markdown 面，
+// 不过 allowlist（生产者「勿复制隐藏/敏感字段」是产者/客户端职责，非服务端结构校验）。
+func (w *walker) copyToClipboard(act map[string]interface{}) error {
+	text, ok := act["text"].(string)
+	if !ok || text == "" {
+		return fmt.Errorf("%w: Action.CopyToClipboard.text 必填且必须是非空字符串", ErrCardBadShape)
+	}
+	if len(text) > MaxCopyTextBytes {
+		return fmt.Errorf("%w: Action.CopyToClipboard.text 超过 %d 字节上限", ErrCardBadShape, MaxCopyTextBytes)
+	}
+	if title, present := act["title"]; present {
+		if _, ok := title.(string); !ok {
+			return fmt.Errorf("%w: Action.CopyToClipboard.title 必须是字符串", ErrCardBadShape)
+		}
+	}
+	return nil
 }
 
 // checkURL 执行 Decision 3d 的正向 allowlist：仅接受「绝对」http/https URL。

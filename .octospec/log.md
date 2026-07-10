@@ -4,6 +4,65 @@ Change history for this repo's `.octospec/`, following the
 [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 change-log convention (§7). Newest first.
 
+## 2026-07-09 (sticker-oversized-store-guard)
+
+- **Fix** — Task `sticker-oversized-store-guard` (code-review fix on
+  `sticker-oversized-default`): close the regression where the compress-aware
+  gate admitted >512 jpg/png trusting compression to downscale, but every
+  fail-open path (nil compressor, skipped:concurrency_saturated/timeout, failed,
+  or compress_max_dimension > upload_max_dimension) stored the original oversized
+  image up to 1024² and served it to peers — reachable under load / attackable by
+  saturating the compress slots. Added `stickerCompressResult.OutMaxDim` (actual
+  post-compression dimension) + an `api.go` post-block guard that rejects
+  (`compress_oversized_rejected`, new pre-warmed terminal metric) when the final
+  stored dimension exceeds `upload_max_dimension` — dimension fail-CLOSED while
+  compression quality stays fail-OPEN. Deduped the cross-package 1024 literal
+  (exported `common.StickerUploadMaxDimensionHardCap`, referenced by modules/file).
+  Schema note recommends `compress_max_dimension ≤ upload_max_dimension`; test
+  helper reuse cleanup. Four guard regressions (nil/failed/timeout/mis-config) +
+  unbroken happy path. No new errcode / i18n / DB / appconfig change. Briefs
+  `.octospec/tasks/sticker-oversized-store-guard/`.
+
+## 2026-07-09 (sticker-oversized-default)
+
+- **Change** — Task `sticker-oversized-default` (follow-up to
+  `sticker-downscale-store`): make ">512px static jpg/png auto-shrinks to 512" the
+  built-in default once compression is enabled, without turning compression on for
+  every deployment. `compress_max_dimension` default flips 0(=ceiling)→**512**,
+  decoupled from `upload_max_dimension`, clamp `[1,1024]` (getter collapsed to the
+  shared `stickerClampIntUpper`). New compress-aware dimension gate
+  (`stickerLimitsSnapshot.effectiveGateDim`): jpg/png accept up to the **1024**
+  hard cap when `compress_enabled=true` (then shrink to `compress_max_dimension`),
+  gif/webp and compress-off stay gated at `upload_max_dimension` (512).
+  `compress_enabled` default stays **false** (gray-scale rollout preserved);
+  `upload_max_dimension` default and the appconfig `StickerUploadLimits`
+  client contract stay **512/unchanged** (compress-aware gate avoids the
+  appconfig ripple a 1024 default would cause). Zero-impact when compression off
+  (gate = 512 for all formats, compressor never runs). Known edge: APNG (ext
+  `.png`) passes the widened gate but can't be shrunk (`skipped:animated`) — later
+  fail-closed **rejected** by `sticker-oversized-store-guard` if >
+  `upload_max_dimension` (this entry's pre-guard "stored un-shrunk" no longer
+  holds). Getter tests rewritten; gate integration tests added; fake made
+  faithful to the 512 default. No new errcode / i18n / DB / migration / appconfig
+  field. Brief `.octospec/tasks/sticker-oversized-default/brief.md`.
+
+## 2026-07-09 (sticker-downscale-store)
+
+- **Change** — Task `sticker-downscale-store` (phase two of
+  `sticker-upload-compression`): decouple the compressor's `imaging.Fit` downscale
+  target from the upload dimension gate. New server-side key
+  `sticker.compress_max_dimension` (int, `Positive:true`, read-side clamped to
+  `≤ upload_max_dimension`, unset ⇒ `= upload_max_dimension` ⇒ no downscale). Swap
+  `stickerLimitsSnapshot.compressParams().MaxDim` from `maxDim` (accept gate) to a
+  new `compressMaxDim` field so static jpg/png larger than the target but within
+  the unchanged accept ceiling are downscaled before re-encode+store, instead of
+  the Fit branch being unreachable (gate/target were same-source, so it never
+  fired). Accept hard cap stays 1024 (decompression-bomb envelope unchanged);
+  webp/gif still validate-only; not exposed via appconfig. Zero-impact default,
+  byte-for-byte identical to `main` when unset. New getter clamp tests (no-infra)
+  + api-level downscale/regression tests. No new errcode / i18n / DB / migration.
+  Brief `.octospec/tasks/sticker-downscale-store/brief.md`.
+
 ## 2026-07-09 (P3-3)
 
 - **Change** — Task `card-message-p3-rich-inputs` (card message P3-3): extend the

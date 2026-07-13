@@ -51,21 +51,35 @@ func (h *Handler) searchGlobalMessages(c *wkhttp.Context) {
 	if !validateKeywordOptional(c, req.Keyword) {
 		return
 	}
-	if !validateSearchNotEmptyGlobal(c, req.Keyword, req.Filters) {
-		return
-	}
+	// NOTE (bug 3 / empty-keyword browse): unlike the single-channel endpoints
+	// there is deliberately NO validateSearchNotEmpty guard here. An empty
+	// keyword with no filters is a valid *browse* request that lists recent
+	// messages across every room the caller can read — the terms(channelId,
+	// allowlist) clause built by buildGlobalMessagesDSL bounds the scan exactly
+	// the way a single channel's channelId bounds _search_all, so there is no
+	// unbounded full-index scan to guard against. The browse-mode DSL semantics
+	// (media types 2/5 layered in, sort defaults to time_desc, relevance
+	// rejected via allowRelevance=false, cursor pagination) then match the
+	// single-channel empty-keyword path exactly.
 	pageSize, ok := validateGlobalBase(c, h.cfg, req.Sort, req.Cursor, req.Filters, req.PageSize, req.Keyword != "")
 	if !ok {
 		return
 	}
 
-	osChannelIDs, spaceID, singleFast, allowTimings, ok := h.resolveGlobalScope(c, loginUID, req.Filters.ChannelIDs, req.Filters.MemberUID)
+	osChannelIDs, spaceID, singleFast, allowTimings, ok := h.resolveGlobalScope(c, loginUID, req.Filters.ChannelIDs, req.Filters.MemberUIDs, req.Filters.MemberUID)
 	if !ok {
 		return
 	}
 	recordAllowlistTimings(c, allowTimings)
 	if singleFast != nil {
-		h.dispatchSingleAll(c, req, *singleFast, loginUID)
+		// Global endpoint semantics allow the empty-keyword + no-filter browse
+		// (see NOTE above); the terms(channelId) bound collapses to a single
+		// channel here so the fast path inherits the same bounded-scan guarantee
+		// as the multi-room path. Pass allowEmptyBrowse=true so the reused
+		// single-channel body skips validateSearchNotEmpty (bug 3 fast-path
+		// parity — the multi-room browse was allowed but the single-room fast
+		// path still rejected with 400).
+		h.dispatchSingleAll(c, req, *singleFast, loginUID, true)
 		return
 	}
 	if len(osChannelIDs) == 0 {
@@ -323,7 +337,7 @@ func (h *Handler) buildGlobalSearchAllHits(ctx context.Context, hits []*elastic.
 // tradeoff because a caller whose scope is one channel wanting to further
 // narrow by content_types would today also see the same result set (the
 // hard whitelist is what matters, and the fast path applies it).
-func (h *Handler) dispatchSingleAll(c *wkhttp.Context, req SearchGlobalMessagesReq, target channelRef, loginUID string) {
+func (h *Handler) dispatchSingleAll(c *wkhttp.Context, req SearchGlobalMessagesReq, target channelRef, loginUID string, allowEmptyBrowse bool) {
 	inner := SearchAllReq{
 		ChannelType: target.ChannelType,
 		ChannelID:   target.WireID,
@@ -347,17 +361,23 @@ func (h *Handler) dispatchSingleAll(c *wkhttp.Context, req SearchGlobalMessagesR
 	// consumed body — the single-channel handlers rebind. Simpler: call the
 	// core logic directly by re-running the search_all body with the
 	// synthesised inner req.
-	h.searchAllForGlobalFastPath(c, inner, loginUID)
+	h.searchAllForGlobalFastPath(c, inner, loginUID, allowEmptyBrowse)
 }
 
 // searchAllForGlobalFastPath is a body-less variant of h.searchAll that
 // accepts a pre-parsed SearchAllReq. Kept private and marked as
 // fast-path-only so the wire contract stays owned by h.searchAll.
-func (h *Handler) searchAllForGlobalFastPath(c *wkhttp.Context, req SearchAllReq, loginUID string) {
+//
+// allowEmptyBrowse toggles the single-channel validateSearchNotEmpty guard:
+// the global-messages endpoint deliberately admits empty-keyword + no-filter
+// browse (bounded by terms(channelId, allowlist)), so when that request
+// collapses to one room via the fast path it must inherit the same
+// permissiveness rather than snap back to the strict single-channel rule.
+func (h *Handler) searchAllForGlobalFastPath(c *wkhttp.Context, req SearchAllReq, loginUID string, allowEmptyBrowse bool) {
 	if !validateKeywordOptional(c, req.Keyword) {
 		return
 	}
-	if !validateSearchNotEmpty(c, req.Keyword, req.Filters) {
+	if !allowEmptyBrowse && !validateSearchNotEmpty(c, req.Keyword, req.Filters) {
 		return
 	}
 	pageSize, ok := validateBase(c, h.cfg, req.ChannelType, req.ChannelID, req.Sort, req.Cursor, req.Filters, req.PageSize, req.Keyword != "")
@@ -437,31 +457,4 @@ func (h *Handler) searchAllForGlobalFastPath(c *wkhttp.Context, req SearchAllReq
 	items := h.buildSearchAllHits(ctx, filtered, req, loginUID)
 	recordAudit(c, "search_global_messages_fast", req.ChannelType, req.ChannelID, req.Keyword, len(items))
 	c.Response(envelope(items, hasMore, nextCursor))
-}
-
-// validateSearchNotEmptyGlobal is the empty-search guard for the global
-// message endpoint. Mirrors validateSearchNotEmpty but consults the global
-// filter shape (which additionally recognises channel_ids / channel_types /
-// content_types / member_uid as "effective" filters).
-func validateSearchNotEmptyGlobal(c *wkhttp.Context, keyword string, filters GlobalSearchFilters) bool {
-	if keyword != "" {
-		return true
-	}
-	if hasEffectiveFilters(filters.baseFilters()) {
-		return true
-	}
-	if len(filters.ChannelIDs) > 0 {
-		return true
-	}
-	if len(filters.ChannelTypes) > 0 {
-		return true
-	}
-	if len(filters.ContentTypes) > 0 {
-		return true
-	}
-	if strings.TrimSpace(filters.MemberUID) != "" {
-		return true
-	}
-	respondValidation(c, "keyword", "keyword or at least one filter is required")
-	return false
 }

@@ -305,10 +305,12 @@ func TestBuildAllowlist_EmptyGroupsNoThreadQuery(t *testing.T) {
 	}
 }
 
-// TestChannelsForMember_DropsThreadsInV1 — the member_uid filter path is v1
-// simplified: thread entries in allowSet are dropped from the returned
-// scope entirely, regardless of the parent group's co-inhabitance.
-func TestChannelsForMember_DropsThreadsInV1(t *testing.T) {
+// TestChannelsForMembers_ThreadsUnderSharedGroupSurface — bug 5 flips the v1
+// behaviour: a member filter that keeps a group must ALSO keep every
+// allowlisted thread under that group (統一 rule: 群 → 群 + 其子区). The v1
+// unconditional thread-drop this test previously locked in is now obsolete;
+// it is replaced with the new positive assertion.
+func TestChannelsForMembers_ThreadsUnderSharedGroupSurface(t *testing.T) {
 	loginUID := "me"
 	memberUID := "colleague"
 	gSvc := &stubGroupSvc{
@@ -318,18 +320,15 @@ func TestChannelsForMember_DropsThreadsInV1(t *testing.T) {
 	}
 	uSvc := &stubUserSvc{}
 	h := newAllowlistHandler(t, gSvc, uSvc)
-	// Simulate an already-built allowSet with a group + a thread under it +
-	// a DM. channelsForMember should keep the group + DM (co-inhabitance /
-	// direct DM) but strip the thread.
 	threadID := thread.BuildChannelID("grpShared", "thrX")
 	allowSet := map[string]channelRef{
 		"grpShared": {OSChannelID: "grpShared", WireID: "grpShared", ChannelType: channelTypeGroup},
 		threadID:    {OSChannelID: threadID, WireID: threadID, ChannelType: channelTypeThread},
 		"dmFake":    {OSChannelID: "dmFake", WireID: memberUID, ChannelType: channelTypePerson},
 	}
-	got, err := h.channelsForMember(loginUID, memberUID, "", allowSet)
+	got, err := h.channelsForMembers(loginUID, []string{memberUID}, "", allowSet)
 	if err != nil {
-		t.Fatalf("channelsForMember: %v", err)
+		t.Fatalf("channelsForMembers: %v", err)
 	}
 	if _, ok := got["grpShared"]; !ok {
 		t.Errorf("shared group must be kept; got %+v", got)
@@ -337,8 +336,8 @@ func TestChannelsForMember_DropsThreadsInV1(t *testing.T) {
 	if _, ok := got["dmFake"]; !ok {
 		t.Errorf("DM with member must be kept; got %+v", got)
 	}
-	if _, ok := got[threadID]; ok {
-		t.Errorf("thread must be dropped in v1 channelsForMember; got %+v", got)
+	if _, ok := got[threadID]; !ok {
+		t.Errorf("thread under shared group must now surface (bug 5 統一 rule); got %+v", got)
 	}
 }
 
@@ -364,7 +363,7 @@ func TestResolveGlobalScope_ThreadNarrowingHits(t *testing.T) {
 	// Space gate.
 	c, _ := newValidatorCtx(t)
 	osIDs, _, singleFast, _, ok := h.resolveGlobalScope(c, loginUID,
-		[]GlobalChannelRef{{ChannelID: threadID, ChannelType: channelTypeThread}}, "")
+		[]GlobalChannelRef{{ChannelID: threadID, ChannelType: channelTypeThread}}, nil, "")
 	if !ok {
 		t.Fatalf("resolveGlobalScope must succeed; a response was already written")
 	}
@@ -399,7 +398,7 @@ func TestResolveGlobalScope_ThreadOutsideMembership(t *testing.T) {
 	c, _ := newValidatorCtx(t)
 	foreignThread := thread.BuildChannelID("grpB", "thrX")
 	osIDs, _, singleFast, _, ok := h.resolveGlobalScope(c, loginUID,
-		[]GlobalChannelRef{{ChannelID: foreignThread, ChannelType: channelTypeThread}}, "")
+		[]GlobalChannelRef{{ChannelID: foreignThread, ChannelType: channelTypeThread}}, nil, "")
 	if !ok {
 		t.Fatalf("resolveGlobalScope must succeed even when scope collapses to empty")
 	}
@@ -668,7 +667,7 @@ func TestResolveGlobalScope_ArchivedThreadNarrowingHits(t *testing.T) {
 
 	c, _ := newValidatorCtx(t)
 	osIDs, _, singleFast, _, ok := h.resolveGlobalScope(c, loginUID,
-		[]GlobalChannelRef{{ChannelID: archivedChan, ChannelType: channelTypeThread}}, "")
+		[]GlobalChannelRef{{ChannelID: archivedChan, ChannelType: channelTypeThread}}, nil, "")
 	if !ok {
 		t.Fatalf("resolveGlobalScope must succeed; a response was already written")
 	}
@@ -680,5 +679,119 @@ func TestResolveGlobalScope_ArchivedThreadNarrowingHits(t *testing.T) {
 	}
 	if singleFast.ChannelType != channelTypeThread || singleFast.OSChannelID != archivedChan {
 		t.Errorf("singleFast mismatch: %+v", singleFast)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// bug 4 · a selected group covers its sub-threads; a selected thread stays
+// scoped to itself. resolveGlobalScope folds every allowlisted thread whose
+// parent group was named in channel_ids into the resolved scope, then keeps
+// the allowlist intersection so a caller can never over-reach.
+// ---------------------------------------------------------------------------
+
+// TestResolveGlobalScope_GroupChannelIncludesThreads — selecting a group
+// (channelType=2) resolves scope = { group_no } ∪ { that group's threads }.
+// Threads of OTHER groups must not leak in.
+func TestResolveGlobalScope_GroupChannelIncludesThreads(t *testing.T) {
+	loginUID := "me"
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: {{GroupNo: "grpA"}, {GroupNo: "grpB"}},
+		},
+	}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	h.threadEnumFn = func([]string) (map[string][]string, error) {
+		return map[string][]string{
+			"grpA": {"t1", "t2"},
+			"grpB": {"t3"},
+		}, nil
+	}
+
+	c, _ := newValidatorCtx(t)
+	osIDs, _, singleFast, _, ok := h.resolveGlobalScope(c, loginUID,
+		[]GlobalChannelRef{{ChannelID: "grpA", ChannelType: channelTypeGroup}}, nil, "")
+	if !ok {
+		t.Fatalf("resolveGlobalScope must succeed")
+	}
+	want := map[string]bool{
+		"grpA": true,
+		thread.BuildChannelID("grpA", "t1"): true,
+		thread.BuildChannelID("grpA", "t2"): true,
+	}
+	if len(osIDs) != len(want) {
+		t.Fatalf("group scope must expand to group + its threads (want %d entries); got %v", len(want), osIDs)
+	}
+	for _, id := range osIDs {
+		if !want[id] {
+			t.Errorf("unexpected channelId %q in group-expanded scope (grpB thread must NOT leak)", id)
+		}
+	}
+	if singleFast != nil {
+		t.Errorf("a group with threads yields a multi-id scope; single-channel fast path must NOT fire; got %+v", singleFast)
+	}
+}
+
+// TestResolveGlobalScope_ThreadChannelScopesToThreadOnly — selecting a single
+// thread (channelType=5) resolves scope = { that thread } only: neither the
+// parent group nor sibling threads are pulled in.
+func TestResolveGlobalScope_ThreadChannelScopesToThreadOnly(t *testing.T) {
+	loginUID := "me"
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: {{GroupNo: "grpA"}},
+		},
+	}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	// grpA has three allowlisted threads; the request narrows to just one.
+	h.threadEnumFn = func([]string) (map[string][]string, error) {
+		return map[string][]string{"grpA": {"t1", "t2", "t3"}}, nil
+	}
+
+	target := thread.BuildChannelID("grpA", "t2")
+	c, _ := newValidatorCtx(t)
+	osIDs, _, singleFast, _, ok := h.resolveGlobalScope(c, loginUID,
+		[]GlobalChannelRef{{ChannelID: target, ChannelType: channelTypeThread}}, nil, "")
+	if !ok {
+		t.Fatalf("resolveGlobalScope must succeed")
+	}
+	if len(osIDs) != 1 || osIDs[0] != target {
+		t.Fatalf("thread selection must scope to the thread alone (no parent group, no siblings); got %v", osIDs)
+	}
+	if singleFast == nil || singleFast.OSChannelID != target || singleFast.ChannelType != channelTypeThread {
+		t.Errorf("lone-thread scope should take the single-channel fast path; got %+v", singleFast)
+	}
+}
+
+// TestResolveGlobalScope_GroupExpansionIntersectsAllowlist — the group→thread
+// expansion never lets a caller over-reach: a group the caller is NOT a member
+// of resolves to an empty scope (no group body, no threads), because both the
+// group and any folded threads are dropped by the allowlist intersection.
+func TestResolveGlobalScope_GroupExpansionIntersectsAllowlist(t *testing.T) {
+	loginUID := "me"
+	// Caller is only a member of grpA; grpZ is requested but not joined.
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: {{GroupNo: "grpA"}},
+		},
+	}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	h.threadEnumFn = func([]string) (map[string][]string, error) {
+		return map[string][]string{"grpA": {"t1"}}, nil
+	}
+
+	c, _ := newValidatorCtx(t)
+	osIDs, _, singleFast, _, ok := h.resolveGlobalScope(c, loginUID,
+		[]GlobalChannelRef{{ChannelID: "grpZ", ChannelType: channelTypeGroup}}, nil, "")
+	if !ok {
+		t.Fatalf("resolveGlobalScope must succeed even when scope collapses to empty")
+	}
+	if len(osIDs) != 0 {
+		t.Fatalf("a group outside the caller's allowlist must expand to nothing (no thread over-reach); got %v", osIDs)
+	}
+	if singleFast != nil {
+		t.Errorf("empty scope must not set singleFast; got %+v", singleFast)
 	}
 }

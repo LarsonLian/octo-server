@@ -3,12 +3,15 @@ package messages_search
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/gin-gonic/gin"
 	"github.com/olivere/elastic"
@@ -453,27 +456,172 @@ func TestBuildGlobalFileHits_DMChannelReversal(t *testing.T) {
 	}
 }
 
-// validateSearchNotEmptyGlobal accepts every global-only filter dimension as
-// "effective" so a browse-mode caller specifying just channel_ids /
-// channel_types / content_types / member_uid is not falsely rejected.
-func TestValidateSearchNotEmptyGlobal_GlobalOnlyFilters(t *testing.T) {
-	cases := []struct {
-		name    string
-		filters GlobalSearchFilters
-	}{
-		{"channel_ids", GlobalSearchFilters{ChannelIDs: []GlobalChannelRef{{ChannelID: "g", ChannelType: 2}}}},
-		{"channel_types", GlobalSearchFilters{ChannelTypes: []uint8{1}}},
-		{"content_types", GlobalSearchFilters{ContentTypes: []int{payloadTypeText}}},
-		{"member_uid", GlobalSearchFilters{MemberUID: "u"}},
+// bug 3 · empty keyword + no filters is a valid *browse* request on the global
+// messages endpoint. The single-channel-style validateSearchNotEmpty guard was
+// removed (the terms(channelId, allowlist) clause bounds the scan the same way
+// a single channel's channelId does), so such a request must pass validation
+// and reach the browse flow instead of being rejected with a 400.
+//
+// Driving the full handler with an EMPTY allowlist (no joined groups, no
+// friends) lets us assert the accept without touching OpenSearch: the resolved
+// scope collapses to empty and the handler returns the 200 empty-envelope
+// early-return at `len(osChannelIDs) == 0`. A 400 here would mean the guard is
+// still rejecting empty-keyword browse.
+func TestSearchGlobalMessages_EmptyKeywordNoFilter_Browses(t *testing.T) {
+	loginUID := "me"
+	gSvc := &stubGroupSvc{groupsByUID: map[string][]*group.InfoResp{loginUID: nil}}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	gc, _ := gin.CreateTestContext(rec)
+	gc.Request = httptest.NewRequest("POST", "/v1/messages/_search_global_messages",
+		strings.NewReader(`{"keyword":"","filters":{}}`))
+	gc.Set("uid", loginUID)
+	c := &wkhttp.Context{Context: gc}
+
+	h.searchGlobalMessages(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty keyword + no filter must be accepted (browse), got HTTP %d: %s",
+			rec.Code, rec.Body.String())
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c, _ := newValidatorCtx(t)
-			if ok := validateSearchNotEmptyGlobal(c, "", tc.filters); !ok {
-				t.Errorf("%s alone must satisfy the empty-search guard", tc.name)
-			}
-		})
+	var env CursorList
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("response must be a success envelope, got %q (err %v)", rec.Body.String(), err)
 	}
+	data, ok := env.Data.([]any)
+	if !ok || len(data) != 0 {
+		t.Fatalf("empty allowlist must yield an empty data array; got %#v", env.Data)
+	}
+}
+
+// bug 3 · single-channel fast-path parity for empty-keyword browse.
+//
+// When the caller's readable scope collapses to exactly one room (single
+// joined group, no threads / no DMs), resolveGlobalScope returns
+// singleFast != nil and searchGlobalMessages dispatches through
+// dispatchSingleAll → searchAllForGlobalFastPath — the fast path was
+// silently re-applying the strict single-channel validateSearchNotEmpty
+// guard, so the multi-room browse fix (bug 3) never reached the collapsed
+// case and still returned 400.
+//
+// The load-bearing assertion is negative: the response MUST NOT be a
+// VALIDATION_ERROR complaining about "keyword or at least one filter is
+// required". The fast path may still terminate with an upstream/internal
+// error because no OpenSearch is wired in the test env — that is fine as
+// long as the request survived validation.
+func TestSearchGlobalMessages_SingleGroupFastPath_EmptyKeywordBrowses(t *testing.T) {
+	resetESClientForTest()
+	defer resetESClientForTest()
+	primeESClientForFastPathTests(t)
+
+	loginUID := "me"
+	// Exactly one joined group, no threads and no DM peers → scope collapses
+	// to a single channel → singleFast fires.
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: {{GroupNo: "grpSolo"}},
+		},
+	}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	h.threadEnumFn = func([]string) (map[string][]string, error) { return nil, nil }
+
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	gc, _ := gin.CreateTestContext(rec)
+	gc.Request = httptest.NewRequest("POST", "/v1/messages/_search_global_messages",
+		strings.NewReader(`{"keyword":"","filters":{}}`))
+	gc.Set("uid", loginUID)
+	c := &wkhttp.Context{Context: gc}
+
+	h.searchGlobalMessages(c)
+
+	assertNotEmptySearchGuardRejection(t, rec)
+}
+
+// bug 3 · single-channel fast-path parity via channel_ids narrowing.
+//
+// Same load-bearing assertion as above, but reaches the fast path through a
+// different route: the caller is a member of several groups but the request
+// filters channel_ids down to one group that has no active threads → scope
+// intersect collapses to a single channelId → singleFast fires. This is the
+// realistic frontend shape (picker narrows scope) and is where reviewers
+// most often exercise the bug.
+func TestSearchGlobalMessages_ChannelIDsCollapseToOne_EmptyKeywordBrowses(t *testing.T) {
+	resetESClientForTest()
+	defer resetESClientForTest()
+	primeESClientForFastPathTests(t)
+
+	loginUID := "me"
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: {
+				{GroupNo: "grpA"},
+				{GroupNo: "grpB"},
+				{GroupNo: "grpC"},
+			},
+		},
+	}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	// grpA is the picker target; the other two are ambient membership. None
+	// have threads so the picked group can't fan out.
+	h.threadEnumFn = func([]string) (map[string][]string, error) { return nil, nil }
+
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	gc, _ := gin.CreateTestContext(rec)
+	gc.Request = httptest.NewRequest("POST", "/v1/messages/_search_global_messages",
+		strings.NewReader(`{"keyword":"","filters":{"channel_ids":[{"channel_id":"grpA","channel_type":2}]}}`))
+	gc.Set("uid", loginUID)
+	c := &wkhttp.Context{Context: gc}
+
+	h.searchGlobalMessages(c)
+
+	assertNotEmptySearchGuardRejection(t, rec)
+}
+
+// assertNotEmptySearchGuardRejection fails the test if the response looks
+// like the validateSearchNotEmpty 400 (empty keyword + no filter guard). All
+// other outcomes — 200 browse, upstream/internal after validation — are
+// treated as pass because the load-bearing question is whether the singleFast
+// dispatch reached past the validators.
+func assertNotEmptySearchGuardRejection(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	body := rec.Body.String()
+	// The empty-search guard renders a VALIDATION_ERROR whose serialized
+	// envelope carries msg="Invalid search request." The internal
+	// details.reason ("keyword or at least one filter is required") is
+	// stripped by httperr's SafeDetailKeys filter before it reaches the wire,
+	// so we must key off the client-visible msg. An upstream/internal 400
+	// (search backend unavailable in the test env) renders a different msg
+	// and is treated as pass — the load-bearing check is only that the
+	// singleFast dispatch cleared validation.
+	if strings.Contains(body, "Invalid search request.") {
+		t.Fatalf("singleFast branch must accept empty-keyword browse; got a validation 400: %s", body)
+	}
+}
+
+// primeESClientForFastPathTests injects a no-ping olivere client into the
+// package singleton so tests that drive the single-channel fast path skip the
+// ~5s startup healthcheck against 127.0.0.1:9200. The client's Search().Do()
+// still fails (no OS behind it) which surfaces as UPSTREAM/INTERNAL — the
+// only guarantee these tests need is that we got past validation.
+func primeESClientForFastPathTests(t *testing.T) {
+	t.Helper()
+	osMu.Lock()
+	defer osMu.Unlock()
+	if osClient != nil {
+		return
+	}
+	c, err := elastic.NewSimpleClient(elastic.SetURL("http://127.0.0.1:9"))
+	if err != nil {
+		t.Fatalf("prime SimpleClient: %v", err)
+	}
+	osClient = c
 }
 
 // newValidatorCtx is a lightweight wkhttp.Context builder for validator
@@ -697,5 +845,298 @@ func TestEnumerateDMPeers_UnionsFriendsAndSpaceMembers(t *testing.T) {
 	}
 	if len(peersEmpty) != 1 || peersEmpty[0] != "bob" {
 		t.Fatalf("empty spaceID must yield friends-only; got %v", peersEmpty)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// bug 5 · member_uids multi-select — AND semantics, thread inclusion, DM
+// arity, wire-fallback + self-drop normalisation.
+// ---------------------------------------------------------------------------
+
+// TestResolveGlobalScope_MemberUIDs_ANDSemantics — a request with two named
+// members resolves scope = groups where BOTH members are in (∩), never the
+// union. Any group where only one of the two is a member drops out.
+func TestResolveGlobalScope_MemberUIDs_ANDSemantics(t *testing.T) {
+	loginUID := "me"
+	memberX := "x"
+	memberY := "y"
+	// Caller is in grpAB, grpA, grpB. X is in grpAB + grpA. Y is in grpAB +
+	// grpB. Only grpAB survives the AND.
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: {{GroupNo: "grpAB"}, {GroupNo: "grpA"}, {GroupNo: "grpB"}},
+			memberX:  {{GroupNo: "grpAB"}, {GroupNo: "grpA"}},
+			memberY:  {{GroupNo: "grpAB"}, {GroupNo: "grpB"}},
+		},
+	}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	h.threadEnumFn = func([]string) (map[string][]string, error) { return nil, nil }
+
+	c, _ := newValidatorCtx(t)
+	osIDs, _, _, _, ok := h.resolveGlobalScope(c, loginUID, nil, []string{memberX, memberY}, "")
+	if !ok {
+		t.Fatalf("resolveGlobalScope must succeed")
+	}
+	if len(osIDs) != 1 || osIDs[0] != "grpAB" {
+		t.Fatalf("AND across members must yield only the shared group; got %v", osIDs)
+	}
+}
+
+// TestResolveGlobalScope_MemberUIDs_ThreadsIncluded — bug 5 統一 rule: a group
+// that survives the member filter must also fold in its allowlisted threads.
+// The old "channelsForMember drops threads" behaviour is retired.
+func TestResolveGlobalScope_MemberUIDs_ThreadsIncluded(t *testing.T) {
+	loginUID := "me"
+	memberX := "x"
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: {{GroupNo: "grpShared"}},
+			memberX:  {{GroupNo: "grpShared"}},
+		},
+	}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	h.threadEnumFn = func([]string) (map[string][]string, error) {
+		return map[string][]string{"grpShared": {"t1", "t2"}}, nil
+	}
+
+	c, _ := newValidatorCtx(t)
+	osIDs, _, _, _, ok := h.resolveGlobalScope(c, loginUID, nil, []string{memberX}, "")
+	if !ok {
+		t.Fatalf("resolveGlobalScope must succeed")
+	}
+	want := map[string]bool{
+		"grpShared":                            true,
+		threadIDForTest("grpShared", "t1"):     true,
+		threadIDForTest("grpShared", "t2"):     true,
+	}
+	if len(osIDs) != len(want) {
+		t.Fatalf("member filter must fold in shared group's threads (want %d entries); got %v", len(want), osIDs)
+	}
+	for _, id := range osIDs {
+		if !want[id] {
+			t.Errorf("unexpected channelId %q in member-filtered scope", id)
+		}
+	}
+}
+
+// TestResolveGlobalScope_MemberUIDs_DMSingleMember — exactly one named member
+// who is also a DM peer of the caller: the DM survives, plus any shared
+// groups (none here, so just the DM).
+func TestResolveGlobalScope_MemberUIDs_DMSingleMember(t *testing.T) {
+	loginUID := "me"
+	peer := "colleague"
+	// No shared groups; only a DM edge via friend list. Member is that same
+	// DM peer, so the DM entry alone must survive.
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: nil,
+			peer:     nil,
+		},
+	}
+	uSvc := &stubUserSvc{friends: []*user.FriendResp{{UID: peer}}}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	h.threadEnumFn = func([]string) (map[string][]string, error) { return nil, nil }
+
+	c, _ := newValidatorCtx(t)
+	osIDs, _, singleFast, _, ok := h.resolveGlobalScope(c, loginUID, nil, []string{peer}, "")
+	if !ok {
+		t.Fatalf("resolveGlobalScope must succeed")
+	}
+	fake := fakeChannelIDFor(loginUID, peer)
+	if len(osIDs) != 1 || osIDs[0] != fake {
+		t.Fatalf("single-member DM: scope must be exactly the DM channel; got %v", osIDs)
+	}
+	if singleFast == nil || singleFast.ChannelType != channelTypePerson || singleFast.WireID != peer {
+		t.Errorf("single-member DM should take the single-channel fast path with peer WireID; got %+v", singleFast)
+	}
+}
+
+// TestResolveGlobalScope_MemberUIDs_DMMultiMemberDropped — with more than one
+// named member the DM branch is inapplicable (multi-member DMs do not exist)
+// so any DM entry in allowSet must be dropped even if one of the members is a
+// DM peer.
+func TestResolveGlobalScope_MemberUIDs_DMMultiMemberDropped(t *testing.T) {
+	loginUID := "me"
+	memberX := "x"
+	memberY := "y"
+	// Caller has DMs with both x and y (via friend list). Neither shares a
+	// group with the caller, so the AND across shared groups is empty. The DM
+	// branch must NOT rescue anything for multi-member.
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: nil,
+			memberX:  nil,
+			memberY:  nil,
+		},
+	}
+	uSvc := &stubUserSvc{friends: []*user.FriendResp{{UID: memberX}, {UID: memberY}}}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	h.threadEnumFn = func([]string) (map[string][]string, error) { return nil, nil }
+
+	c, _ := newValidatorCtx(t)
+	osIDs, _, _, _, ok := h.resolveGlobalScope(c, loginUID, nil, []string{memberX, memberY}, "")
+	if !ok {
+		t.Fatalf("resolveGlobalScope must succeed")
+	}
+	if len(osIDs) != 0 {
+		t.Fatalf("multi-member DM is not a thing; scope must be empty; got %v", osIDs)
+	}
+}
+
+// TestSearchGlobalMessagesRequest_MemberUIDSingleFallback — a stale-frontend
+// request carrying only the legacy `member_uid` singular field must still be
+// honoured (backward compat during rolling deploy). normalizeMemberUIDs folds
+// it into the plural path.
+func TestSearchGlobalMessagesRequest_MemberUIDSingleFallback(t *testing.T) {
+	loginUID := "me"
+	member := "colleague"
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: {{GroupNo: "grpShared"}},
+			member:   {{GroupNo: "grpShared"}},
+		},
+	}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	h.threadEnumFn = func([]string) (map[string][]string, error) { return nil, nil }
+
+	c, _ := newValidatorCtx(t)
+	normalized := normalizeMemberUIDs(loginUID, nil, member)
+	if len(normalized) != 1 || normalized[0] != member {
+		t.Fatalf("legacy member_uid must fold into member_uids=[member]; got %v", normalized)
+	}
+	// Pass the legacy wire fields (nil plural, singular set) so the internal
+	// normalize inside resolveGlobalScope exercises the fallback path.
+	osIDs, _, _, _, ok := h.resolveGlobalScope(c, loginUID, nil, nil, member)
+	if !ok {
+		t.Fatalf("resolveGlobalScope must succeed on legacy fallback")
+	}
+	if len(osIDs) != 1 || osIDs[0] != "grpShared" {
+		t.Fatalf("legacy member_uid fallback must still narrow scope; got %v", osIDs)
+	}
+}
+
+// TestSearchGlobalMessagesRequest_MemberUIDsSelfDropped — checkboxing self in
+// the multi-select must be a no-op on that entry (mirrors the frontend
+// `filter(uid !== selfUid)`). Also confirms plural-precedence and dedup on
+// the way through.
+func TestSearchGlobalMessagesRequest_MemberUIDsSelfDropped(t *testing.T) {
+	loginUID := "me"
+	member := "colleague"
+	// Both fields set together (mid-refresh frontend); plural wins, self and
+	// duplicate are stripped. Expected canonical form: [colleague].
+	got := normalizeMemberUIDs(loginUID, []string{loginUID, member, member, "  "}, "ignored")
+	if len(got) != 1 || got[0] != member {
+		t.Fatalf("self/dup/blank stripping failed: got %v", got)
+	}
+	// All-self input collapses to nil so the caller treats "no member
+	// filter", NOT "empty intersection" — checkboxing only yourself must
+	// behave identically to leaving the field blank.
+	if got := normalizeMemberUIDs(loginUID, []string{loginUID}, ""); got != nil {
+		t.Fatalf("all-self input must collapse to nil (no member filter); got %v", got)
+	}
+	// End-to-end: resolveGlobalScope with [self, colleague] behaves the same
+	// as [colleague] alone.
+	gSvc := &stubGroupSvc{
+		groupsByUID: map[string][]*group.InfoResp{
+			loginUID: {{GroupNo: "grpShared"}},
+			member:   {{GroupNo: "grpShared"}},
+		},
+	}
+	uSvc := &stubUserSvc{}
+	h := newAllowlistHandler(t, gSvc, uSvc)
+	h.threadEnumFn = func([]string) (map[string][]string, error) { return nil, nil }
+	c, _ := newValidatorCtx(t)
+	osIDs, _, _, _, ok := h.resolveGlobalScope(c, loginUID, nil,
+		[]string{loginUID, member}, "")
+	if !ok {
+		t.Fatalf("resolveGlobalScope must succeed")
+	}
+	if len(osIDs) != 1 || osIDs[0] != "grpShared" {
+		t.Fatalf("self-in-list must be dropped in normalisation; got %v", osIDs)
+	}
+}
+
+// threadIDForTest is a thin wrapper over thread.BuildChannelID so the test
+// file stays self-contained on the composite-id format (matches the same
+// pattern used by search_global_thread_test.go).
+func threadIDForTest(groupNo, shortID string) string {
+	return thread.BuildChannelID(groupNo, shortID)
+}
+
+// bug 5 P1 hardening · member_uids cap. Left uncapped, every uid in
+// filters.member_uids triggered its own GetGroupsWithMemberUID call inside
+// resolveGlobalScope (no batch, serial DB round-trips), so a request with
+// N=1000 uids collapsed into 1000 DB queries before the per-request search
+// Timeout even got a chance to fire. maxMemberUIDs=50 mirrors maxSenderIDs's
+// existing wire-side floor and is enforced in the shared validator path used
+// by both global endpoints.
+
+// TestSearchGlobalMessagesRequest_MemberUIDsAtCapAccepted — exactly 50 uids
+// clears the cap (upper boundary, must NOT reject).
+func TestSearchGlobalMessagesRequest_MemberUIDsAtCapAccepted(t *testing.T) {
+	uids := make([]string, maxMemberUIDs)
+	for i := range uids {
+		uids[i] = "u" + itoa(i)
+	}
+	c, rec := newValidateCtx(t)
+	_, ok := validateGlobalBase(c, SearchConfig{}, "", "",
+		GlobalSearchFilters{MemberUIDs: uids}, 0, false)
+	if !ok {
+		t.Fatalf("member_uids at cap (%d) must be accepted; body=%s", maxMemberUIDs, rec.Body.String())
+	}
+}
+
+// TestSearchGlobalMessagesRequest_MemberUIDsExceedsCap — 51 uids trips the
+// cap and rejects with a VALIDATION_ERROR (400).
+func TestSearchGlobalMessagesRequest_MemberUIDsExceedsCap(t *testing.T) {
+	uids := make([]string, maxMemberUIDs+1)
+	for i := range uids {
+		uids[i] = "u" + itoa(i)
+	}
+	c, rec := newValidateCtx(t)
+	_, ok := validateGlobalBase(c, SearchConfig{}, "", "",
+		GlobalSearchFilters{MemberUIDs: uids}, 0, false)
+	if ok {
+		t.Fatalf("member_uids over cap (%d > %d) must be rejected", len(uids), maxMemberUIDs)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatalf("rejected member_uids must render a VALIDATION_ERROR envelope")
+	}
+}
+
+// TestSearchGlobalFilesRequest_MemberUIDsAtCapAccepted — same upper-boundary
+// check on the file endpoint validator; both paths go through
+// validateGlobalBaseSharedFields so they must agree on the cap.
+func TestSearchGlobalFilesRequest_MemberUIDsAtCapAccepted(t *testing.T) {
+	uids := make([]string, maxMemberUIDs)
+	for i := range uids {
+		uids[i] = "u" + itoa(i)
+	}
+	c, rec := newValidateCtx(t)
+	_, ok := validateGlobalFileBase(c, SearchConfig{}, "", "",
+		GlobalFileFilters{MemberUIDs: uids}, 0, false)
+	if !ok {
+		t.Fatalf("file endpoint member_uids at cap (%d) must be accepted; body=%s", maxMemberUIDs, rec.Body.String())
+	}
+}
+
+// TestSearchGlobalFilesRequest_MemberUIDsExceedsCap — file endpoint rejects
+// beyond the cap.
+func TestSearchGlobalFilesRequest_MemberUIDsExceedsCap(t *testing.T) {
+	uids := make([]string, maxMemberUIDs+1)
+	for i := range uids {
+		uids[i] = "u" + itoa(i)
+	}
+	c, rec := newValidateCtx(t)
+	_, ok := validateGlobalFileBase(c, SearchConfig{}, "", "",
+		GlobalFileFilters{MemberUIDs: uids}, 0, false)
+	if ok {
+		t.Fatalf("file endpoint member_uids over cap (%d > %d) must be rejected", len(uids), maxMemberUIDs)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatalf("rejected file endpoint member_uids must render a VALIDATION_ERROR envelope")
 	}
 }

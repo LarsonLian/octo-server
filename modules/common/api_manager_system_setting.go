@@ -290,7 +290,7 @@ func (m *Manager) updateSystemSettings(c *wkhttp.Context) {
 	}
 
 	// Prospective composite validation for the onboarding space-welcome
-	// five-tuple (task space-new-user-welcome-message). A partial update
+	// config (task space-new-user-welcome-message). A partial update
 	// (e.g. changing only space_id) must be validated against
 	// merge(current snapshot, incoming items), NOT the pre-write snapshot
 	// alone: validating the current snapshot would wrongly accept a patch that
@@ -315,11 +315,8 @@ func (m *Manager) updateSystemSettings(c *wkhttp.Context) {
 		if v, ok := welcomeIncoming["space_welcome_active_from"]; ok {
 			prospective.ActiveFromRaw = v
 		}
-		if v, ok := welcomeIncoming["space_welcome_message_zh_cn"]; ok {
-			prospective.MessageZhCN = v
-		}
-		if v, ok := welcomeIncoming["space_welcome_message_en_us"]; ok {
-			prospective.MessageEnUS = v
+		if v, ok := welcomeIncoming["space_welcome_message"]; ok {
+			prospective.Message = v
 		}
 		field, verr := ValidateSpaceWelcomeCombination(prospective, func(spaceID string) (bool, error) {
 			// GetSpaceName returns "" (no error) when the space is missing or

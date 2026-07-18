@@ -436,14 +436,25 @@ func normalizeMemberUIDs(loginUID string, uids []string, single string) []string
 // this Space OR the channel_ids/member_uid intersection is empty — the
 // handler should return an empty envelope without touching OS.
 func (h *Handler) resolveGlobalScope(c *wkhttp.Context, loginUID string, channelIDs []GlobalChannelRef, rawMemberUIDs []string, legacyMemberUID string) (osChannelIDs []string, spaceID string, singleFast *channelRef, timings allowlistTimings, ok bool) {
-	spaceID = strings.TrimSpace(spacepkg.GetSpaceID(c))
-	if spaceID == "" {
+	// spaceID 走 principal（决策十）：真人等价于 GetSpaceID(c)；bot 路由无 SpaceMiddleware
+	// 故为空；uk 取 api_key_space_id.
+	p := h.principal(c)
+	spaceID = p.SpaceID()
+	if spaceID == "" && p.RequiresSpaceScope() {
 		// DM double-guard is space-dependent; without a Space the guard cannot
 		// fire (§6.5). We fail-closed on the DM side identically to
 		// resolveP2PSpaceScope so a missing Space cannot silently escape the
 		// filter. RequireSpaceID=false is the operator escape hatch — we
 		// mirror it here so the two paths behave the same during the v1.9
 		// indexer rollout.
+		//
+		// YUJ-57: only real-user-scoped principals (user / uk) are subject to
+		// this gate. Space-less principals (as-bot / OBO) legitimately carry no
+		// Space and their allowlist is enumerated by the per-principal readable
+		// predicate (IsFriend / grantor allowlist), which already bounds DM
+		// visibility without a spaceId term — so they proceed with spaceID=""
+		// (applyGlobalDMSpaceScope then emits no DM clause) instead of being
+		// blocked here before ever reaching enumerateReadableChannels.
 		if h.cfg.RequireSpaceID {
 			respondNotFound(c, "channel")
 			return nil, "", nil, timings, false
@@ -452,7 +463,11 @@ func (h *Handler) resolveGlobalScope(c *wkhttp.Context, loginUID string, channel
 			zap.String("uid", loginUID))
 	}
 
-	allowGroup, allowDM, allowThread, allowTimings, err := h.buildAllowlist(c, loginUID, spaceID)
+	// 全局 allowlist 枚举经归一化谓词 enumerateReadableChannels（决策九）：真人语义主体
+	// 委托 buildAllowlist（现状不变），as-bot 分支在 #E 落——保证单频道门与 allowlist
+	// 共用同一谓词，不各写一套。principalForSubject 优先取路由显式写入的 principal
+	//（bot/uk，#B），否则用已解析的 (loginUID, spaceID) 组装真人载体（现网/既有单测行为不变）。
+	allowGroup, allowDM, allowThread, allowTimings, err := h.enumerateReadableChannels(c, principalForSubject(c, loginUID, spaceID))
 	timings = allowTimings
 	if err != nil {
 		h.Error("messages_search: allowlist build failed", zap.Error(err))
@@ -715,6 +730,128 @@ func (h *Handler) buildAllowlist(_ *wkhttp.Context, loginUID, spaceID string) ([
 
 	// Kept as separate slices only for readability at the call site; the
 	// caller flattens all three into a single set.
+	return allowGroup, allowDM, allowThread, timings, nil
+}
+
+// buildBotAllowlist enumerates the as-bot global allowlist (#E / YUJ-52): the
+// exact channel set botCanReadChannel (#C/#D) would admit for this bot, so the
+// single-channel gate and the global feed stay one predicate (决策九). It is the
+// bot-subject counterpart of buildAllowlist — same enumeration skeleton, but the
+// subject is botUID and the bot主体语义 strips two real-user-only edges:
+//
+//   - Groups: GetGroupsWithMemberUID(botUID) gated by ExistMembersActive — the
+//     enumeration dual of the ExistMemberActive relation the single-channel group
+//     gate (#D) point-evaluates. status!=Normal rows (kicked / group-blacklisted,
+//     including the #354 cascade that flips an owner-blacklisted user's in-group
+//     bot to non-Normal) drop out for free, so 群级黑名单 is inherited, not re-coded.
+//   - DM peers: GetFriends(botUID) — the enumeration dual of IsFriend(botUID, peer)
+//     (#C). No bidirectional-blacklist gate (bot 主体 blacklistPolicy=none: bot 无法
+//     有意义地拉黑/被拉黑，见 #C), no Space-member union and no bot-in-Space
+//     suppression (bot 无 Space；且此处主体本身即 bot，对端由 IsFriend 收口).
+//   - Threads: active threads under the active groups, reusing
+//     enumerateThreadsForGroups (子区继承父群成员身份，与 #D 一致).
+//
+// 有界性 (issue 已确认): checkBotOwnership 只允许创建者把自己的 bot 拉进群，
+// cascadeRemoveBotsInvitedByUIDTx 在创建者退群时级联移除其 bot，故 bot 群集合 ⊆ 创建者
+// 群集合，量级与真人 global 同阶——沿用现有 per-group / 聚合 thread 上限
+// (maxThreadsPerGroup / maxTotalThreadChannelIDs)，不为 bot 另设上限；超限降级行为与真人
+// 路径完全一致 (enumerateThreadsForGroups 同一实现)。
+//
+// 归一化 (决策九硬约束): 与 buildAllowlist 的差异纯粹是主体语义 (bot 无 Space、无黑名单)，
+// 不在此内联重写任何鉴权规则——所用的 friendship / active-membership 关系与 #C/#D 单频道门
+// 同源，故「单频道门放行 ⇔ 出现在 global allowlist」(#G 跨路一致性) 成立。
+func (h *Handler) buildBotAllowlist(botUID string) ([]channelRef, []channelRef, []channelRef, allowlistTimings, error) {
+	var timings allowlistTimings
+	if botUID == "" {
+		// Defensive: an empty subject owns no channel. Fail-closed to an empty
+		// allowlist rather than risk enumerating an unbounded set.
+		return nil, nil, nil, timings, nil
+	}
+
+	// Groups: joined groups gated by active membership. No Space filter (bot has
+	// no Space) and thus no external-group lookup — both are real-user Space
+	// machinery that does not apply to the bot subject.
+	groups, err := h.groupService.GetGroupsWithMemberUID(botUID)
+	if err != nil {
+		return nil, nil, nil, timings, err
+	}
+	candidateGroupNos := make([]string, 0, len(groups))
+	candidateGroupSet := make(map[string]struct{}, len(groups))
+	for _, g := range groups {
+		if g == nil || g.GroupNo == "" {
+			continue
+		}
+		if _, dup := candidateGroupSet[g.GroupNo]; dup {
+			continue
+		}
+		candidateGroupSet[g.GroupNo] = struct{}{}
+		candidateGroupNos = append(candidateGroupNos, g.GroupNo)
+	}
+	// Active-status gate — mirrors buildAllowlist: drop groups whose group_member
+	// row is non-Normal so a kicked / group-blacklisted bot cannot search that
+	// group via the global feed. Fail-closed on error (return, don't degrade to
+	// an un-gated allowlist).
+	activeGroupSet := candidateGroupSet
+	if len(candidateGroupNos) > 0 {
+		start := time.Now()
+		activeNos, gerr := h.groupService.ExistMembersActive(candidateGroupNos, botUID)
+		timings.memberActive += time.Since(start)
+		if gerr != nil {
+			h.Error("messages_search: ExistMembersActive lookup failed; fail-closed on bot group allowlist",
+				zap.String("bot_uid", botUID),
+				zap.Error(gerr))
+			return nil, nil, nil, timings, gerr
+		}
+		activeGroupSet = make(map[string]struct{}, len(activeNos))
+		for _, no := range activeNos {
+			activeGroupSet[no] = struct{}{}
+		}
+	}
+	allowGroup := make([]channelRef, 0, len(candidateGroupNos))
+	groupNos := make([]string, 0, len(candidateGroupNos))
+	for _, no := range candidateGroupNos {
+		if _, ok := activeGroupSet[no]; !ok {
+			continue
+		}
+		allowGroup = append(allowGroup, channelRef{
+			OSChannelID: no,
+			WireID:      no,
+			ChannelType: channelTypeGroup,
+		})
+		groupNos = append(groupNos, no)
+	}
+
+	// DM peers: friend edges only. No blacklist gate (blacklistNone), no
+	// Space-member union, no bot-in-Space filter — see the doc comment.
+	dmStart := time.Now()
+	friends, ferr := h.userService.GetFriends(botUID)
+	if ferr != nil {
+		return nil, nil, nil, timings, ferr
+	}
+	allowDM := make([]channelRef, 0, len(friends))
+	seenPeer := make(map[string]struct{}, len(friends))
+	for _, f := range friends {
+		if f == nil || f.UID == "" || f.UID == botUID {
+			continue
+		}
+		if _, dup := seenPeer[f.UID]; dup {
+			continue
+		}
+		seenPeer[f.UID] = struct{}{}
+		allowDM = append(allowDM, channelRef{
+			OSChannelID: fakeChannelIDFor(botUID, f.UID),
+			WireID:      f.UID,
+			ChannelType: channelTypePerson,
+		})
+	}
+	timings.dmPeers += time.Since(dmStart)
+
+	// Threads under the active groups — same batch helper + hard caps as the
+	// real-user path; threads inherit their parent group's membership gate.
+	threadStart := time.Now()
+	allowThread := h.enumerateThreadsForGroups(groupNos)
+	timings.threadEnum += time.Since(threadStart)
+
 	return allowGroup, allowDM, allowThread, timings, nil
 }
 

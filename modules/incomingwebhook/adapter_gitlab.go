@@ -12,9 +12,11 @@ package incomingwebhook
 // 是配置错误而非枚举探测（见 handlePush 注释 + #297 鉴权决定）。
 //
 // 渲染策略与 GitHub 适配器一致：按 X-Gitlab-Event 把常用事件翻译成 markdown 文本
-// （走 native 纯文本路径），刻意只渲染「人关心的」动作子集，刷屏动作（MR update /
-// pipeline running 等）返回 200 + skipped 落审计。所有 gl* 结构体只声明渲染需要的
-// 字段（白名单解析），其余 payload 字段一律忽略。
+// （走 native 纯文本路径）。MR/Issue 的所有 action、pipeline 的所有 status 均会渲染
+// （产品决定：不按「是否刷屏」过滤——旧版本只渲染终态/open-close-reopen-merge 子集，
+// 现已放开）；仍在渲染子集之外的只有事件【类型】本身（Job Hook / Wiki Page Hook 等，
+// 见 parseGitLabPush 的 default 分支）与畸形 payload（缺 action/status 字段）。所有
+// gl* 结构体只声明渲染需要的字段（白名单解析），其余 payload 字段一律忽略。
 
 import (
 	"context"
@@ -111,6 +113,12 @@ type glPushEvent struct {
 	Project      glProject  `json:"project"`
 }
 
+// glLabel is a GitLab label object (the top-level `labels[]` array GitLab attaches
+// to Merge Request Hook / Issue Hook payloads). Only Title is rendered.
+type glLabel struct {
+	Title string `json:"title"`
+}
+
 type glMergeRequestEvent struct {
 	User             glUser `json:"user"`
 	ObjectAttributes struct {
@@ -118,7 +126,14 @@ type glMergeRequestEvent struct {
 		Title  string `json:"title"`
 		URL    string `json:"url"`
 		Action string `json:"action"`
+		// SourceBranch / TargetBranch feed the card-only Source/Target FactSet rows
+		// (text path unchanged, same "card-only" convention as pipeline's
+		// Duration/Jobs — see glPipelineEvent).
+		SourceBranch string `json:"source_branch"`
+		TargetBranch string `json:"target_branch"`
 	} `json:"object_attributes"`
+	// Labels feeds the card-only Labels FactSet row;缺省即不展示该行。
+	Labels  []glLabel `json:"labels"`
 	Project glProject `json:"project"`
 }
 
@@ -130,6 +145,8 @@ type glIssueEvent struct {
 		URL    string `json:"url"`
 		Action string `json:"action"`
 	} `json:"object_attributes"`
+	// Labels feeds the card-only Labels FactSet row;缺省即不展示该行。
+	Labels  []glLabel `json:"labels"`
 	Project glProject `json:"project"`
 }
 
@@ -318,11 +335,15 @@ func renderGitLabTagPush(ev *glPushEvent) string {
 func renderGitLabMergeRequest(ev *glMergeRequestEvent) string {
 	verb := glActionVerb(ev.ObjectAttributes.Action)
 	if verb == "" {
-		// update / approved / unapproved / ... 刷屏动作不渲染 → skip。
+		// 缺 action 字段的畸形 payload：没有可渲染的动作 → skip（唯一保留的过滤）。
 		return ""
 	}
+	// verb 可能是 glActionVerb 未知动作时原样透传的外部 action 值：拼进
+	// `**actor** verb merge request` 纯文本前必须转义，否则一个恶意 action（如
+	// `**pwn** [x](http://evil)`）能伪造粗体/可点击链接——与 actor/title 等外部字段
+	// 同一套 mdInertText 处理（trust-boundary.md）。
 	return glWithRepo(fmt.Sprintf("**%s** %s merge request [!%d %s](%s)",
-		glActor(ev.User.Username, ev.User.Name), verb, ev.ObjectAttributes.IID,
+		glActor(ev.User.Username, ev.User.Name), mdInertText(verb, glActorMax), ev.ObjectAttributes.IID,
 		mdLinkText(ev.ObjectAttributes.Title, 200), ev.ObjectAttributes.URL),
 		ev.Project)
 }
@@ -333,7 +354,7 @@ func renderGitLabIssue(ev *glIssueEvent) string {
 		return ""
 	}
 	return glWithRepo(fmt.Sprintf("**%s** %s issue [#%d %s](%s)",
-		glActor(ev.User.Username, ev.User.Name), verb, ev.ObjectAttributes.IID,
+		glActor(ev.User.Username, ev.User.Name), mdInertText(verb, glActorMax), ev.ObjectAttributes.IID,
 		mdLinkText(ev.ObjectAttributes.Title, 200), ev.ObjectAttributes.URL),
 		ev.Project)
 }
@@ -367,35 +388,45 @@ func renderGitLabNote(ev *glNoteEvent) string {
 }
 
 func renderGitLabPipeline(ev *glPipelineEvent) string {
-	// 只渲染终态：running / pending / created / manual / skipped 都会刷屏 → skip。
-	switch ev.ObjectAttributes.Status {
-	case "success", "failed", "canceled":
-	default:
+	if ev.ObjectAttributes.Status == "" {
+		// 缺 status 字段的畸形 payload：没有可渲染的状态 → skip（唯一保留的过滤——
+		// 所有非空状态，包括 pending/running/created/manual/skipped，均渲染）。
 		return ""
 	}
 	// Pipeline 是唯一自拼 URL 的事件（MR/Issue/Note 直接用 object_attributes.url 绝对
 	// 地址）。project.web_url 缺失时（白名单解析不保证字段必到）退化为不带链接的纯文本，
 	// 避免渲染出 [#99](/-/pipelines/99) 这种不可点击的相对路径（#423 review，lml2468）。
+	//
+	// status 曾经只可能是 switch 已放行的三个终态字面量（安全），过滤放开后它是外部原样
+	// 输入（任何持有 URL token 的调用方都能自定义），拼进纯文本前必须转义——与
+	// glActionVerb 的 verb 同一类「白名单收窄=隐式转义」陷阱，同一套 mdInertText 处理
+	// （#610 review，lml2468 P1：这次过滤放开只修了 verb，漏了 status）。
+	status := mdInertText(ev.ObjectAttributes.Status, glActorMax)
 	var line string
 	if ev.Project.WebURL != "" {
 		line = fmt.Sprintf("Pipeline [#%d](%s/-/pipelines/%d) %s on `%s`",
 			ev.ObjectAttributes.ID, ev.Project.WebURL, ev.ObjectAttributes.ID,
-			ev.ObjectAttributes.Status, glShortRef(ev.ObjectAttributes.Ref))
+			status, glShortRef(ev.ObjectAttributes.Ref))
 	} else {
 		line = fmt.Sprintf("Pipeline #%d %s on `%s`",
-			ev.ObjectAttributes.ID, ev.ObjectAttributes.Status, glShortRef(ev.ObjectAttributes.Ref))
+			ev.ObjectAttributes.ID, status, glShortRef(ev.ObjectAttributes.Ref))
 	}
 	return glWithRepo(line, ev.Project)
 }
 
-// glActor 优先用 username（GitLab 用户名字符集受限：[a-zA-Z0-9_.-]，进 `**X**` 粗体
-// 无注入面），回退 display name，再兜底 "someone"。display name 是自由文本，进粗体上
-// 下文必须经 mdInertText 转义（`*`/`[`/`]`/`<` 等），否则一个名为
-// `**evil** [x](http://attacker)` 的用户能往群消息里注入粗体+可点击链接——与
-// adapter_multica.go 对 actor/identifier 的处理同口径（#423 review，Jerry-Xin/mochashanyao）。
+// glActor 优先用 username，回退 display name，再兜底 "someone"。两者都经
+// mdInertText 转义（`*`/`[`/`]`/`<` 等），否则一个名为 `**evil** [x](http://attacker)`
+// 的 username/display name 能往群消息里注入粗体+可点击链接——与 adapter_multica.go
+// 对 actor/identifier 的处理同口径（#423 review，Jerry-Xin/mochashanyao）。
+//
+// username 不能只按「GitLab 用户名字符集受限」豁免转义：本端点只校验共享密钥
+// token，并不验证请求真的来自 GitLab，持有 token 的调用方能把 username 设成任意
+// 字符串——与 action/status 曾经「白名单收窄=隐式安全」是同一类陷阱（#610 review，
+// yujiawei 二审发现，预存在于本文件、随本次改动一并修复）。card 路径的 glActorCard
+// 一直就是两个分支都转义，这里是把文本路径补齐到同一口径。
 func glActor(username, name string) string {
 	if username != "" {
-		return username
+		return mdInertText(username, glActorMax)
 	}
 	if name != "" {
 		return mdInertText(name, glActorMax)
@@ -403,10 +434,19 @@ func glActor(username, name string) string {
 	return "someone"
 }
 
-// glActionVerb 把 GitLab 的 MR/Issue object_attributes.action 映射为渲染动词；
-// 返回空表示该动作在渲染子集之外（调用方无需修复，走 skip）。
+// glActionVerb 把 GitLab 的 MR/Issue object_attributes.action 映射为渲染动词。所有
+// action 都会渲染（产品决定：不再按「是否刷屏」过滤，update/approved/unapproved 等
+// 曾经跳过的动作现在也推送）——返回空仅表示 action 字段本身缺省（畸形 payload，没
+// 有可渲染的动作），调用方据此走 skip，这是唯一保留的过滤。已知值给出通顺的英文
+// 过去式；未知/GitLab 未来新增的值原样透传，避免每次 GitLab 加新 action 都要改代码。
+//
+// ⚠️ 未知值分支直接回传外部输入本身（action 字段无枚举校验，任何持有 URL token 的
+// 调用方都能自定义）——调用方必须在拼进 markdown/card 前用 mdInertText / escapeCardText
+// 转义这个返回值，不能假设它总是字面量安全。
 func glActionVerb(action string) string {
 	switch action {
+	case "":
+		return ""
 	case "open":
 		return "opened"
 	case "close":
@@ -415,8 +455,14 @@ func glActionVerb(action string) string {
 		return "reopened"
 	case "merge":
 		return "merged"
+	case "update":
+		return "updated"
+	case "approved":
+		return "approved"
+	case "unapproved":
+		return "unapproved"
 	default:
-		return ""
+		return action
 	}
 }
 
@@ -457,8 +503,9 @@ func glShortSHA(sha string) string {
 // The card builders below mirror the text renderers' event/action decisions but emit
 // an octo/v1 card object using the SAME anatomy + escaper as the github adapter
 // (adapter_card.go) — parity. They operate on the SAME *ev the text renderer used
-// (parseGitLabPush unmarshals once), returning nil for subset-outside actions
-// (→ degrade to text via vcsPushReq).
+// (parseGitLabPush unmarshals once), returning nil only when the payload has nothing
+// to render (missing action/status — see glActionVerb / buildGitLabPipelineCard),
+// never because of which action/status it is (→ degrade to text via vcsPushReq).
 
 // glActorCard is glActor for the card path: username (restricted charset) or the
 // free-text display name, both escaped for a TextBlock leaf.
@@ -525,12 +572,26 @@ func buildGitLabMergeRequestCard(ev *glMergeRequestEvent, lang string) map[strin
 	if verb == "" {
 		return nil
 	}
+	// 卡片专属的结构化 FactSet（源分支 / 目标分支 / 标签）——文本路径不含这些字段，
+	// 故 flag-off 字节不变，与 pipeline 卡片同一约定（见 buildGitLabPipelineCard）。
+	labels := vcsCardLabelsFor(lang)
+	var facts []vcsFact
+	if src := cardCodeSpan(ev.ObjectAttributes.SourceBranch, cardRefMax); src != "" {
+		facts = append(facts, vcsFact{title: labels.source, value: src})
+	}
+	if tgt := cardCodeSpan(ev.ObjectAttributes.TargetBranch, cardRefMax); tgt != "" {
+		facts = append(facts, vcsFact{title: labels.target, value: tgt})
+	}
+	if f := glLabelsFact(labels.labels, ev.Labels); f != nil {
+		facts = append(facts, *f)
+	}
 	return vcsCardData{
 		source:   cardSourceGitLab,
 		variant:  "vcs.gitlab.merge_request",
-		headline: fmt.Sprintf("%s %s a merge request", glActorCard(ev.User.Username, ev.User.Name), verb),
+		headline: fmt.Sprintf("%s %s a merge request", glActorCard(ev.User.Username, ev.User.Name), escapeCardText(verb, cardActorMax)),
 		subtitle: escapeCardText(ev.Project.PathWithNamespace, cardTitleMax),
 		lines:    []string{numberedTitle("!", ev.ObjectAttributes.IID, ev.ObjectAttributes.Title)},
+		facts:    facts,
 		url:      httpURLForCard(ev.ObjectAttributes.URL),
 	}.card(lang)
 }
@@ -540,14 +601,37 @@ func buildGitLabIssueCard(ev *glIssueEvent, lang string) map[string]interface{} 
 	if verb == "" {
 		return nil
 	}
+	var facts []vcsFact
+	if f := glLabelsFact(vcsCardLabelsFor(lang).labels, ev.Labels); f != nil {
+		facts = append(facts, *f)
+	}
 	return vcsCardData{
 		source:   cardSourceGitLab,
 		variant:  "vcs.gitlab.issue",
-		headline: fmt.Sprintf("%s %s an issue", glActorCard(ev.User.Username, ev.User.Name), verb),
+		headline: fmt.Sprintf("%s %s an issue", glActorCard(ev.User.Username, ev.User.Name), escapeCardText(verb, cardActorMax)),
 		subtitle: escapeCardText(ev.Project.PathWithNamespace, cardTitleMax),
 		lines:    []string{numberedTitle("#", ev.ObjectAttributes.IID, ev.ObjectAttributes.Title)},
+		facts:    facts,
 		url:      httpURLForCard(ev.ObjectAttributes.URL),
 	}.card(lang)
+}
+
+// glLabelsFact builds the shared "Labels (N)" FactSet row for the MR/Issue cards
+// (nil when there is nothing to show — no labels, or every label title is blank —
+// so the caller omits the row entirely). Label titles are project-defined free text,
+// escaped/capped by the shared cappedFactValue (same convention as the pipeline
+// card's Jobs fact); the count in the title reflects the real (non-blank) total, not
+// the truncated list.
+func glLabelsFact(title string, labels []glLabel) *vcsFact {
+	names := make([]string, len(labels))
+	for i, l := range labels {
+		names[i] = l.Title
+	}
+	value, n := cappedFactValue(names, maxRenderedLabels)
+	if n == 0 {
+		return nil
+	}
+	return &vcsFact{title: fmt.Sprintf("%s (%d)", title, n), value: value}
 }
 
 func buildGitLabNoteCard(ev *glNoteEvent, lang string) map[string]interface{} {
@@ -577,9 +661,7 @@ func buildGitLabNoteCard(ev *glNoteEvent, lang string) map[string]interface{} {
 }
 
 func buildGitLabPipelineCard(ev *glPipelineEvent, lang string) map[string]interface{} {
-	switch ev.ObjectAttributes.Status {
-	case "success", "failed", "canceled":
-	default:
+	if ev.ObjectAttributes.Status == "" {
 		return nil
 	}
 	// 卡片专属的结构化 FactSet（分支 / 状态 / 耗时 / 作业）——文本路径不含这些字段，
@@ -593,21 +675,13 @@ func buildGitLabPipelineCard(ev *glPipelineEvent, lang string) map[string]interf
 		facts = append(facts, vcsFact{title: labels.duration, value: dur})
 	}
 	if len(ev.Builds) > 0 {
-		names := make([]string, 0, maxRenderedJobs)
+		names := make([]string, len(ev.Builds))
 		for i, b := range ev.Builds {
-			if i == maxRenderedJobs {
-				break
-			}
-			names = append(names, escapeCardText(b.Name, cardActorMax))
+			names[i] = b.Name
 		}
-		value := strings.Join(names, " / ")
-		if len(ev.Builds) > maxRenderedJobs {
-			value += " …"
+		if value, n := cappedFactValue(names, maxRenderedJobs); n > 0 {
+			facts = append(facts, vcsFact{title: fmt.Sprintf("%s (%d)", labels.jobs, n), value: value})
 		}
-		facts = append(facts, vcsFact{
-			title: fmt.Sprintf("%s (%d)", labels.jobs, len(ev.Builds)),
-			value: value,
-		})
 	}
 	url := ""
 	if p := httpURLForCard(ev.Project.WebURL); p != "" {

@@ -276,6 +276,61 @@ func vcsPushReq(text string, card map[string]interface{}) *pushPayloadReq {
 // before eliding — the (N) count still reflects the true total.
 const maxRenderedJobs = 8
 
+// maxRenderedLabels bounds how many GitLab MR/Issue label titles the "Labels (N)"
+// fact lists before eliding — same elide convention as maxRenderedJobs.
+const maxRenderedLabels = 10
+
+// cardFactItemMax bounds a single Jobs/Labels fact item (job name / label title)
+// before it enters the "/"-joined FactSet value. Deliberately its own constant
+// rather than reusing cardActorMax: job names and label titles are a different
+// domain (project-defined, can legitimately run longer) than an actor display
+// name, even though both happened to want 64 today (PR #610 review, yujiawei P2).
+const cardFactItemMax = 64
+
+// cappedFactValue builds a capped, "/"-joined FactSet value from raw external name
+// strings — shared by the pipeline card's Jobs fact and the GitLab MR/Issue Labels
+// fact (previously duplicated inline at each call site, which could let their
+// escaping/capping decisions silently drift apart). Each name is escaped via
+// escapeCardText; blank names (e.g. an empty label title) are dropped before capping
+// and counting, so the fact never shows an empty slot or an inflated (N). Returns
+// ("", 0) when there is nothing left to show — the caller omits the FactSet row
+// entirely in that case.
+func cappedFactValue(rawNames []string, max int) (value string, count int) {
+	names := make([]string, 0, len(rawNames))
+	for _, n := range rawNames {
+		if v := escapeCardText(n, cardFactItemMax); v != "" {
+			names = append(names, v)
+		}
+	}
+	if len(names) == 0 {
+		return "", 0
+	}
+	shown := names
+	overflow := len(names) > max
+	if overflow {
+		shown = names[:max]
+	}
+	value = strings.Join(shown, " / ")
+	if overflow {
+		value += " …"
+	}
+	return value, len(names)
+}
+
+// vcsCardLabels are the localized FactSet titles for the GitLab merge_request card's
+// Source/Target branch rows and the Labels row shared with the issue card (issues
+// have no source/target branch).
+type vcsCardLabels struct {
+	source, target, labels string
+}
+
+func vcsCardLabelsFor(lang string) vcsCardLabels {
+	if isZhLang(lang) {
+		return vcsCardLabels{source: "源分支", target: "目标分支", labels: "标签"}
+	}
+	return vcsCardLabels{source: "Source", target: "Target", labels: "Labels"}
+}
+
 // pipelineLabels are the localized FactSet titles for the pipeline card.
 type pipelineLabels struct {
 	branch, status, duration, jobs string
@@ -297,24 +352,27 @@ const maxPipelineDurationSec = 100 * 3600
 
 // formatPipelineDuration renders a pipeline elapsed time (seconds) as a compact,
 // language-neutral "1h 2m" / "3m 42s" / "42s". <= 0 (missing / null) → ""; values
-// above the sanity cap are clamped.
+// above the sanity cap are clamped and prefixed ">" so a clamped value reads
+// distinctly from a genuine ~100h pipeline (PR #610 review, mochashanyao P2).
 func formatPipelineDuration(sec int) string {
 	if sec <= 0 {
 		return ""
 	}
+	prefix := ""
 	if sec > maxPipelineDurationSec {
 		sec = maxPipelineDurationSec
+		prefix = ">"
 	}
 	h := sec / 3600
 	m := (sec % 3600) / 60
 	s := sec % 60
 	switch {
 	case h > 0:
-		return fmt.Sprintf("%dh %dm", h, m)
+		return prefix + fmt.Sprintf("%dh %dm", h, m)
 	case m > 0:
-		return fmt.Sprintf("%dm %ds", m, s)
+		return prefix + fmt.Sprintf("%dm %ds", m, s)
 	default:
-		return fmt.Sprintf("%ds", s)
+		return prefix + fmt.Sprintf("%ds", s)
 	}
 }
 
@@ -329,6 +387,11 @@ func pipelineStatusColor(status string) string {
 		return "Attention"
 	case "canceled":
 		return "Warning"
+	case "running", "pending", "created", "waiting_for_resource", "preparing", "scheduled":
+		// In-progress-ish statuses only became reachable once the terminal-status
+		// filter was removed; without a color they were visually indistinguishable
+		// from an unrecognized status (PR #610 review, mochashanyao P2).
+		return "Accent"
 	}
 	return ""
 }

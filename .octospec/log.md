@@ -4,6 +4,36 @@ Change history for this repo's `.octospec/`, following the
 [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 change-log convention (§7). Newest first.
 
+## 2026-07-20 (gitlab-mr-issue-cards)
+
+- **Feature** — GitLab merge_request/issue InteractiveCards gained a
+  Source/Target branch (MR) + Labels(N) FactSet, mirroring the existing
+  pipeline card. Card-only; text degrade path unchanged.
+- **Behavior change** — GitLab adapter no longer filters MR/Issue events by
+  action or pipeline events by status (explicit product decision); every
+  action/status now renders on both text and card paths.
+- **Fix** — A follow-up code review found the filter-removal had silently
+  reopened a markdown/link injection: `glActionVerb`'s raw-passthrough
+  fallback for unmapped actions was interpolated unescaped. Fixed by escaping
+  at every call site; also deduped the pipeline Jobs / new Labels fact
+  cap-and-join logic.
+- **Fix** — A PR review (lml2468, PR #610) then found the exact same bug
+  class on the sibling field the first fix missed: GitLab pipeline `status`
+  also lost its whitelist gate in the same commit, and was still interpolated
+  raw on the text path. Fixed identically. See
+  [journal](journal/shared/gitlab-mr-issue-cards.md) and the pending learning
+  on whitelist-gates-as-implicit-sanitizers (updated with this recurrence).
+- **Fix** — Re-review (yujiawei, PR #610) found the same class of bug a third
+  time, pre-existing in `glActor`'s `username` branch (byte-identical to
+  `main`, not introduced by this task, but folded into the same fix pass):
+  it assumed GitLab's restricted username charset made escaping unnecessary,
+  which does not hold at this trust boundary (the endpoint only checks a
+  shared secret, not that the payload is genuinely from GitLab). Also
+  addressed two non-blocking review nits (mochashanyao, PR #610): a
+  distinguishing `>` prefix when `formatPipelineDuration` clamps a hostile
+  value, and a dedicated `cardFactItemMax` constant instead of reusing the
+  actor-name clamp for Jobs/Labels fact items (yujiawei, PR #610).
+
 ## 2026-07-17 (docs-approval-card-enrich)
 
 - **Feature** — Enriched the docs access-request approval card (header + colored

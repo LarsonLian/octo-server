@@ -527,10 +527,18 @@ func installCardActionDispatch(ctx *config.Context) (*cardActionDispatchRuntime,
 		options.MaxRetries = 1
 		options.PoolSize = 10
 	})
+	dlqRetention := cardactiondispatch.DLQRetentionFromEnv(os.Getenv)
+	// Log both the raw override and the resolved retention so a typo'd
+	// OCTO_CARD_ACTION_DLQ_RETENTION_DAYS that silently fell back to the default is visible
+	// (raw="90x" but retention=720h reveals the fallback), and so operators can match the CLI.
+	log.NewTLog("CardActionDispatch").Info("card action DLQ retention resolved",
+		zap.Duration("retention", dlqRetention),
+		zap.String("env", cardactiondispatch.DLQRetentionEnv),
+		zap.String("raw", os.Getenv(cardactiondispatch.DLQRetentionEnv)))
 	queue, err := cardactiondispatch.NewRedisQueue(redisClient, cardactiondispatch.QueueConfig{
 		Prefix:       "card_action_dispatch",
 		LiveTTL:      ctx.GetConfig().Robot.MessageExpire,
-		DLQRetention: 30 * 24 * time.Hour,
+		DLQRetention: dlqRetention,
 	})
 	if err != nil {
 		_ = redisClient.Close()

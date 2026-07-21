@@ -4,6 +4,62 @@ Change history for this repo's `.octospec/`, following the
 [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 change-log convention (§7). Newest first.
 
+## 2026-07-20 (route-missing-retry)
+
+- **Fix** — Card-action dispatch (`internal/cardactiondispatch`) now **defers** a
+  `route_missing` at dispatch time (no attempt consumed) instead of dead-lettering on
+  the first attempt. An event only enters the queue when its route existed at enqueue
+  time, so a miss at dispatch means the process restarted into a run whose
+  `OCTO_CARD_ACTION_ROUTES` lacked the route while the durable queue carried the event
+  across — previously a permanent, non-self-healing DLQ that read at the UI as docs
+  approve/deny cards never updating. Deferring (rather than nacking) matters: a nack
+  spends `route.MaxAttempts`, so the event would trip `attempts_exhausted` the moment
+  its route returned. Within `routeMissingMaxWindow` (15m) the event waits and then
+  dispatches on its original attempt budget; past the window it dead-letters
+  (`reason=route_missing`) so a genuine misconfiguration stays visible. The attempt-budget
+  interaction was caught by an `xhigh` code review of the first (nack-based) cut. See
+  [brief](tasks/route-missing-retry/brief.md) · [journal](journal/shared/route-missing-retry.md).
+- **Learning (pending)** — `durable-queue-registry-divergence`: a durable/shared work
+  queue consumed against per-process, startup-loaded config can dead-letter valid work
+  across a config-divergent restart; treat "config absent at consume time" as a bounded
+  retry, not a first-attempt DLQ.
+- **Change (config)** — Card-action DLQ retention is now configurable via
+  `OCTO_CARD_ACTION_DLQ_RETENTION_DAYS` (whole days, 1–365) through a shared
+  `cardactiondispatch.DLQRetentionFromEnv` resolver used by both `main.go` and
+  `tools/card-action-dlq` (so they can't drift). **Default stays 30 days** (the pre-change
+  value), so an upgrade that doesn't set the override keeps the existing recovery window and
+  never prunes older DLQ entries on first deploy; set the env to a smaller value (e.g. `7`) to
+  opt into a shorter window. Doc updated.
+- **Fix (review round, PR #621, 4 reviewers)** — three blocking corrections folded in:
+  (1) a `route_missing` event with a non-positive `ActedAt` now **dead-letters immediately**
+  instead of deferring forever (the wait is bounded by elapsed-since-`ActedAt`, so an unset
+  timestamp had nothing to measure against and re-deferred every 5s indefinitely);
+  (2) the DLQ-retention default was kept at **30 days** rather than lowered to 7 (the running
+  server's lazy prune would otherwise silently delete 8–30-day-old DLQ entries on first deploy);
+  (3) the `card-action-dlq` CLI's read-only `depth` no longer prunes (new `DepthsNoPrune`), so
+  inspecting the DLQ can't delete recoverable entries. The metric-noise nit (per-re-check
+  `observeError`) was left as documented-intentional.
+- **Fix (review round 2, PR #621 re-reviews)** — two further blocking corrections folded in:
+  (4) the bounded route-missing window is now anchored on the **first observed miss** (a durable
+  per-event `route_missing_since` marker via `RouteMissingSeenAt`), not on `Event.ActedAt` — an
+  event that dwelt in the durable queue past the window before its first dispatch (long
+  restart/outage/backlog) now still defers on its first transient miss instead of dead-lettering
+  immediately; this supersedes round 1's `ActedAt<=0` special-case (the marker is always a real
+  stamp, so that edge is gone by construction), and `ReplayDLQ` clears the marker so a replayed
+  event starts fresh; (5) the `card-action-dlq replay` path is now **non-destructive** — an entry
+  past the CLI's resolved retention is refused without being deleted, so the running server stays
+  the single pruning authority (a shorter CLI window can no longer silently destroy a
+  server-retained entry).
+- **Fix (review round 3, PR #621 re-review)** — the round-2 first-miss marker
+  (`route_missing_since`) leaked: it is one shared Redis hash with a whole-hash TTL (no per-field
+  expiry), refreshed on every miss, so under sustained route-missing traffic a field per COMPLETED
+  event accumulated unbounded (it was cleared only on replay, not on delivery or dead-letter).
+  Fixed by `HDEL`-ing the marker on every exit transition (`ackScript`, `nackScript`
+  requeue+dead-letter, and the existing `replayDLQScript`); a new Redis-backed lifecycle test proves
+  the field is gone after Ack and after terminal dead-letter. Also folded in two doc-drift fixes (a
+  stale CLI "refuses (and prunes)" comment; the pending learning's `ActedAt`-based deadline →
+  first-observed-miss, plus a new marker-lifecycle-vs-whole-key-TTL point).
+
 ## 2026-07-20 (github-webhook-parity)
 
 - **Feature** — GitHub `pull_request`/`issues` InteractiveCards gained
